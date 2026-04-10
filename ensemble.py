@@ -291,11 +291,11 @@ class EnsembleEngine:
     # Ordered list of Gemini models to try — first success wins.
     # Google frequently deprecates specific versions; this auto-advances.
     _GEMINI_FALLBACKS = [
-        "gemini-2.0-flash-001",
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-2.5-flash",
-        "gemini-1.5-flash",
+        "gemini-2.5-flash",          # primary working model (may be busy)
+        "gemini-1.5-flash",          # stable fallback, always available
+        "gemini-2.0-flash",          # try stable name before versioned
+        "gemini-2.0-flash-001",      # versioned (404 in some regions)
+        "gemini-2.0-flash-lite",     # lite variant
     ]
 
     async def _call_gemini(self, context: str, symbol: str = "BTC") -> ModelResult:

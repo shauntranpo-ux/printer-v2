@@ -423,6 +423,21 @@ class TradingBot:
         ask_vol   = sum(l["size"] for l in ob.get("yes_asks", []))
         imbalance = bid_vol / (ask_vol + 1e-9)
 
+        # Refresh market ask prices from the live order book.
+        # The markets API often returns yes_ask/no_ask=0 when there are no
+        # resting limit orders; the order book has the real best ask.
+        yes_asks = ob.get("yes_asks", [])
+        no_asks  = ob.get("no_asks",  [])
+        if yes_asks:
+            market["yes_ask"] = yes_asks[0]["price"]
+        if no_asks:
+            market["no_ask"] = no_asks[0]["price"]
+
+        # Skip entirely if there is no ask liquidity on either side
+        if not yes_asks and not no_asks:
+            log.debug("No ask liquidity for %s — skipping", ticker)
+            return
+
         try:
             close_dt = datetime.fromisoformat(
                 market.get("close_time", "").replace("Z", "+00:00")
