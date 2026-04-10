@@ -55,7 +55,19 @@ class Settings(BaseSettings):
         description="Coinbase Advanced Trade WebSocket URL",
     )
     BTC_PRODUCT_ID: str = Field(default="BTC-USD", description="Coinbase product ID for BTC")
-    PRICE_STALENESS_SECONDS: int = Field(default=30, description="Max seconds before BTC price is considered stale")
+    PRICE_STALENESS_SECONDS: int = Field(default=30, description="Max seconds before price is considered stale")
+
+    # ------------------------------------------------------------------
+    # Multi-asset trading
+    # ------------------------------------------------------------------
+    SUPPORTED_ASSETS: str = Field(
+        default="BTC,ETH,SOL,XRP,DOGE,HYPE,BNB",
+        description="Comma-separated crypto assets to trade 15m Kalshi markets for",
+    )
+
+    @property
+    def supported_assets_list(self) -> list[str]:
+        return [a.strip().upper() for a in self.SUPPORTED_ASSETS.split(",") if a.strip()]
 
     # ------------------------------------------------------------------
     # AI Models

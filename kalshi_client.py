@@ -225,6 +225,67 @@ class KalshiClient:
     # Markets
     # ------------------------------------------------------------------
 
+    # Kalshi series ticker prefixes per asset  (tries 15M variant first, then base)
+    _SERIES_MAP: dict[str, list[str]] = {
+        "BTC":  ["KXBTC15M", "KXBTC"],
+        "ETH":  ["KXETH15M", "KXETH"],
+        "SOL":  ["KXSOL15M", "KXSOL"],
+        "XRP":  ["KXXRP15M", "KXXRP"],
+        "DOGE": ["KXDOGE15M", "KXDOGE"],
+        "HYPE": ["KXHYPE15M", "KXHYPE"],
+        "BNB":  ["KXBNB15M",  "KXBNB"],
+    }
+
+    async def get_crypto_15m_markets(self, asset: str = "BTC") -> list[dict]:
+        """
+        Return open 15-minute markets for any supported crypto asset.
+        Mirrors get_btc_15m_markets() but is asset-agnostic.
+        """
+        asset    = asset.upper()
+        series_list = self._SERIES_MAP.get(asset, [f"KX{asset}15M", f"KX{asset}"])
+
+        now        = int(time.time())
+        window_end = now + 30 * 60
+
+        def _params(series: str) -> dict:
+            return {
+                "series_ticker": series,
+                "status":        "open",
+                "min_close_ts":  now,
+                "max_close_ts":  window_end,
+                "limit":         20,
+            }
+
+        markets: list[dict] = []
+        for series in series_list:
+            data    = await self._get("/markets", _params(series))
+            markets = data.get("markets", [])
+            if markets:
+                break
+
+        if not markets:
+            log.debug("No open %s 15m markets found", asset)
+            return []
+
+        markets.sort(key=lambda m: m.get("close_time", ""))
+        result = []
+        for m in markets:
+            result.append({
+                "ticker":        m.get("ticker", ""),
+                "yes_ask":       m.get("yes_ask", 0),
+                "yes_bid":       m.get("yes_bid", 0),
+                "no_ask":        m.get("no_ask", 0),
+                "no_bid":        m.get("no_bid", 0),
+                "volume":        m.get("volume", 0),
+                "open_interest": m.get("open_interest", 0),
+                "close_time":    m.get("close_time", ""),
+                "strike_price":  m.get("floor_strike") or m.get("cap_strike") or 0,
+                "asset":         asset,
+            })
+
+        log.debug("Found %d open %s markets", len(result), asset)
+        return result
+
     async def get_btc_15m_markets(self) -> list[dict]:
         """
         Return open BTC markets expiring within the next 20 minutes.

@@ -31,29 +31,33 @@ _CALL_TIMEOUT = 30.0   # seconds before a model is marked as failed
 
 
 # ---------------------------------------------------------------------------
-# System prompts (exact as specified)
+# System prompts  (asset symbol is injected at call time)
 # ---------------------------------------------------------------------------
 
-_CLAUDE_SYSTEM = (
-    "You are a short-term BTC price analyst. "
-    "Analyze momentum and order flow to predict 15-minute price direction. "
-    "Respond in JSON only."
-)
+def _claude_system(symbol: str) -> str:
+    return (
+        f"You are a short-term {symbol} price analyst. "
+        f"Analyze momentum and order flow to predict 15-minute price direction. "
+        "Respond in JSON only."
+    )
 
-_GPT_SYSTEM = (
-    "You are a bullish BTC analyst. Look for reasons price will move up. "
-    "Be objective but lean toward identifying upward catalysts. JSON only."
-)
+def _gpt_system(symbol: str) -> str:
+    return (
+        f"You are a bullish {symbol} analyst. Look for reasons price will move up. "
+        "Be objective but lean toward identifying upward catalysts. JSON only."
+    )
 
-_GEMINI_SYSTEM = (
-    "You are a bearish BTC analyst. Look for reasons price will drop. "
-    "Be objective but identify downward risks. JSON only."
-)
+def _gemini_system(symbol: str) -> str:
+    return (
+        f"You are a bearish {symbol} analyst. Look for reasons price will drop. "
+        "Be objective but identify downward risks. JSON only."
+    )
 
-_DEEPSEEK_SYSTEM = (
-    "You are a risk manager. Assess the probability of this BTC prediction "
-    "market resolving YES or NO. Focus on risk of being wrong. JSON only."
-)
+def _deepseek_system(symbol: str) -> str:
+    return (
+        f"You are a risk manager. Assess the probability of this {symbol} prediction "
+        "market resolving YES or NO. Focus on risk of being wrong. JSON only."
+    )
 
 _JSON_SCHEMA_HINT = (
     '\n\nRespond with exactly this JSON structure and nothing else:\n'
@@ -68,10 +72,11 @@ _JSON_SCHEMA_HINT = (
 
 @dataclass
 class BtcData:
-    price:     float          # current BTC/USD price
-    momentum:  float          # -1.0 to +1.0 from CoinbaseFeed.get_momentum()
+    price:     float          # current asset price in USD
+    momentum:  float          # -1.0 to +1.0 from CoinbaseFeed.get_momentum_for()
     candles:   list[Candle]   # last 4 completed 15m candles
     imbalance: float          # bid_vol / ask_vol from order book
+    symbol:    str = "BTC"    # asset symbol — used in AI prompts
 
 
 @dataclass
@@ -194,12 +199,13 @@ class EnsembleEngine:
         now_utc = datetime.now(timezone.utc)
         minutes_left = max(0, int((market.close_time - now_utc).total_seconds() / 60))
 
+        sym = btc_data.symbol
         return (
-            f"Current BTC price: ${btc_data.price:,.2f}\n"
+            f"Current {sym} price: ${btc_data.price:,.4f}\n"
             f"15m momentum score: {btc_data.momentum:.3f} (-1 to +1)\n"
             f"Last 4 candles OHLCV:\n{candles_str}\n"
             f"Order book imbalance: {btc_data.imbalance:.3f} (bid volume / ask volume)\n"
-            f"Market: Will BTC be above ${market.strike_price:,.2f} "
+            f"Market: Will {sym} be above ${market.strike_price:,.4f} "
             f"at {market.close_time.strftime('%H:%M UTC')}?\n"
             f"Current market price: YES at {market.yes_price}¢ / NO at {market.no_price}¢\n"
             f"Time to expiry: {minutes_left} minutes"
@@ -255,19 +261,19 @@ class EnsembleEngine:
     # Individual model calls
     # ------------------------------------------------------------------
 
-    async def _call_claude(self, context: str) -> ModelResult:
+    async def _call_claude(self, context: str, symbol: str = "BTC") -> ModelResult:
         t0 = time.monotonic()
         msg = await self._anthropic_client.messages.create(  # type: ignore[union-attr]
             model      = settings.CLAUDE_MODEL,
             max_tokens = 256,
             temperature= 0.1,
-            system     = _CLAUDE_SYSTEM,
+            system     = _claude_system(symbol),
             messages   = [{"role": "user", "content": context}],
         )
         text = msg.content[0].text
         return self._parse_result(text, "claude", (time.monotonic() - t0) * 1000)
 
-    async def _call_gpt(self, context: str) -> ModelResult:
+    async def _call_gpt(self, context: str, symbol: str = "BTC") -> ModelResult:
         t0 = time.monotonic()
         resp = await self._openai_client.chat.completions.create(  # type: ignore[union-attr]
             model           = settings.GPT_MODEL,
@@ -275,7 +281,7 @@ class EnsembleEngine:
             max_tokens      = 256,
             response_format = {"type": "json_object"},
             messages        = [
-                {"role": "system", "content": _GPT_SYSTEM},
+                {"role": "system", "content": _gpt_system(symbol)},
                 {"role": "user",   "content": context},
             ],
         )
@@ -292,7 +298,7 @@ class EnsembleEngine:
         "gemini-1.5-flash",
     ]
 
-    async def _call_gemini(self, context: str) -> ModelResult:
+    async def _call_gemini(self, context: str, symbol: str = "BTC") -> ModelResult:
         t0 = time.monotonic()
 
         # Build candidate list: configured model first, then the fallbacks
@@ -307,7 +313,7 @@ class EnsembleEngine:
                     model=model,
                     contents=context,
                     config=types.GenerateContentConfig(
-                        system_instruction=_GEMINI_SYSTEM,
+                        system_instruction=_gemini_system(symbol),
                         temperature=0.1,
                     ),
                 )
@@ -331,14 +337,14 @@ class EnsembleEngine:
 
         raise last_exc
 
-    async def _call_deepseek(self, context: str) -> ModelResult:
+    async def _call_deepseek(self, context: str, symbol: str = "BTC") -> ModelResult:
         t0 = time.monotonic()
         resp = await self._deepseek_client.chat.completions.create(  # type: ignore[union-attr]
             model      = settings.DEEPSEEK_MODEL,
             temperature= 0.1,
             max_tokens = 512,
             messages   = [
-                {"role": "system", "content": _DEEPSEEK_SYSTEM},
+                {"role": "system", "content": _deepseek_system(symbol)},
                 {"role": "user",   "content": context},
             ],
         )
@@ -386,20 +392,21 @@ class EnsembleEngine:
         self._init_clients()
         context = self._build_context(btc_data, market)
 
+        symbol = btc_data.symbol
         log.info(
-            "Ensemble debate starting — BTC=$%.2f momentum=%.3f market=%s "
+            "Ensemble debate starting — %s=$%.4f momentum=%.3f market=%s "
             "exp=%s YES=%d¢/NO=%d¢",
-            btc_data.price, btc_data.momentum, market.ticker,
+            symbol, btc_data.price, btc_data.momentum, market.ticker,
             market.close_time.strftime("%H:%M"),
             market.yes_price, market.no_price,
         )
 
         # Step 1 — run all 4 models in parallel
         claude_r, gpt_r, gemini_r, deepseek_r = await asyncio.gather(
-            self._safe_call(self._call_claude(context),   "claude"),
-            self._safe_call(self._call_gpt(context),     "gpt"),
-            self._safe_call(self._call_gemini(context),  "gemini"),
-            self._safe_call(self._call_deepseek(context),"deepseek"),
+            self._safe_call(self._call_claude(context, symbol),   "claude"),
+            self._safe_call(self._call_gpt(context, symbol),     "gpt"),
+            self._safe_call(self._call_gemini(context, symbol),  "gemini"),
+            self._safe_call(self._call_deepseek(context, symbol),"deepseek"),
         )
 
         # Step 2 — require minimum 2 successful models

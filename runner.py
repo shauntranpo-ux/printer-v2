@@ -258,15 +258,13 @@ class TradingBot:
             log.info("Max positions open — skipping entry scan")
             return
 
-        # Step 3 — BTC data
+        # Step 3 — verify at least BTC feed is alive
         if self.feed.is_stale():
             log.warning("BTC price data stale — skipping cycle")
             return
 
         btc_price = self.feed.get_current_price()
-        momentum  = self.feed.get_momentum()
-        ohlcv     = self.feed.get_ohlcv(4)
-        log.info("BTC=$%.2f  momentum=%.3f  candles=%d", btc_price, momentum, len(ohlcv))
+        log.info("BTC=$%.2f", btc_price)
 
         # Balance — fetch once per cycle, persist to DB for dashboard
         balance = None
@@ -276,76 +274,20 @@ class TradingBot:
         except Exception as exc:
             log.warning("Balance fetch failed: %s", exc)
 
-        # Step 4 — markets
-        try:
-            markets = await self.kalshi.get_btc_15m_markets()
-        except KalshiAuthError as exc:
-            log.error("Kalshi auth error: %s", exc)
-            await self.telegram.send_error(str(exc), "kalshi_auth")
-            return
-        except Exception as exc:
-            log.error("Failed to fetch Kalshi markets: %s", exc)
-            return
-
         print(f"BTC Price: ${btc_price:,.2f}")
         print(f"Balance: ${balance:.2f}" if balance is not None else "Balance: unavailable")
         print(f"Open positions: {len(open_trades)}")
-        print(f"Markets found: {len(markets)}")
 
-        if not markets:
-            log.info("No active 15m BTC markets found")
-            return
-
-        # Step 5 — sort by volume, cap at 3
-        markets = sorted(markets, key=lambda m: m.get("volume", 0), reverse=True)[:_MAX_MARKETS]
-        log.info("Evaluating %d market(s): %s", len(markets), [m["ticker"] for m in markets])
-
-        # Persist market list for dashboard cycle-watch box
-        try:
-            await self.db.set_market_watch({
-                "cycle_ts":   cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "btc_price":  btc_price,
-                "markets": [
-                    {
-                        "ticker":     m["ticker"],
-                        "strike":     float(m.get("strike_price") or 0),
-                        "close_time": m.get("close_time", ""),
-                        "yes_ask":    m.get("yes_ask", 0),
-                        "no_ask":     m.get("no_ask", 0),
-                        "volume":     m.get("volume", 0),
-                    }
-                    for m in markets
-                ],
-                "last_signal": None,
-            })
-        except Exception as exc:
-            log.debug("market_watch store failed: %s", exc)
-
-        # Quick-lookup set of tickers we already hold
-        open_tickers = {t.market_ticker for t in open_trades}
-
-        # Step 6 — waited markets get re-evaluated FIRST, then new markets
-        market_by_ticker = {m["ticker"]: m for m in markets}
-        waited_tickers   = set(self._wait_list.keys())
-
-        # Clear waited tickers that no longer appear in the market list (expired)
-        for ticker in waited_tickers - market_by_ticker.keys():
-            log.info("Waited market %s no longer available — clearing", ticker)
-            self._wait_list.pop(ticker, None)
-
-        # ── Time-based size multiplier (Upgrade 7) ───────────────────────────
+        # ── Time-based size multiplier ────────────────────────────────────────
         hour = cycle_start.hour
         if settings.RESPECT_TIME_FILTERS:
-            if 13 <= hour < 21:          # US hours — full size
-                time_mult = 1.0
-            elif 0 <= hour < 4:          # Asia hours — 75%
-                time_mult = 0.75
-            else:                        # dead zone — 50%
-                time_mult = 0.50
+            if 13 <= hour < 21:   time_mult = 1.0
+            elif 0 <= hour < 4:   time_mult = 0.75
+            else:                 time_mult = 0.50
         else:
             time_mult = 1.0
 
-        # ── Streak soft multiplier (Upgrade 6) ────────────────────────────────
+        # ── Streak soft multiplier ────────────────────────────────────────────
         recent_losses = sum(1 for w in self._recent_results[-3:] if not w)
         if recent_losses >= 3:
             streak_mult = 0.25
@@ -355,25 +297,100 @@ class TradingBot:
 
         size_mult = time_mult * streak_mult
 
-        # Re-evaluate waited markets
-        for ticker in list(waited_tickers & market_by_ticker.keys()):
-            self._wait_list.pop(ticker, None)
-            if ticker in open_tickers:
-                continue
-            log.info("Re-evaluating waited market %s", ticker)
-            await self._evaluate_market(
-                market_by_ticker[ticker], btc_price, momentum, ohlcv,
-                open_tickers, size_mult,
-            )
+        # Quick-lookup set of tickers we already hold
+        open_tickers = {t.market_ticker for t in open_trades}
 
-        # Evaluate remaining new markets
-        for market in markets:
-            ticker = market["ticker"]
-            if ticker in open_tickers or ticker in waited_tickers:
+        # Step 4/5/6 — scan EVERY supported asset, evaluate its markets
+        supported_assets: list[str] = settings.supported_assets_list
+        all_markets_found: list[dict] = []
+
+        for asset in supported_assets:
+            # Skip assets whose feed is stale (but don't abort the whole cycle)
+            if self.feed.is_stale_for(asset):
+                log.debug("%s price stale — skipping this asset", asset)
                 continue
-            await self._evaluate_market(
-                market, btc_price, momentum, ohlcv, open_tickers, size_mult,
+
+            asset_price    = self.feed.get_price_for(asset)
+            asset_momentum = self.feed.get_momentum_for(asset)
+            asset_ohlcv    = self.feed.get_ohlcv_for(asset, 4)
+
+            if asset_price <= 0:
+                log.debug("%s price is 0 — skipping", asset)
+                continue
+
+            try:
+                markets = await self.kalshi.get_crypto_15m_markets(asset)
+            except KalshiAuthError as exc:
+                log.error("Kalshi auth error: %s", exc)
+                await self.telegram.send_error(str(exc), "kalshi_auth")
+                return
+            except Exception as exc:
+                log.warning("Failed to fetch %s markets: %s", asset, exc)
+                continue
+
+            if not markets:
+                log.debug("No active 15m %s markets found", asset)
+                continue
+
+            markets = sorted(markets, key=lambda m: m.get("volume", 0), reverse=True)[:_MAX_MARKETS]
+            log.info(
+                "%s=$%.4f  momentum=%.3f  markets=%d  [%s]",
+                asset, asset_price, asset_momentum, len(markets),
+                ", ".join(m["ticker"] for m in markets),
             )
+            all_markets_found.extend(markets)
+
+            # Re-evaluate waited markets for this asset first
+            market_by_ticker = {m["ticker"]: m for m in markets}
+            waited_tickers   = set(self._wait_list.keys())
+
+            for ticker in waited_tickers - market_by_ticker.keys():
+                log.debug("Waited market %s expired — clearing", ticker)
+                self._wait_list.pop(ticker, None)
+
+            for ticker in list(waited_tickers & market_by_ticker.keys()):
+                self._wait_list.pop(ticker, None)
+                if ticker in open_tickers:
+                    continue
+                log.info("Re-evaluating waited market %s", ticker)
+                await self._evaluate_market(
+                    market_by_ticker[ticker], asset_price, asset_momentum,
+                    asset_ohlcv, open_tickers, size_mult, asset=asset,
+                )
+
+            # Evaluate remaining new markets for this asset
+            for market in markets:
+                ticker = market["ticker"]
+                if ticker in open_tickers or ticker in self._wait_list:
+                    continue
+                await self._evaluate_market(
+                    market, asset_price, asset_momentum, asset_ohlcv,
+                    open_tickers, size_mult, asset=asset,
+                )
+
+        print(f"Total markets scanned: {len(all_markets_found)} across {len(supported_assets)} assets")
+
+        # Persist market watch for dashboard (BTC-centric summary + all markets)
+        try:
+            await self.db.set_market_watch({
+                "cycle_ts":   cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "btc_price":  btc_price,
+                "markets": [
+                    {
+                        "ticker":     m["ticker"],
+                        "asset":      m.get("asset", "BTC"),
+                        "strike":     float(m.get("strike_price") or 0),
+                        "close_time": m.get("close_time", ""),
+                        "yes_ask":    m.get("yes_ask", 0),
+                        "no_ask":     m.get("no_ask", 0),
+                        "volume":     m.get("volume", 0),
+                    }
+                    for m in all_markets_found
+                ],
+                "last_signal": None,
+            })
+        except Exception as exc:
+            log.debug("market_watch store failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Per-market evaluation
@@ -387,6 +404,7 @@ class TradingBot:
         ohlcv:        list,
         open_tickers: set[str],
         size_mult:    float = 1.0,
+        asset:        str   = "BTC",
     ) -> None:
         ticker = market["ticker"]
 
@@ -417,6 +435,7 @@ class TradingBot:
             momentum  = momentum,
             candles   = ohlcv,
             imbalance = imbalance,
+            symbol    = asset,
         )
         market_obj = Market(
             ticker       = ticker,
@@ -521,7 +540,7 @@ class TradingBot:
             return
 
         # --- 5 risk gates ---
-        gate_result = await self.risk.check_all(market, result, settings.MAX_BET_SIZE)
+        gate_result = await self.risk.check_all(market, result, settings.MAX_BET_SIZE, asset=asset)
 
         # Checks 5-6: from gate results (edge/liquidity removed; skip internal confidence gate)
         for gate_key, chk_id, chk_label in [

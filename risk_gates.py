@@ -52,6 +52,7 @@ class RiskGates:
         market:          dict,
         ensemble_result,
         bet_size:        float,    # dollars
+        asset:           str = "BTC",
     ) -> GateResult:
         """
         Run all 5 gates in order. Short-circuits on the first failure.
@@ -60,7 +61,7 @@ class RiskGates:
         gates = [
             ("drawdown",   self._gate_drawdown()),
             ("confidence", self._gate_confidence(ensemble_result)),
-            ("staleness",  self._gate_staleness()),
+            ("staleness",  self._gate_staleness(asset)),
         ]
 
         details: dict = {}
@@ -254,16 +255,22 @@ class RiskGates:
     # Gate 5 — Staleness
     # ------------------------------------------------------------------
 
-    async def _gate_staleness(self) -> tuple[bool, str]:
+    async def _gate_staleness(self, asset: str = "BTC") -> tuple[bool, str]:
         """
-        BTC price data must be fresh (< PRICE_STALENESS_SECONDS old).
-        Delegates to CoinbaseFeed.is_stale() which already checks the threshold.
+        Asset price data must be fresh (< PRICE_STALENESS_SECONDS old).
+        Uses per-asset staleness check when available.
         """
-        stale = self._feed.is_stale()
+        # Use per-asset method if available (multi-asset feed), else fall back
+        if hasattr(self._feed, "is_stale_for"):
+            stale = self._feed.is_stale_for(asset)
+            state = getattr(self._feed, "_state", {}).get(asset)
+            last  = state.last_update if state else None
+        else:
+            stale = self._feed.is_stale()
+            last  = self._feed.last_update
 
-        last = self._feed.last_update
         if last is not None:
-            age = (datetime.now(timezone.utc) - last).total_seconds()
+            age     = (datetime.now(timezone.utc) - last).total_seconds()
             age_str = f"{age:.0f}s"
         else:
             age_str = "never"
@@ -271,10 +278,10 @@ class RiskGates:
         max_age = settings.PRICE_STALENESS_SECONDS
 
         if stale:
-            reason = f"Data age: {age_str} vs max {max_age}s — price feed stale"
+            reason = f"{asset} data age: {age_str} vs max {max_age}s — feed stale"
             log.info("Gate [staleness]: FAIL — %s", reason)
             return False, reason
 
-        reason = f"Data age: {age_str} vs max {max_age}s"
+        reason = f"{asset} data age: {age_str} vs max {max_age}s"
         log.info("Gate [staleness]: PASS — %s", reason)
         return True, reason
