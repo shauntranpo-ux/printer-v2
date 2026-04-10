@@ -73,18 +73,19 @@ def index():
 @_require_auth
 def api_status():
     try:
-        today = _run(_db.get_today_pnl())
+        today = _run(_db.get_daily_stats())
         open_trades = _run(_db.get_open_trades())
         return jsonify({
             "status": "running",
             "env": settings.env,
             "today": {
-                "date": today.day,
-                "trades": today.trades_count,
-                "win_rate": (today.winning_trades / today.trades_count
-                             if today.trades_count else 0),
-                "net_pnl": today.net_pnl,
-                "ending_balance": today.ending_balance,
+                "date": today.date,
+                "trades": today.total_trades,
+                "win_rate": today.win_rate,
+                "net_pnl": today.total_pnl,
+                "daily_loss_used": today.daily_loss_used,
+                "sharpe": today.sharpe_ratio,
+                "max_drawdown": today.max_drawdown,
             },
             "open_positions": len(open_trades),
         })
@@ -97,7 +98,7 @@ def api_status():
 def api_trades():
     try:
         n = min(int(request.args.get("n", 20)), 100)
-        trades = _run(_db.get_recent_trades(n))
+        trades = _run(_db.get_recent_trades(limit=n))
         return jsonify([
             {
                 "id": t.id,
@@ -105,11 +106,14 @@ def api_trades():
                 "direction": t.direction,
                 "contracts": t.contracts,
                 "entry_price": t.entry_price,
-                "close_price": t.close_price,
-                "dollar_size": t.dollar_size,
-                "pnl": t.pnl,
+                "exit_price": t.exit_price,
+                "size_dollars": t.size_dollars,
+                "pnl": t.pnl_dollars,
+                "edge": t.edge,
+                "confidence": t.ensemble_confidence,
                 "status": t.status,
-                "opened_at": t.opened_at,
+                "exit_reason": t.exit_reason,
+                "timestamp": t.timestamp,
                 "closed_at": t.closed_at,
             }
             for t in trades
@@ -179,7 +183,7 @@ DASHBOARD_HTML = """
   <div class="card">
     <div class="card-label" style="margin-bottom:12px">Recent Trades</div>
     <table>
-      <thead><tr><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Status</th><th>Opened</th></tr></thead>
+      <thead><tr><th>Market</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Conf</th><th>Status</th><th>Reason</th><th>Time</th></tr></thead>
       <tbody id="trades-body"></tbody>
     </table>
   </div>
@@ -202,6 +206,8 @@ DASHBOARD_HTML = """
 
       const t = status.today || {};
       const wr = t.win_rate != null ? (t.win_rate * 100).toFixed(0) + '%' : '—';
+      const sharpe = t.sharpe != null ? t.sharpe.toFixed(2) : '—';
+      const dd = t.max_drawdown != null ? fmt(t.max_drawdown) : '—';
       const pnlClass = colorClass(t.net_pnl);
       document.getElementById('stats').innerHTML = `
         <div class="card"><div class="card-label">Daily P&L</div>
@@ -212,24 +218,30 @@ DASHBOARD_HTML = """
           <div class="card-value neutral">${wr}</div></div>
         <div class="card"><div class="card-label">Open Positions</div>
           <div class="card-value neutral">${status.open_positions ?? 0}</div></div>
-        <div class="card"><div class="card-label">Balance</div>
-          <div class="card-value neutral">${fmt(t.ending_balance)}</div></div>
+        <div class="card"><div class="card-label">Sharpe</div>
+          <div class="card-value neutral">${sharpe}</div></div>
+        <div class="card"><div class="card-label">Max Drawdown</div>
+          <div class="card-value ${t.max_drawdown > 0 ? 'neg' : 'neutral'}">${dd}</div></div>
       `;
 
       const tbody = document.getElementById('trades-body');
       tbody.innerHTML = (trades || []).map(t => {
         const pnl = t.pnl != null ? `<span class="${colorClass(t.pnl)}">${fmt(t.pnl)}</span>` : '—';
-        const badge = `<span class="badge badge-${t.status}">${t.status}</span>`;
-        const opened = t.opened_at ? t.opened_at.replace('T', ' ').slice(0, 16) : '—';
+        const badgeCls = t.status === 'open' ? 'open' : t.status === 'closed' ? 'closed' : 'error';
+        const badge = `<span class="badge badge-${badgeCls}">${t.status}</span>`;
+        const ts = t.timestamp ? t.timestamp.replace('T', ' ').slice(0, 16) : '—';
+        const conf = t.confidence != null ? (t.confidence * 100).toFixed(0) + '%' : '—';
         return `<tr>
           <td>${t.ticker}</td>
-          <td>${t.direction.toUpperCase()}</td>
+          <td>${t.direction}</td>
           <td>${t.contracts}</td>
           <td>${t.entry_price}¢</td>
-          <td>${t.close_price != null ? t.close_price + '¢' : '—'}</td>
+          <td>${t.exit_price != null ? t.exit_price + '¢' : '—'}</td>
           <td>${pnl}</td>
+          <td>${conf}</td>
           <td>${badge}</td>
-          <td>${opened}</td>
+          <td>${t.exit_reason || '—'}</td>
+          <td>${ts}</td>
         </tr>`;
       }).join('');
     }

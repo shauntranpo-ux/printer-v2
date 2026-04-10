@@ -105,12 +105,14 @@ class BotRunner:
         self._starting_balance_cents = balance.available_balance
         log.info("Kalshi balance: $%.2f", balance.available_balance / 100)
 
+        await self.db.log_event("startup", f"printer-v2 started [{settings.env}] BTC=${btc_price:,.2f}")
         await self.telegram.alert_startup(settings.env, btc_price)
         self._running = True
 
     async def stop(self, reason: str = "clean exit") -> None:
         log.info("Shutting down: %s", reason)
         self._running = False
+        await self.db.log_event("shutdown", reason)
         await self.telegram.alert_shutdown(reason)
         await self.feed.stop()
         await self.telegram.stop()
@@ -168,12 +170,16 @@ class BotRunner:
         signal = self.ensemble.predict(candles_15m)
         log.info("Signal: %s  conf=%.3f  prob=%.3f", signal.direction, signal.confidence, signal.raw_prob)
 
-        # 3. Log signal
-        signal_id = await self.db.log_signal(
-            direction=signal.direction,
+        # 3. Log ensemble decision
+        await self.db.log_ensemble(
+            ticker,
+            consensus_prob=signal.raw_prob,
+            model_spread=max(signal.models, key=lambda m: m.prob).prob
+                         - min(signal.models, key=lambda m: m.prob).prob
+                         if signal.models else None,
             confidence=signal.confidence,
-            weights=signal.weights,
-            btc_price=self.feed.get_price(),
+            action="TRADE" if signal.direction in ("yes", "no") else "SKIP",
+            skip_reason=None if signal.direction in ("yes", "no") else "flat_signal",
         )
 
         # 4. Build bot state for risk gates
@@ -189,12 +195,12 @@ class BotRunner:
         open_exposure_cents = sum(
             int(t.entry_price * t.contracts) for t in open_trades
         )
-        today_pnl = await self.db.get_today_pnl()
+        today_stats = await self.db.get_daily_stats()
 
         state = BotState(
             balance_cents=balance.available_balance,
             starting_balance_cents=self._starting_balance_cents,
-            daily_pnl_cents=int(today_pnl.net_pnl * 100),
+            daily_pnl_cents=int(today_stats.total_pnl * 100),
             open_exposure_cents=open_exposure_cents,
             last_trade_ts=self._last_trade_ts,
             candles_1h=self.feed.get_candles_1h(),
@@ -202,17 +208,14 @@ class BotRunner:
 
         # 5. Risk gates
         gate_result = self.risk.check_all(signal, state)
-        await self.db.log_gate_event(
-            gate_num=gate_result.failed_gate or 0,
-            gate_name=gate_result.gate_name or "all",
-            passed=gate_result.passed,
-            reason=gate_result.reason,
-            signal_id=signal_id,
-        )
+        if not gate_result.passed:
+            await self.db.log_event(
+                "error",
+                f"Gate {gate_result.failed_gate} [{gate_result.gate_name}] blocked: {gate_result.reason}",
+            )
 
         if not gate_result.passed:
             if gate_result.failed_gate in (1, 2):
-                # Critical gates — notify
                 await self.telegram.alert_gate_blocked(
                     gate_result.failed_gate, gate_result.gate_name, gate_result.reason
                 )
@@ -248,13 +251,17 @@ class BotRunner:
 
         # 8. Log trade + alert
         trade_id = await self.db.log_trade(
-            kalshi_order_id=order.order_id,
             market_ticker=ticker,
-            direction=order_params.side,
-            contracts=order_params.contracts,
+            direction=order_params.side.upper(),
             entry_price=order_params.price_cents,
-            dollar_size=order_params.dollar_size,
-            signal_id=signal_id,
+            size_dollars=order_params.dollar_size,
+            contracts=order_params.contracts,
+            edge=signal.confidence,
+            ensemble_confidence=signal.confidence,
+            model_spread=max(signal.models, key=lambda m: m.prob).prob
+                         - min(signal.models, key=lambda m: m.prob).prob
+                         if signal.models else None,
+            btc_price_at_entry=self.feed.get_price(),
         )
         self._last_trade_ts = time.time()
 
@@ -301,27 +308,31 @@ class BotRunner:
                     continue
 
                 current_price = (
-                    ob.best_yes_ask() if trade.direction == "yes" else ob.best_no_ask()
+                    ob.best_yes_ask() if trade.direction == "YES" else ob.best_no_ask()
                 ) or trade.entry_price
 
-                tp = trade.entry_price * 1.5   # simplified: +50% on entry price
-                sl = trade.entry_price * 0.5   # simplified: -50% of entry price
+                tp = trade.entry_price * 1.5
+                sl = trade.entry_price * (1 - settings.STOP_LOSS_PCT)
 
-                should_close = (
-                    current_price >= tp or
-                    current_price <= sl or
-                    order.status == "filled"   # market already resolved
-                )
+                if current_price >= tp:
+                    exit_reason = "manual"   # TP hit
+                elif current_price <= sl:
+                    exit_reason = "stop_loss"
+                elif order.status == "filled":
+                    exit_reason = "expired"
+                else:
+                    exit_reason = None
 
-                if should_close:
+                if exit_reason:
                     pnl = (current_price - trade.entry_price) * trade.contracts / 100
                     await self.db.update_trade(
                         trade.id,
-                        close_price=current_price,
-                        pnl=pnl,
                         status="closed",
+                        exit_price=current_price,
+                        exit_reason=exit_reason,
+                        pnl_dollars=pnl,
                     )
-                    await self.db.upsert_daily_pnl()
+                    await self.db.update_daily_stats()
                     self.strategy.record_trade_outcome(
                         int(trade.entry_price), int(current_price), trade.contracts
                     )
@@ -334,11 +345,15 @@ class BotRunner:
                         exit_cents=int(current_price),
                         pnl=pnl,
                     )
-                    log.info("Trade %d closed  P&L=$%.2f", trade.id, pnl)
+                    log.info("Trade %d closed  reason=%s  P&L=$%.2f", trade.id, exit_reason, pnl)
 
             elif order.status == "canceled":
                 await self.db.update_trade(
-                    trade.id, close_price=trade.entry_price, pnl=0.0, status="cancelled"
+                    trade.id,
+                    status="expired",
+                    exit_price=trade.entry_price,
+                    exit_reason="expired",
+                    pnl_dollars=0.0,
                 )
 
 
