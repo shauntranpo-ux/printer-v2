@@ -469,6 +469,31 @@ _HTML = r"""<!DOCTYPE html>
                         -webkit-line-clamp:2;-webkit-box-orient:vertical}
   .model-card-null{opacity:.4;font-size:11px;color:var(--muted);margin-top:8px}
 
+  /* AI Consensus panel */
+  .consensus-panel{margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+  .consensus-title{font-size:10px;color:var(--muted);text-transform:uppercase;
+                   letter-spacing:1.2px;margin-bottom:10px}
+  .bot-vote-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px}
+  .bot-vote-card{background:var(--dim);border-radius:6px;padding:12px;border:2px solid transparent}
+  .bot-vote-card.vote-yes{border-color:#3fb95050}
+  .bot-vote-card.vote-no{border-color:#f8514950}
+  .bot-vote-card.vote-fail{opacity:.45}
+  .bot-vote-name{font-size:10px;color:var(--muted);text-transform:uppercase;
+                 letter-spacing:.8px;margin-bottom:6px}
+  .bot-vote-dir{font-size:1.4rem;font-weight:700;margin-bottom:2px;line-height:1}
+  .bot-vote-prob{font-size:.95rem;font-weight:600;margin-bottom:6px}
+  .bot-vote-reason{font-size:10px;color:var(--muted);line-height:1.4;
+                   overflow:hidden;display:-webkit-box;
+                   -webkit-line-clamp:3;-webkit-box-orient:vertical}
+  .consensus-banner{display:flex;align-items:center;justify-content:center;
+                    flex-wrap:wrap;gap:8px;padding:12px 16px;border-radius:8px;
+                    font-weight:700;font-size:.95rem;text-align:center}
+  .cbanner-yes{background:#3fb95018;border:1px solid #3fb95040;color:var(--green)}
+  .cbanner-no{background:#f8514918;border:1px solid #f8514940;color:var(--red)}
+  .cbanner-split{background:#d2992218;border:1px solid #d2992240;color:var(--yellow)}
+  .cbanner-sub{font-size:11px;font-weight:400;color:var(--muted)}
+  @media(max-width:600px){.bot-vote-cards{grid-template-columns:1fr 1fr}}
+
   /* Trade-entry checklist */
   .checklist{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;
              padding-top:10px;border-top:1px solid var(--border)}
@@ -760,8 +785,8 @@ function renderWatchSection(w) {
       ? 'BTC will be <b style="color:var(--red)">BELOW</b> strike at expiry'
       : '—';
 
-    // Per-model breakdown cards
-    let modelCardsHtml = '';
+    // AI Bot Votes + Consensus panel
+    let consensusHtml = '';
     if (s.models) {
       const mdefs = [
         {key:'claude',   label:'Claude'},
@@ -769,17 +794,64 @@ function renderWatchSection(w) {
         {key:'gemini',   label:'Gemini'},
         {key:'deepseek', label:'DeepSeek'},
       ];
-      modelCardsHtml = '<div class="model-cards">' + mdefs.map(({key, label}) => {
+
+      const voteCards = mdefs.map(({key, label}) => {
         const m = s.models[key];
-        if (!m) return `<div class="model-card"><div class="model-card-name">${label}</div><div class="model-card-null">FAILED</div></div>`;
-        const pCls = m.direction === 'YES' ? 'pos' : 'neg';
-        return `<div class="model-card">
-          <div class="model-card-name">${label}</div>
-          <div class="model-card-prob ${pCls}">${m.prob}%</div>
-          <div class="model-card-dir ${pCls}">${m.direction}</div>
-          <div class="model-card-reasoning">${m.reasoning || '—'}</div>
+        if (!m) return `<div class="bot-vote-card vote-fail">
+          <div class="bot-vote-name">${label}</div>
+          <div class="bot-vote-dir" style="color:var(--muted)">✗</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:4px">OFFLINE</div>
         </div>`;
-      }).join('') + '</div>';
+        const isYes = m.direction === 'YES';
+        const cls   = isYes ? 'vote-yes' : 'vote-no';
+        const arrow = isYes ? '▲' : '▼';
+        const col   = isYes ? 'var(--green)' : 'var(--red)';
+        const what  = isYes
+          ? `Looking for price to stay <b>ABOVE</b> strike`
+          : `Looking for price to fall <b>BELOW</b> strike`;
+        return `<div class="bot-vote-card ${cls}">
+          <div class="bot-vote-name">${label}</div>
+          <div class="bot-vote-dir" style="color:${col}">${arrow} ${m.direction}</div>
+          <div class="bot-vote-prob" style="color:${col}">${m.prob}%</div>
+          <div class="bot-vote-reason">${what}<br><span style="opacity:.7">${m.reasoning || ''}</span></div>
+        </div>`;
+      }).join('');
+
+      // Consensus calculation — only count working models
+      const working  = mdefs.map(d => s.models[d.key]).filter(Boolean);
+      const yesCount = working.filter(m => m.direction === 'YES').length;
+      const noCount  = working.filter(m => m.direction === 'NO').length;
+      const total    = working.length;
+      const allAgree = total > 0 && (yesCount === total || noCount === total);
+      const winner   = yesCount >= noCount ? 'YES' : 'NO';
+
+      let bannerHtml;
+      if (total === 0) {
+        bannerHtml = `<div class="consensus-banner cbanner-split">All models offline — no trade</div>`;
+      } else if (allAgree) {
+        const cls   = winner === 'YES' ? 'cbanner-yes' : 'cbanner-no';
+        const arrow = winner === 'YES' ? '▲' : '▼';
+        const what  = winner === 'YES' ? 'ABOVE strike at expiry' : 'BELOW strike at expiry';
+        bannerHtml = `<div class="consensus-banner ${cls}">
+          ${arrow}&nbsp;FULL CONSENSUS — BET&nbsp;<b>${winner}</b>
+          &nbsp;·&nbsp; ${total}/${total} bots agree
+          &nbsp;·&nbsp; all expect price to finish&nbsp;<b>${what}</b>
+          <span class="cbanner-sub">&nbsp;→ trade proceeds if risk gates pass</span>
+        </div>`;
+      } else {
+        const leadCount = Math.max(yesCount, noCount);
+        bannerHtml = `<div class="consensus-banner cbanner-split">
+          ~ SPLIT VOTE — ${yesCount} say YES &nbsp;·&nbsp; ${noCount} say NO
+          &nbsp;·&nbsp; leaning <b>${winner}</b> (${leadCount}/${total})
+          <span class="cbanner-sub">&nbsp;→ models disagree, no trade this cycle</span>
+        </div>`;
+      }
+
+      consensusHtml = `<div class="consensus-panel">
+        <div class="consensus-title">AI Bot Votes — What Each Model Is Watching</div>
+        <div class="bot-vote-cards">${voteCards}</div>
+        ${bannerHtml}
+      </div>`;
     }
 
     // Checklist
@@ -811,7 +883,7 @@ function renderWatchSection(w) {
         ${s.skip_reason ? '<span style="color:var(--yellow);font-size:10px">(' + s.skip_reason + ')</span>' : ''}
       </div>
       ${checklistHtml}
-      ${modelCardsHtml}`;
+      ${consensusHtml}`;
   }
 
   wrap.innerHTML = `
