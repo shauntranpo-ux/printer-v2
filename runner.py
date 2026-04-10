@@ -43,7 +43,7 @@ log = logging.getLogger("runner")
 
 _CYCLE_SECONDS  = 15 * 60     # 15-minute interval
 _CYCLE_BUFFER   = 10           # seconds after boundary before first tick
-_MAX_MARKETS    = 3            # top N markets evaluated per cycle
+_MAX_MARKETS    = 10           # top N markets evaluated per cycle
 _STOP_FILE      = Path("STOP")
 
 

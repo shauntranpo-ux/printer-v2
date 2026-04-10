@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     MIN_EDGE: float = Field(default=0.03, description="Minimum implied edge (3%) required to place a trade")
     MIN_CONFIDENCE: float = Field(default=0.20, description="Minimum ensemble confidence score to trade")
     MAX_MODEL_SPREAD: float = Field(default=0.40, description="Max allowed disagreement between models (abort if exceeded)")
-    MAX_OPEN_POSITIONS: int = Field(default=3, description="Maximum concurrent open positions")
+    MAX_OPEN_POSITIONS: int = Field(default=10, description="Maximum concurrent open positions")
     STOP_LOSS_PCT: float = Field(default=0.80, description="Close position when it loses this fraction of cost (80%)")
     CONFIDENCE_DECAY_EXIT: float = Field(default=0.40, description="Exit open position if confidence drops below this")
     TAKE_PROFIT_PCT: float = Field(default=0.55, description="Close position at +55% profit (or let expire if market bid ≥ 75¢)")
