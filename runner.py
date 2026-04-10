@@ -43,7 +43,7 @@ logging.basicConfig(
 log = logging.getLogger("runner")
 
 _CYCLE_SECONDS  = 15 * 60     # 15-minute interval
-_CYCLE_BUFFER   = 10           # seconds after boundary before first tick
+_CYCLE_BUFFER   = 120          # seconds after boundary before first tick (2-min price discovery)
 _MAX_MARKETS    = 10           # top N markets evaluated per cycle
 _STOP_FILE      = Path("STOP")
 
@@ -525,8 +525,6 @@ class TradingBot:
             ("data_age",  "Data fresh"),
         ]
         if result.action in ("WAIT", "SKIP"):
-            checks.append({"id": "momentum", "label": "Momentum",
-                           "passed": None, "detail": f"{momentum:+.3f}"})
             for cid, clabel in _pending:
                 checks.append({"id": cid, "label": clabel, "passed": None, "detail": "—"})
             await self._store_last_signal(ticker, result, checks)
@@ -537,19 +535,10 @@ class TradingBot:
                 log.info("Skipping %s: %s", ticker, result.skip_reason)
             return
 
-        # Check 4: Momentum — green if price action supports the direction
-        direction = result.direction   # "yes" | "no"
-        momentum_ok = (momentum > 0) if direction == "yes" else (momentum < 0)
-        checks.append({
-            "id": "momentum", "label": "Momentum",
-            "passed": momentum_ok,
-            "detail": f"{momentum:+.3f}",
-        })
-
         # --- Risk gates ---
         gate_result = await self.risk.check_all(market, result, settings.MAX_BET_SIZE, asset=asset)
 
-        # Checks 5-6: from gate results (edge/liquidity removed; skip internal confidence gate)
+        # Checks 4-5: from gate results
         for gate_key, chk_id, chk_label in [
             ("drawdown",  "drawdown",  "Daily loss"),
             ("staleness", "data_age",  "Data fresh"),

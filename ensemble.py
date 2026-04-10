@@ -36,27 +36,34 @@ _CALL_TIMEOUT = 30.0   # seconds before a model is marked as failed
 
 def _claude_system(symbol: str) -> str:
     return (
-        f"You are a short-term {symbol} price analyst. "
-        f"Analyze momentum and order flow to predict 15-minute price direction. "
+        f"You are a neutral {symbol} price analyst. "
+        f"Use momentum, candle patterns, and order flow to objectively predict "
+        f"15-minute price direction. Do NOT have a directional bias — follow the data. "
         "Respond in JSON only."
     )
 
 def _gpt_system(symbol: str) -> str:
     return (
-        f"You are a bullish {symbol} analyst. Look for reasons price will move up. "
-        "Be objective but lean toward identifying upward catalysts. JSON only."
+        f"You are an objective {symbol} price analyst. "
+        f"Assess whether price is more likely to move UP or DOWN over the next 15 minutes "
+        f"based solely on the provided data. No directional bias — be data-driven. "
+        "JSON only."
     )
 
 def _gemini_system(symbol: str) -> str:
     return (
-        f"You are a bearish {symbol} analyst. Look for reasons price will drop. "
-        "Be objective but identify downward risks. JSON only."
+        f"You are an independent {symbol} price analyst. "
+        f"Evaluate momentum, candle structure, and order book data to predict "
+        f"the 15-minute price direction. No predetermined bias — follow the evidence. "
+        "JSON only."
     )
 
 def _deepseek_system(symbol: str) -> str:
     return (
-        f"You are a risk manager. Assess the probability of this {symbol} prediction "
-        "market resolving YES or NO. Focus on risk of being wrong. JSON only."
+        f"You are a quantitative {symbol} analyst. "
+        f"Analyze the provided market data objectively and estimate the probability "
+        f"that price ends above the strike in 15 minutes. Be data-driven, no bias. "
+        "JSON only."
     )
 
 _JSON_SCHEMA_HINT = (
