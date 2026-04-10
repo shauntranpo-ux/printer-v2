@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     DAILY_LOSS_LIMIT: float = Field(default=100.0, description="Halt trading after losing this much today (dollars)")
     KELLY_FRACTION: float = Field(default=0.5, description="Fractional Kelly multiplier (0.5 = half-Kelly)")
     MIN_EDGE: float = Field(default=0.03, description="Minimum implied edge (3%) required to place a trade")
-    MIN_CONFIDENCE: float = Field(default=0.40, description="Minimum ensemble confidence score to trade")
+    MIN_CONFIDENCE: float = Field(default=0.20, description="Minimum ensemble confidence score to trade")
     MAX_MODEL_SPREAD: float = Field(default=0.40, description="Max allowed disagreement between models (abort if exceeded)")
     MAX_OPEN_POSITIONS: int = Field(default=3, description="Maximum concurrent open positions")
     STOP_LOSS_PCT: float = Field(default=0.80, description="Close position when it loses this fraction of cost (80%)")

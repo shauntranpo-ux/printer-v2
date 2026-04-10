@@ -482,8 +482,6 @@ class TradingBot:
         # If WAIT or SKIP, fill remaining checks as not-evaluated and store
         _pending = [
             ("momentum",  "Momentum"),
-            ("edge",      "Edge"),
-            ("liquidity", "Liquidity"),
             ("drawdown",  "Daily loss"),
             ("data_age",  "Data fresh"),
         ]
@@ -513,7 +511,7 @@ class TradingBot:
         })
 
         if not mom_ok:
-            for cid, clabel in _pending[1:]:   # edge, liquidity, drawdown, data_age
+            for cid, clabel in _pending[1:]:   # drawdown, data_age
                 checks.append({"id": cid, "label": clabel, "passed": None, "detail": "—"})
             await self._store_last_signal(ticker, result, checks)
             log.info(
@@ -525,10 +523,8 @@ class TradingBot:
         # --- 5 risk gates ---
         gate_result = await self.risk.check_all(market, result, settings.MAX_BET_SIZE)
 
-        # Checks 5-8: from gate results (skip internal confidence gate — already shown above)
+        # Checks 5-6: from gate results (edge/liquidity removed; skip internal confidence gate)
         for gate_key, chk_id, chk_label in [
-            ("edge",      "edge",      "Edge"),
-            ("liquidity", "liquidity", "Liquidity"),
             ("drawdown",  "drawdown",  "Daily loss"),
             ("staleness", "data_age",  "Data fresh"),
         ]:

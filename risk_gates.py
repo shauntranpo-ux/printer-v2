@@ -58,8 +58,6 @@ class RiskGates:
         Returns GateResult with passed=True only when ALL gates pass.
         """
         gates = [
-            ("edge",       self._gate_edge(market, ensemble_result)),
-            ("liquidity",  self._gate_liquidity(market, ensemble_result, bet_size)),
             ("drawdown",   self._gate_drawdown()),
             ("confidence", self._gate_confidence(ensemble_result)),
             ("staleness",  self._gate_staleness()),
@@ -78,7 +76,7 @@ class RiskGates:
                     checked_at   = datetime.now(timezone.utc),
                 )
 
-        log.info("All 5 risk gates passed")
+        log.info("All 3 risk gates passed")
         return GateResult(
             passed       = True,
             failed_gate  = None,
