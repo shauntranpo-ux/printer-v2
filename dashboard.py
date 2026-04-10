@@ -300,6 +300,19 @@ def api_balance():
 def api_bot_start():
     _STOP_FILE.unlink(missing_ok=True)
     _START_FILE.touch()
+    # Send Telegram notification — fires only when the dashboard START button is clicked
+    try:
+        token = settings.TELEGRAM_BOT_TOKEN
+        chat_id = settings.TELEGRAM_CHAT_ID
+        if token and chat_id:
+            msg = "🟢 *printer-v2 STARTED*\nBot activated via dashboard."
+            httpx.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"},
+                timeout=5.0,
+            )
+    except Exception:
+        pass
     return jsonify({"ok": True, "status": "running"})
 
 

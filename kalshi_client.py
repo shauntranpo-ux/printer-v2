@@ -226,7 +226,7 @@ class KalshiClient:
           volume, open_interest, close_time, strike_price
         """
         now        = int(time.time())
-        window_end = now + 20 * 60     # 20 minutes out
+        window_end = now + 30 * 60     # 30 minutes out
 
         def _fetch_params(series: str) -> dict:
             return {
@@ -237,14 +237,14 @@ class KalshiClient:
                 "limit":         20,
             }
 
-        # Try primary series ticker
-        data = await self._get("/markets", _fetch_params("KXBTC"))
+        # Try primary series ticker (15-minute BTC markets)
+        data = await self._get("/markets", _fetch_params("KXBTC15M"))
         markets: list[dict] = data.get("markets", [])
 
-        # Fallback: broad BTC search
+        # Fallback: try KXBTC series
         if not markets:
-            log.debug("No KXBTC markets — trying broad BTC search")
-            data = await self._get("/markets", _fetch_params("BTC"))
+            log.debug("No KXBTC15M markets — trying KXBTC fallback")
+            data = await self._get("/markets", _fetch_params("KXBTC"))
             markets = data.get("markets", [])
 
         if not markets:

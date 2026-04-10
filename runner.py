@@ -125,9 +125,8 @@ class TradingBot:
             print(">>> 3. Update KALSHI_API_KEY and KALSHI_PRIVATE_KEY in Railway Variables")
             log.error("Kalshi auth failed at startup (bot will still try to run): %s", exc)
 
-        # 5. Telegram
+        # 5. Telegram (start but don't send startup — notification fires from dashboard START button)
         await self.telegram.start()
-        await self.telegram.send_startup()
 
         # 6. Database event
         balance_str = f"${balance:.2f}" if balance is not None else "auth_failed"
