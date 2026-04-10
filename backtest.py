@@ -38,10 +38,10 @@ DEFAULT_TP             = 0.30   # take profit at +30 %
 DEFAULT_SL             = 0.15   # stop loss at -15 %
 TRAILING_LOCK          = 0.15   # activate trailing stop after +15 % peak
 TRAILING_EXIT          = 0.08   # exit trailing stop below +8 %
-MIN_EDGE               = 0.05
-MIN_CONF               = 0.55
+MIN_EDGE               = 0.03   # lower than live (rule-based proxy has smaller edge)
+MIN_CONF               = 0.18   # calibrated for rule-based proxy (max achievable ~0.60)
 MAX_SPREAD             = 0.35
-CONF_DECAY_THRESH      = 0.40
+CONF_DECAY_THRESH      = 0.12   # below MIN_CONF
 MAX_POSITIONS          = 3
 DAILY_LOSS_LIMIT       = 100.0
 KELLY_FRACTION         = 0.5
@@ -232,28 +232,29 @@ def ensemble_at(i: int, ind: dict[str, np.ndarray]) -> dict:
     macd_abv  = float(ind["macd_abv"][i])   # 1 = bullish, 0 = bearish
     bb_pct    = float(ind["bb_pct"][i])      # 0=lower, 1=upper band
 
-    # ── Claude: momentum-based (neutral) ─────────────────────────────────────
-    if   momentum >  0.3:  claude = 0.68
-    elif momentum >  0.1:  claude = 0.57
-    elif momentum < -0.3:  claude = 0.32
-    elif momentum < -0.1:  claude = 0.43
+    # ── Claude: momentum-based ───────────────────────────────────────────────
+    # Probabilities calibrated to real AI output range (0.15–0.85)
+    if   momentum >  0.3:  claude = 0.82
+    elif momentum >  0.1:  claude = 0.64
+    elif momentum < -0.3:  claude = 0.18
+    elif momentum < -0.1:  claude = 0.36
     else:                  claude = 0.50
 
     # ── GPT: RSI-based (bullish lens) ────────────────────────────────────────
-    if   rsi > 70:  gpt = 0.72
-    elif rsi > 60:  gpt = 0.65
-    elif rsi < 30:  gpt = 0.38
-    elif rsi < 40:  gpt = 0.35
+    if   rsi > 70:  gpt = 0.82
+    elif rsi > 60:  gpt = 0.66
+    elif rsi < 30:  gpt = 0.18
+    elif rsi < 40:  gpt = 0.34
     else:           gpt = 0.50
 
-    # ── Gemini: MACD-based (bearish lens) ────────────────────────────────────
-    gemini = (0.60 if macd_abv else 0.34)   # slight bearish lean built in
+    # ── Gemini: MACD-based ───────────────────────────────────────────────────
+    gemini = (0.72 if macd_abv else 0.26)
 
     # ── DeepSeek: Bollinger-based (risk manager) ─────────────────────────────
-    if   bb_pct < 0.20:  deepseek = 0.67
-    elif bb_pct < 0.40:  deepseek = 0.57
-    elif bb_pct > 0.80:  deepseek = 0.33
-    elif bb_pct > 0.60:  deepseek = 0.43
+    if   bb_pct < 0.20:  deepseek = 0.80
+    elif bb_pct < 0.40:  deepseek = 0.64
+    elif bb_pct > 0.80:  deepseek = 0.20
+    elif bb_pct > 0.60:  deepseek = 0.36
     else:                deepseek = 0.50
 
     probs = {"claude": claude, "gpt": gpt, "gemini": gemini, "deepseek": deepseek}
@@ -460,10 +461,10 @@ def run_backtest(
         direction = ens["direction"]       # "YES" | "NO"
         momentum  = ens["momentum"]
 
-        # Momentum confirmation (matches runner.py)
-        if direction == "YES" and momentum < -0.1:
+        # Momentum confirmation: skip only on strong counter-momentum
+        if direction == "YES" and momentum < -0.3:
             continue
-        if direction == "NO"  and momentum >  0.1:
+        if direction == "NO"  and momentum >  0.3:
             continue
 
         # Evaluate 3 strike prices; stop when we hit MAX_POSITIONS
