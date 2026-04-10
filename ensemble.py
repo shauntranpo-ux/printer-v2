@@ -1,415 +1,452 @@
 """
 ensemble.py — 4-model AI ensemble engine
 
-Models:
-  1. Trend          — EMA crossover + ADX
-  2. MeanReversion  — Bollinger Bands + RSI
-  3. Momentum       — MACD + Rate of Change
-  4. VolatilityRegime — ATR regime + Z-score
+Runs Claude, GPT-4o, Gemini, and DeepSeek in parallel via asyncio.gather().
+Each model receives identical market context and returns a JSON prediction.
+Results are weighted into a consensus signal with spread/confidence gating.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from collections import deque
+import re
+import time
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from datetime import datetime, timezone
+from typing import Any
 
-import numpy as np
+import anthropic
+import openai
+import google.generativeai as genai
 
+from config import settings
 from coinbase_feed import Candle
 
 log = logging.getLogger(__name__)
 
-MIN_CANDLES = 50    # minimum history before any model produces a signal
+_CALL_TIMEOUT = 30.0   # seconds before a model is marked as failed
 
 
 # ---------------------------------------------------------------------------
-# Signal output
+# System prompts (exact as specified)
 # ---------------------------------------------------------------------------
 
-class Direction:
-    YES  = "yes"
-    NO   = "no"
-    FLAT = "flat"
+_CLAUDE_SYSTEM = (
+    "You are a short-term BTC price analyst. "
+    "Analyze momentum and order flow to predict 15-minute price direction. "
+    "Respond in JSON only."
+)
+
+_GPT_SYSTEM = (
+    "You are a bullish BTC analyst. Look for reasons price will move up. "
+    "Be objective but lean toward identifying upward catalysts. JSON only."
+)
+
+_GEMINI_SYSTEM = (
+    "You are a bearish BTC analyst. Look for reasons price will drop. "
+    "Be objective but identify downward risks. JSON only."
+)
+
+_DEEPSEEK_SYSTEM = (
+    "You are a risk manager. Assess the probability of this BTC prediction "
+    "market resolving YES or NO. Focus on risk of being wrong. JSON only."
+)
+
+_JSON_SCHEMA_HINT = (
+    '\n\nRespond with exactly this JSON structure and nothing else:\n'
+    '{"direction": "YES" or "NO", "probability": 0.0-1.0, '
+    '"confidence": 0.0-1.0, "reasoning": "one sentence"}'
+)
+
+
+# ---------------------------------------------------------------------------
+# Input dataclasses
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BtcData:
+    price:     float          # current BTC/USD price
+    momentum:  float          # -1.0 to +1.0 from CoinbaseFeed.get_momentum()
+    candles:   list[Candle]   # last 4 completed 15m candles
+    imbalance: float          # bid_vol / ask_vol from order book
 
 
 @dataclass
-class ModelSignal:
-    name: str
-    prob: float         # P(price up) in [0, 1]
-    weight: float
-    valid: bool = True  # False if not enough data
+class Market:
+    ticker:       str
+    yes_price:    int          # cents (1–99)
+    no_price:     int          # cents (1–99)
+    strike_price: float        # BTC USD threshold
+    close_time:   datetime     # UTC expiry
+
+
+# ---------------------------------------------------------------------------
+# Output dataclasses
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ModelResult:
+    model_name: str
+    direction:  str            # "YES" | "NO"
+    probability: float         # P(YES) in [0.0, 1.0]
+    confidence:  float         # model's self-reported confidence [0.0, 1.0]
+    reasoning:   str
+    latency_ms:  float
+
+    @property
+    def prob(self) -> float:
+        """Alias for probability — backward compat with runner.py."""
+        return self.probability
 
 
 @dataclass
-class EnsembleSignal:
-    direction: str              # "yes" | "no" | "flat"
-    confidence: float           # distance from 0.5, scaled to [0,1]
-    raw_prob: float             # weighted average P(up)
-    models: list[ModelSignal]
-    weights: dict[str, float]   # current model weights
+class EnsembleResult:
+    consensus_prob: float      # weighted P(YES)
+    confidence:     float      # penalized average confidence
+    spread:         float      # max(probs) - min(probs)
+    action:         str        # "TRADE" | "SKIP" | "WAIT"
+    skip_reason:    str | None
+    timestamp:      datetime
+    claude:   ModelResult | None = field(default=None)
+    gpt:      ModelResult | None = field(default=None)
+    gemini:   ModelResult | None = field(default=None)
+    deepseek: ModelResult | None = field(default=None)
 
-
-# ---------------------------------------------------------------------------
-# Rolling accuracy tracker (for dynamic weight adjustment)
-# ---------------------------------------------------------------------------
-
-class AccuracyTracker:
-    """Tracks rolling binary accuracy for one model."""
-
-    def __init__(self, window: int = 50):
-        self._window = window
-        self._hits: deque[int] = deque(maxlen=window)
-
-    def record(self, predicted_up: bool, actual_up: bool) -> None:
-        self._hits.append(int(predicted_up == actual_up))
+    # ------------------------------------------------------------------
+    # Compatibility properties (used by risk_gates.py / strategy.py)
+    # ------------------------------------------------------------------
 
     @property
-    def accuracy(self) -> float:
-        if len(self._hits) < 5:
-            return 0.5  # neutral until enough data
-        return float(np.mean(self._hits))
+    def direction(self) -> str:
+        """
+        Lowercase direction for downstream consumers.
+        Returns "flat" when action is not TRADE so risk_gates gate 3
+        correctly blocks the trade without any code changes.
+        """
+        if self.action != "TRADE":
+            return "flat"
+        return "yes" if self.consensus_prob > 0.5 else "no"
 
     @property
-    def n(self) -> int:
-        return len(self._hits)
+    def raw_prob(self) -> float:
+        """Alias for consensus_prob — used by strategy.py."""
+        return self.consensus_prob
+
+    @property
+    def models(self) -> list[ModelResult]:
+        """Non-None results — used by runner.py spread calculation."""
+        return [m for m in (self.claude, self.gpt, self.gemini, self.deepseek)
+                if m is not None]
 
 
 # ---------------------------------------------------------------------------
-# Indicator helpers (pure numpy, no external TA lib dependency at runtime)
-# ---------------------------------------------------------------------------
-
-def _closes(candles: list[Candle]) -> np.ndarray:
-    return np.array([c.close for c in candles], dtype=float)
-
-
-def _ema(arr: np.ndarray, period: int) -> np.ndarray:
-    out = np.empty_like(arr)
-    if len(arr) == 0:
-        return out
-    k = 2.0 / (period + 1)
-    out[0] = arr[0]
-    for i in range(1, len(arr)):
-        out[i] = arr[i] * k + out[i - 1] * (1 - k)
-    return out
-
-
-def _rsi(arr: np.ndarray, period: int = 14) -> float:
-    if len(arr) < period + 1:
-        return 50.0
-    deltas = np.diff(arr[-(period + 1):])
-    gains = np.where(deltas > 0, deltas, 0.0)
-    losses = np.where(deltas < 0, -deltas, 0.0)
-    avg_gain = gains.mean()
-    avg_loss = losses.mean()
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1 + rs))
-
-
-def _atr(candles: list[Candle], period: int = 14) -> float:
-    if len(candles) < period + 1:
-        return 0.0
-    trs = []
-    for i in range(1, len(candles)):
-        h, l, prev_c = candles[i].high, candles[i].low, candles[i - 1].close
-        if h == 0 and l == 0:
-            # Candles built from ticker feed don't have H/L; fallback to close diff
-            trs.append(abs(candles[i].close - prev_c))
-        else:
-            trs.append(max(h - l, abs(h - prev_c), abs(l - prev_c)))
-    return float(np.mean(trs[-period:]))
-
-
-def _bollinger(arr: np.ndarray, period: int = 20, n_std: float = 2.0):
-    """Returns (upper, middle, lower)."""
-    if len(arr) < period:
-        m = arr[-1] if len(arr) > 0 else 0.0
-        return m, m, m
-    window = arr[-period:]
-    mid = window.mean()
-    std = window.std()
-    return mid + n_std * std, mid, mid - n_std * std
-
-
-def _macd(arr: np.ndarray, fast=12, slow=26, signal=9):
-    """Returns (macd_line, signal_line) at the last bar."""
-    if len(arr) < slow + signal:
-        return 0.0, 0.0
-    ema_fast = _ema(arr, fast)
-    ema_slow = _ema(arr, slow)
-    macd_line = ema_fast - ema_slow
-    sig_line = _ema(macd_line, signal)
-    return float(macd_line[-1]), float(sig_line[-1])
-
-
-def _adx(candles: list[Candle], period: int = 14) -> float:
-    """Simplified ADX using close prices as a proxy when H/L unavailable."""
-    closes = _closes(candles)
-    if len(closes) < period * 2:
-        return 0.0
-    # Use absolute EMA slope as ADX proxy
-    ema_short = _ema(closes, period)
-    slope = abs(ema_short[-1] - ema_short[-period]) / (ema_short[-period] + 1e-9)
-    return min(float(slope * 100 * period), 100.0)
-
-
-# ---------------------------------------------------------------------------
-# Individual models
-# ---------------------------------------------------------------------------
-
-class TrendModel:
-    """EMA crossover (9/21) gated by ADX > 20."""
-
-    name = "trend"
-
-    def predict(self, candles: list[Candle]) -> float:
-        closes = _closes(candles)
-        if len(closes) < 30:
-            return 0.5
-        ema9  = _ema(closes, 9)
-        ema21 = _ema(closes, 21)
-        adx   = _adx(candles, 14)
-
-        cross = ema9[-1] - ema21[-1]
-        prev_cross = ema9[-2] - ema21[-2]
-
-        if adx < 15:
-            return 0.5  # no trend, stay neutral
-
-        # Crossover in last bar
-        if cross > 0 and prev_cross <= 0:
-            return 0.72
-        if cross < 0 and prev_cross >= 0:
-            return 0.28
-
-        # Continuation
-        if cross > 0:
-            strength = min(abs(cross) / (closes[-1] * 0.001 + 1e-9), 1.0)
-            return 0.55 + 0.15 * strength
-        else:
-            strength = min(abs(cross) / (closes[-1] * 0.001 + 1e-9), 1.0)
-            return 0.45 - 0.15 * strength
-
-
-class MeanReversionModel:
-    """Bollinger Band touch + RSI extreme."""
-
-    name = "mean_rev"
-
-    def predict(self, candles: list[Candle]) -> float:
-        closes = _closes(candles)
-        if len(closes) < 25:
-            return 0.5
-        upper, mid, lower = _bollinger(closes, 20, 2.0)
-        rsi = _rsi(closes, 14)
-        price = closes[-1]
-
-        # Oversold: price below lower band, RSI < 35 → expect bounce up
-        if price < lower and rsi < 35:
-            pct_below = (lower - price) / (lower + 1e-9)
-            return min(0.65 + pct_below * 0.5, 0.85)
-
-        # Overbought: price above upper band, RSI > 65 → expect pullback
-        if price > upper and rsi > 65:
-            pct_above = (price - upper) / (upper + 1e-9)
-            return max(0.35 - pct_above * 0.5, 0.15)
-
-        # Near middle band — mild mean pull
-        if price > mid:
-            return 0.47
-        return 0.53
-
-
-class MomentumModel:
-    """MACD crossover + Rate of Change."""
-
-    name = "momentum"
-
-    def predict(self, candles: list[Candle]) -> float:
-        closes = _closes(candles)
-        if len(closes) < 40:
-            return 0.5
-        macd, sig = _macd(closes)
-        roc = (closes[-1] - closes[-10]) / (closes[-10] + 1e-9)   # 10-bar ROC
-
-        # MACD above signal + positive ROC = bullish momentum
-        macd_bull = macd > sig
-        roc_bull  = roc > 0
-
-        if macd_bull and roc_bull:
-            strength = min(abs(roc) * 50, 1.0)
-            return 0.60 + 0.15 * strength
-
-        if not macd_bull and not roc_bull:
-            strength = min(abs(roc) * 50, 1.0)
-            return 0.40 - 0.15 * strength
-
-        # Mixed signals
-        if macd_bull:
-            return 0.54
-        return 0.46
-
-
-class VolatilityRegimeModel:
-    """ATR regime detection + Z-score of price."""
-
-    name = "vol"
-
-    def predict(self, candles: list[Candle]) -> float:
-        closes = _closes(candles)
-        if len(closes) < 30:
-            return 0.5
-
-        atr = _atr(candles, 14)
-        atr_pct = atr / (closes[-1] + 1e-9)
-
-        # Z-score of price relative to 20-bar window
-        window = closes[-20:]
-        z = (closes[-1] - window.mean()) / (window.std() + 1e-9)
-
-        # High volatility regime: trust mean reversion (z-score)
-        if atr_pct > 0.015:
-            if z < -1.5:
-                return 0.65     # oversold in high vol → snap back
-            if z > 1.5:
-                return 0.35     # overbought in high vol → fade
-            return 0.5
-
-        # Low volatility regime: slight trend bias
-        if z > 0.5:
-            return 0.54
-        if z < -0.5:
-            return 0.46
-        return 0.5
-
-
-# ---------------------------------------------------------------------------
-# Ensemble engine
+# EnsembleEngine
 # ---------------------------------------------------------------------------
 
 class EnsembleEngine:
-    def __init__(
-        self,
-        weights: dict[str, float],
-        confidence_min: float = 0.60,
-        weight_update_every: int = 20,   # recalibrate weights every N predictions
-    ):
-        self._models = {
-            "trend":    TrendModel(),
-            "mean_rev": MeanReversionModel(),
-            "momentum": MomentumModel(),
-            "vol":      VolatilityRegimeModel(),
-        }
-        self._weights = dict(weights)
-        self._confidence_min = confidence_min
-        self._weight_update_every = weight_update_every
-        self._trackers = {k: AccuracyTracker(window=50) for k in self._models}
-        self._prediction_count = 0
-        # Ring buffer of past prices to score previous predictions
-        self._pending: deque[tuple[dict[str, float], float]] = deque(maxlen=10)
+    def __init__(self) -> None:
+        # Lazy-initialised SDK clients
+        self._anthropic_client: anthropic.AsyncAnthropic | None = None
+        self._openai_client:    openai.AsyncOpenAI | None = None
+        self._deepseek_client:  openai.AsyncOpenAI | None = None
+        self._gemini_model:     Any = None
 
-    def predict(self, candles: list[Candle]) -> EnsembleSignal:
-        if len(candles) < MIN_CANDLES:
-            log.debug("Not enough candles (%d < %d)", len(candles), MIN_CANDLES)
-            return EnsembleSignal(
-                direction=Direction.FLAT,
-                confidence=0.0,
-                raw_prob=0.5,
-                models=[],
-                weights=dict(self._weights),
+    # ------------------------------------------------------------------
+    # Client initialisation (lazy — avoids failures at import time)
+    # ------------------------------------------------------------------
+
+    def _init_clients(self) -> None:
+        if not self._anthropic_client:
+            self._anthropic_client = anthropic.AsyncAnthropic(
+                api_key=settings.ANTHROPIC_API_KEY
+            )
+        if not self._openai_client:
+            self._openai_client = openai.AsyncOpenAI(
+                api_key=settings.OPENAI_API_KEY
+            )
+        if not self._deepseek_client:
+            self._deepseek_client = openai.AsyncOpenAI(
+                api_key=settings.DEEPSEEK_API_KEY,
+                base_url="https://api.deepseek.com",
+            )
+        if not self._gemini_model:
+            genai.configure(api_key=settings.GEMINI_API_KEY)
+            self._gemini_model = genai.GenerativeModel(
+                model_name=settings.GEMINI_MODEL,
+                system_instruction=_GEMINI_SYSTEM,
+                generation_config=genai.GenerationConfig(temperature=0.1),
             )
 
-        # Score previous prediction if price has moved
-        self._score_pending(candles[-1].close)
+    # ------------------------------------------------------------------
+    # Context builder
+    # ------------------------------------------------------------------
 
-        model_signals: list[ModelSignal] = []
-        weighted_sum = 0.0
-        weight_total = 0.0
-
-        for key, model in self._models.items():
-            prob = model.predict(candles)
-            w = self._weights[key]
-            model_signals.append(ModelSignal(name=key, prob=prob, weight=w))
-            weighted_sum += prob * w
-            weight_total += w
-
-        raw_prob = weighted_sum / (weight_total + 1e-9)
-
-        # Convert to direction + confidence
-        # confidence = how far raw_prob is from 0.5, normalized to [0,1]
-        confidence = abs(raw_prob - 0.5) * 2.0
-
-        if confidence < (self._confidence_min - 0.5) * 2.0 or confidence < 0.05:
-            direction = Direction.FLAT
-        elif raw_prob > 0.5:
-            direction = Direction.YES
+    @staticmethod
+    def _build_context(btc_data: BtcData, market: Market) -> str:
+        if btc_data.candles:
+            candles_str = "\n".join(
+                f"  [{c.timestamp.strftime('%H:%M')}] "
+                f"O={c.open:.2f} H={c.high:.2f} L={c.low:.2f} "
+                f"C={c.close:.2f} V={c.volume:.4f}"
+                for c in btc_data.candles[-4:]
+            )
         else:
-            direction = Direction.NO
+            candles_str = "  (no completed candles yet)"
 
-        signal = EnsembleSignal(
-            direction=direction,
-            confidence=confidence,
-            raw_prob=raw_prob,
-            models=model_signals,
-            weights=dict(self._weights),
+        now_utc = datetime.now(timezone.utc)
+        minutes_left = max(0, int((market.close_time - now_utc).total_seconds() / 60))
+
+        return (
+            f"Current BTC price: ${btc_data.price:,.2f}\n"
+            f"15m momentum score: {btc_data.momentum:.3f} (-1 to +1)\n"
+            f"Last 4 candles OHLCV:\n{candles_str}\n"
+            f"Order book imbalance: {btc_data.imbalance:.3f} (bid volume / ask volume)\n"
+            f"Market: Will BTC be above ${market.strike_price:,.2f} "
+            f"at {market.close_time.strftime('%H:%M UTC')}?\n"
+            f"Current market price: YES at {market.yes_price}¢ / NO at {market.no_price}¢\n"
+            f"Time to expiry: {minutes_left} minutes"
+            + _JSON_SCHEMA_HINT
         )
 
-        # Queue for future scoring
-        self._pending.append(({k: s.prob for k, s in zip(self._models, model_signals)}, candles[-1].close))
-        self._prediction_count += 1
+    # ------------------------------------------------------------------
+    # JSON parser (shared by all models)
+    # ------------------------------------------------------------------
 
-        if self._prediction_count % self._weight_update_every == 0:
-            self._recalibrate_weights()
+    @staticmethod
+    def _parse_result(text: str, model_name: str, latency_ms: float) -> ModelResult:
+        # Strip markdown code fences that some models add
+        cleaned = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        cleaned = cleaned.strip("`").strip()
+
+        # Find the first complete JSON object (handles extra prose around it)
+        match = re.search(r"\{.*?\}", cleaned, re.DOTALL)
+        if not match:
+            raise ValueError(
+                f"{model_name}: no JSON object found in response: {text[:300]!r}"
+            )
+
+        try:
+            data = json.loads(match.group())
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{model_name}: JSON parse error — {exc}") from exc
+
+        direction = str(data.get("direction", "")).upper().strip()
+        if direction not in ("YES", "NO"):
+            raise ValueError(
+                f"{model_name}: direction must be YES or NO, got '{direction}'"
+            )
+
+        probability = float(data.get("probability", -1))
+        confidence  = float(data.get("confidence", -1))
+
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError(f"{model_name}: probability {probability} out of [0,1]")
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError(f"{model_name}: confidence {confidence} out of [0,1]")
+
+        return ModelResult(
+            model_name  = model_name,
+            direction   = direction,
+            probability = probability,
+            confidence  = confidence,
+            reasoning   = str(data.get("reasoning", ""))[:500],
+            latency_ms  = latency_ms,
+        )
+
+    # ------------------------------------------------------------------
+    # Individual model calls
+    # ------------------------------------------------------------------
+
+    async def _call_claude(self, context: str) -> ModelResult:
+        t0 = time.monotonic()
+        msg = await self._anthropic_client.messages.create(  # type: ignore[union-attr]
+            model      = settings.CLAUDE_MODEL,
+            max_tokens = 256,
+            temperature= 0.1,
+            system     = _CLAUDE_SYSTEM,
+            messages   = [{"role": "user", "content": context}],
+        )
+        text = msg.content[0].text
+        return self._parse_result(text, "claude", (time.monotonic() - t0) * 1000)
+
+    async def _call_gpt(self, context: str) -> ModelResult:
+        t0 = time.monotonic()
+        resp = await self._openai_client.chat.completions.create(  # type: ignore[union-attr]
+            model           = settings.GPT_MODEL,
+            temperature     = 0.1,
+            max_tokens      = 256,
+            response_format = {"type": "json_object"},
+            messages        = [
+                {"role": "system", "content": _GPT_SYSTEM},
+                {"role": "user",   "content": context},
+            ],
+        )
+        text = resp.choices[0].message.content or ""
+        return self._parse_result(text, "gpt", (time.monotonic() - t0) * 1000)
+
+    async def _call_gemini(self, context: str) -> ModelResult:
+        t0 = time.monotonic()
+        response = await self._gemini_model.generate_content_async(context)
+        # .text raises ValueError on blocked safety responses
+        text = response.text
+        return self._parse_result(text, "gemini", (time.monotonic() - t0) * 1000)
+
+    async def _call_deepseek(self, context: str) -> ModelResult:
+        t0 = time.monotonic()
+        resp = await self._deepseek_client.chat.completions.create(  # type: ignore[union-attr]
+            model      = settings.DEEPSEEK_MODEL,
+            temperature= 0.1,
+            max_tokens = 512,   # deepseek-reasoner has internal CoT, needs more tokens
+            messages   = [
+                {"role": "system", "content": _DEEPSEEK_SYSTEM},
+                {"role": "user",   "content": context},
+            ],
+        )
+        text = resp.choices[0].message.content or ""
+        return self._parse_result(text, "deepseek", (time.monotonic() - t0) * 1000)
+
+    # ------------------------------------------------------------------
+    # Parallel execution with individual error isolation
+    # ------------------------------------------------------------------
+
+    async def _safe_call(
+        self, coro: Any, model_name: str
+    ) -> ModelResult | None:
+        """
+        Run one model call with a timeout. Returns None (never raises) so
+        asyncio.gather can still collect the other results.
+        """
+        try:
+            return await asyncio.wait_for(coro, timeout=_CALL_TIMEOUT)
+        except asyncio.TimeoutError:
+            log.warning(
+                "%s timed out after %.0fs — excluded from consensus",
+                model_name, _CALL_TIMEOUT,
+            )
+        except Exception as exc:
+            log.warning(
+                "%s failed (%s: %s) — excluded from consensus",
+                model_name, type(exc).__name__, exc,
+            )
+        return None
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+
+    async def debate(self, btc_data: BtcData, market: Market) -> EnsembleResult:
+        """
+        Run all 4 models in parallel and aggregate into an EnsembleResult.
+        Requires at least 2 successful model responses.
+        """
+        self._init_clients()
+        context = self._build_context(btc_data, market)
 
         log.info(
-            "Ensemble → %s (conf=%.2f, prob=%.3f) | trend=%.2f mr=%.2f mom=%.2f vol=%.2f",
-            direction, confidence, raw_prob,
-            model_signals[0].prob, model_signals[1].prob,
-            model_signals[2].prob, model_signals[3].prob,
+            "Ensemble debate starting — BTC=$%.2f momentum=%.3f market=%s "
+            "exp=%s YES=%d¢/NO=%d¢",
+            btc_data.price, btc_data.momentum, market.ticker,
+            market.close_time.strftime("%H:%M"),
+            market.yes_price, market.no_price,
         )
-        return signal
+
+        # Step 1 — run all 4 models in parallel
+        claude_r, gpt_r, gemini_r, deepseek_r = await asyncio.gather(
+            self._safe_call(self._call_claude(context),   "claude"),
+            self._safe_call(self._call_gpt(context),     "gpt"),
+            self._safe_call(self._call_gemini(context),  "gemini"),
+            self._safe_call(self._call_deepseek(context),"deepseek"),
+        )
+
+        # Step 2 — require minimum 2 successful models
+        valid = [r for r in (claude_r, gpt_r, gemini_r, deepseek_r) if r is not None]
+        if len(valid) < 2:
+            failed = [
+                name for name, r in [("claude", claude_r), ("gpt", gpt_r),
+                                      ("gemini", gemini_r), ("deepseek", deepseek_r)]
+                if r is None
+            ]
+            raise RuntimeError(
+                f"Only {len(valid)}/4 models responded — need ≥ 2. "
+                f"Failed: {', '.join(failed)}. Check API keys."
+            )
+
+        # Step 3 — weighted consensus probability (re-normalised to survivors)
+        weight_map = {
+            "claude":   settings.CLAUDE_WEIGHT,
+            "gpt":      settings.GPT_WEIGHT,
+            "gemini":   settings.GEMINI_WEIGHT,
+            "deepseek": settings.DEEPSEEK_WEIGHT,
+        }
+        survivor_weights = {r.model_name: weight_map[r.model_name] for r in valid}
+        total_w = sum(survivor_weights.values())
+
+        consensus_prob = sum(
+            r.probability * survivor_weights[r.model_name] / total_w
+            for r in valid
+        )
+
+        # Step 4 — model spread
+        probs  = [r.probability for r in valid]
+        spread = max(probs) - min(probs)
+
+        # Step 5 — confidence (average, penalised by high spread)
+        avg_confidence = sum(r.confidence for r in valid) / len(valid)
+        confidence = avg_confidence * 0.8 if spread > 0.20 else avg_confidence
+
+        # Step 6 — action gate
+        skip_reason: str | None = None
+        if spread > settings.MAX_MODEL_SPREAD:
+            action = "WAIT"
+            skip_reason = (
+                f"model spread {spread:.3f} exceeds MAX_MODEL_SPREAD "
+                f"{settings.MAX_MODEL_SPREAD:.2f}"
+            )
+        elif confidence < settings.MIN_CONFIDENCE:
+            action = "SKIP"
+            skip_reason = (
+                f"confidence {confidence:.3f} below MIN_CONFIDENCE "
+                f"{settings.MIN_CONFIDENCE:.2f}"
+            )
+        else:
+            action = "TRADE"
+
+        # Log summary
+        latencies = {r.model_name: f"{r.latency_ms:.0f}ms" for r in valid}
+        log.info(
+            "Ensemble result: prob=%.3f spread=%.3f conf=%.3f action=%s  "
+            "| claude=%s gpt=%s gemini=%s deepseek=%s  latencies=%s",
+            consensus_prob, spread, confidence, action,
+            f"{claude_r.probability:.2f}"   if claude_r   else "FAIL",
+            f"{gpt_r.probability:.2f}"      if gpt_r      else "FAIL",
+            f"{gemini_r.probability:.2f}"   if gemini_r   else "FAIL",
+            f"{deepseek_r.probability:.2f}" if deepseek_r else "FAIL",
+            latencies,
+        )
+        if skip_reason:
+            log.info("Ensemble skip/wait reason: %s", skip_reason)
+
+        return EnsembleResult(
+            consensus_prob = consensus_prob,
+            confidence     = confidence,
+            spread         = spread,
+            action         = action,
+            skip_reason    = skip_reason,
+            timestamp      = datetime.now(timezone.utc),
+            claude         = claude_r,
+            gpt            = gpt_r,
+            gemini         = gemini_r,
+            deepseek       = deepseek_r,
+        )
+
+    # ------------------------------------------------------------------
+    # Compatibility stub (runner.py calls this after trade close)
+    # ------------------------------------------------------------------
 
     def record_outcome(self, entry_price: float, exit_price: float) -> None:
-        """Call after a trade closes to update model accuracy."""
-        actual_up = exit_price > entry_price
-        if self._pending:
-            probs, _ = self._pending[-1]
-            for key, prob in probs.items():
-                self._trackers[key].record(prob > 0.5, actual_up)
-
-    def _score_pending(self, current_price: float) -> None:
-        """Score predictions from ~1 candle ago if available."""
-        if not self._pending:
-            return
-        probs, past_price = self._pending[0]
-        if current_price == past_price:
-            return
-        actual_up = current_price > past_price
-        for key, prob in probs.items():
-            self._trackers[key].record(prob > 0.5, actual_up)
-        # Only pop if we've had movement (avoid scoring same bar twice)
-        if len(self._pending) > 1:
-            self._pending.popleft()
-
-    def _recalibrate_weights(self) -> None:
-        """Adjust weights proportional to each model's rolling accuracy."""
-        accs = {k: self._trackers[k].accuracy for k in self._models}
-        total = sum(accs.values())
-        if total == 0:
-            return
-        new_weights = {k: accs[k] / total for k in self._models}
-        # Smooth update: 70% old weight, 30% accuracy-based
-        for k in self._models:
-            self._weights[k] = 0.70 * self._weights[k] + 0.30 * new_weights[k]
-        log.info(
-            "Weight recalibration: trend=%.3f mr=%.3f mom=%.3f vol=%.3f",
-            self._weights["trend"], self._weights["mean_rev"],
-            self._weights["momentum"], self._weights["vol"],
-        )
-
-    @property
-    def weights(self) -> dict[str, float]:
-        return dict(self._weights)
+        """
+        No-op. AI models don't require outcome feedback.
+        Kept for compatibility with runner.py call site.
+        """
