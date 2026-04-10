@@ -19,7 +19,8 @@ from typing import Any
 
 import anthropic
 import openai
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from config import settings
 from coinbase_feed import Candle
@@ -151,7 +152,7 @@ class EnsembleEngine:
         self._anthropic_client: anthropic.AsyncAnthropic | None = None
         self._openai_client:    openai.AsyncOpenAI | None = None
         self._deepseek_client:  openai.AsyncOpenAI | None = None
-        self._gemini_model:     Any = None
+        self._gemini_client:    genai.Client | None = None
 
     # ------------------------------------------------------------------
     # Client initialisation (lazy — avoids failures at import time)
@@ -171,13 +172,8 @@ class EnsembleEngine:
                 api_key=settings.DEEPSEEK_API_KEY,
                 base_url="https://api.deepseek.com",
             )
-        if not self._gemini_model:
-            genai.configure(api_key=settings.GEMINI_API_KEY)
-            self._gemini_model = genai.GenerativeModel(
-                model_name=settings.GEMINI_MODEL,
-                system_instruction=_GEMINI_SYSTEM,
-                generation_config=genai.GenerationConfig(temperature=0.1),
-            )
+        if not self._gemini_client:
+            self._gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
     # ------------------------------------------------------------------
     # Context builder
@@ -288,8 +284,14 @@ class EnsembleEngine:
 
     async def _call_gemini(self, context: str) -> ModelResult:
         t0 = time.monotonic()
-        response = await self._gemini_model.generate_content_async(context)
-        # .text raises ValueError on blocked safety responses
+        response = await self._gemini_client.aio.models.generate_content(  # type: ignore[union-attr]
+            model=settings.GEMINI_MODEL,
+            contents=context,
+            config=types.GenerateContentConfig(
+                system_instruction=_GEMINI_SYSTEM,
+                temperature=0.1,
+            ),
+        )
         text = response.text
         return self._parse_result(text, "gemini", (time.monotonic() - t0) * 1000)
 

@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     KALSHI_API_KEY: str = Field(default="", description="Kalshi API key ID")
     KALSHI_PRIVATE_KEY: str = Field(default="", description="RSA private key — raw PEM string (paste full key including headers)")
     KALSHI_BASE_URL: str = Field(
-        default="https://trading-api.kalshi.com/trade-api/v2",
+        default="https://api.elections.kalshi.com/trade-api/v2",
         description="Kalshi REST API base URL",
     )
     KALSHI_DEMO: bool = Field(default=False, description="Use Kalshi demo environment")
