@@ -761,129 +761,126 @@ function renderWatchSection(w) {
     const minsLeft  = closeDate
       ? Math.max(0, Math.round((closeDate - Date.now()) / 60000))
       : null;
-    const expiry    = minsLeft !== null ? minsLeft + 'm left' : '—';
-    const strike    = m.strike ? '$' + m.strike.toLocaleString('en-US') : '—';
-    const noAsk     = m.no_ask || (100 - (m.yes_ask || 0));
+    const expiry = minsLeft !== null ? minsLeft + 'm left' : '—';
+    const strike = m.strike ? '$' + m.strike.toLocaleString('en-US') : '—';
+    const yesAsk = m.yes_ask > 0 ? m.yes_ask + '¢' : '—';
+    const noAsk  = m.no_ask  > 0 ? m.no_ask  + '¢' : (m.yes_ask > 0 ? (100 - m.yes_ask) + '¢' : '—');
     return `<tr>
       <td style="color:var(--blue);font-weight:600">${m.ticker}</td>
-      <td>${strike}</td>
+      <td>${m.asset ? '<span style="color:var(--muted);font-size:10px">' + m.asset + '</span> ' : ''}${strike}</td>
       <td style="color:var(--muted)">${expiry}</td>
-      <td class="dir-yes">${m.yes_ask || '—'}¢ YES</td>
-      <td class="dir-no">${noAsk}¢ NO</td>
+      <td class="dir-yes">${yesAsk}</td>
+      <td class="dir-no">${noAsk}</td>
       <td style="color:var(--muted)">${(m.volume || 0).toLocaleString()}</td>
     </tr>`;
   }).join('');
 
-  let signalHtml = '<div style="color:var(--muted);font-size:11px">No signal evaluated yet this cycle</div>';
-  if (w.last_signal) {
-    const s       = w.last_signal;
+  // Signal summary (shown when a market has been evaluated)
+  let signalHtml = '';
+  let checklistHtml = '';
+  const s = w.last_signal;
+  if (s) {
     const dirCls  = s.direction === 'YES' ? 'dir-yes' : s.direction === 'NO' ? 'dir-no' : 'neu';
     const actCls  = 'ens-action action-' + (s.action || 'SKIP');
+    const asset   = (s.ticker || '').split('-')[0].replace(/\d.*/,'') || 'asset';
     const lookFor = s.direction === 'YES'
-      ? 'BTC will be <b style="color:var(--green)">ABOVE</b> strike at expiry'
+      ? asset + ' will finish <b style="color:var(--green)">ABOVE</b> strike'
       : s.direction === 'NO'
-      ? 'BTC will be <b style="color:var(--red)">BELOW</b> strike at expiry'
+      ? asset + ' will finish <b style="color:var(--red)">BELOW</b> strike'
       : '—';
-
-    // AI Bot Votes + Consensus panel
-    let consensusHtml = '';
-    if (s.models) {
-      const mdefs = [
-        {key:'claude',   label:'Claude'},
-        {key:'gpt',      label:'GPT-4o'},
-        {key:'gemini',   label:'Gemini'},
-        {key:'deepseek', label:'DeepSeek'},
-      ];
-
-      const voteCards = mdefs.map(({key, label}) => {
-        const m = s.models[key];
-        if (!m) return `<div class="bot-vote-card vote-fail">
-          <div class="bot-vote-name">${label}</div>
-          <div class="bot-vote-dir" style="color:var(--muted)">✗</div>
-          <div style="font-size:10px;color:var(--muted);margin-top:4px">OFFLINE</div>
-        </div>`;
-        const isYes = m.direction === 'YES';
-        const cls   = isYes ? 'vote-yes' : 'vote-no';
-        const arrow = isYes ? '▲' : '▼';
-        const col   = isYes ? 'var(--green)' : 'var(--red)';
-        const what  = isYes
-          ? `Looking for price to stay <b>ABOVE</b> strike`
-          : `Looking for price to fall <b>BELOW</b> strike`;
-        return `<div class="bot-vote-card ${cls}">
-          <div class="bot-vote-name">${label}</div>
-          <div class="bot-vote-dir" style="color:${col}">${arrow} ${m.direction}</div>
-          <div class="bot-vote-prob" style="color:${col}">${m.prob}%</div>
-          <div class="bot-vote-reason">${what}<br><span style="opacity:.7">${m.reasoning || ''}</span></div>
-        </div>`;
-      }).join('');
-
-      // Consensus calculation — only count working models
-      const working  = mdefs.map(d => s.models[d.key]).filter(Boolean);
-      const yesCount = working.filter(m => m.direction === 'YES').length;
-      const noCount  = working.filter(m => m.direction === 'NO').length;
-      const total    = working.length;
-      const allAgree = total > 0 && (yesCount === total || noCount === total);
-      const winner   = yesCount >= noCount ? 'YES' : 'NO';
-
-      let bannerHtml;
-      if (total === 0) {
-        bannerHtml = `<div class="consensus-banner cbanner-split">All models offline — no trade</div>`;
-      } else if (allAgree) {
-        const cls   = winner === 'YES' ? 'cbanner-yes' : 'cbanner-no';
-        const arrow = winner === 'YES' ? '▲' : '▼';
-        const what  = winner === 'YES' ? 'ABOVE strike at expiry' : 'BELOW strike at expiry';
-        bannerHtml = `<div class="consensus-banner ${cls}">
-          ${arrow}&nbsp;FULL CONSENSUS — BET&nbsp;<b>${winner}</b>
-          &nbsp;·&nbsp; ${total}/${total} bots agree
-          &nbsp;·&nbsp; all expect price to finish&nbsp;<b>${what}</b>
-          <span class="cbanner-sub">&nbsp;→ trade proceeds if risk gates pass</span>
-        </div>`;
-      } else {
-        const leadCount = Math.max(yesCount, noCount);
-        bannerHtml = `<div class="consensus-banner cbanner-split">
-          ~ SPLIT VOTE — ${yesCount} say YES &nbsp;·&nbsp; ${noCount} say NO
-          &nbsp;·&nbsp; leaning <b>${winner}</b> (${leadCount}/${total})
-          <span class="cbanner-sub">&nbsp;→ models disagree, no trade this cycle</span>
-        </div>`;
-      }
-
-      consensusHtml = `<div class="consensus-panel">
-        <div class="consensus-title">AI Bot Votes — What Each Model Is Watching</div>
-        <div class="bot-vote-cards">${voteCards}</div>
-        ${bannerHtml}
-      </div>`;
-    }
-
-    // Checklist
-    let checklistHtml = '';
+    signalHtml = `<div class="watch-signal">
+      <span class="watch-label">Last signal</span>
+      <span style="color:var(--blue);font-weight:700">${s.ticker}</span>
+      <span style="color:var(--muted)">&#8594;</span>
+      <span class="${dirCls}" style="font-weight:700;font-size:1rem">${s.direction}</span>
+      <span style="font-size:11px;color:var(--muted)">prob ${s.prob}% &middot; conf ${s.confidence}%</span>
+      <span class="${actCls}">${s.action}</span>
+      <span style="font-size:11px;color:var(--muted)">${lookFor}</span>
+      ${s.skip_reason ? '<span style="color:var(--yellow);font-size:10px">(' + s.skip_reason + ')</span>' : ''}
+    </div>`;
     if (s.checks && s.checks.length) {
       const items = s.checks.map(c => {
-        const passed = c.passed;
-        const icon   = passed === true ? '✓' : passed === false ? '✗' : '—';
-        const cls    = passed === true ? 'chk-pass' : passed === false ? 'chk-fail' : 'chk-skip';
-        const detail = (c.detail && c.detail !== '—')
-          ? `<span class="chk-detail">${c.detail}</span>` : '';
-        return `<div class="chk-item ${cls}">
-          <span class="chk-icon">${icon}</span>
-          <span class="chk-label">${c.label}</span>${detail}
-        </div>`;
+        const icon = c.passed === true ? '&#10003;' : c.passed === false ? '&#10007;' : '&#8212;';
+        const cls  = c.passed === true ? 'chk-pass' : c.passed === false ? 'chk-fail' : 'chk-skip';
+        const det  = (c.detail && c.detail !== '—') ? `<span class="chk-detail">${c.detail}</span>` : '';
+        return `<div class="chk-item ${cls}"><span class="chk-icon">${icon}</span><span class="chk-label">${c.label}</span>${det}</div>`;
       }).join('');
       checklistHtml = `<div class="checklist">${items}</div>`;
     }
+  }
 
-    signalHtml = `
-      <div class="watch-signal">
-        <span class="watch-label">Last signal</span>
-        <span style="color:var(--blue);font-weight:700">${s.ticker}</span>
-        <span style="color:var(--muted)">→</span>
-        <span class="${dirCls}" style="font-weight:700;font-size:1rem">${s.direction}</span>
-        <span style="font-size:11px;color:var(--muted)">prob ${s.prob}%  ·  conf ${s.confidence}%</span>
-        <span class="${actCls}">${s.action}</span>
-        <span style="font-size:11px;color:var(--muted)">${lookFor}</span>
-        ${s.skip_reason ? '<span style="color:var(--yellow);font-size:10px">(' + s.skip_reason + ')</span>' : ''}
-      </div>
-      ${checklistHtml}
-      ${consensusHtml}`;
+  // AI Bot Votes — always shown at the bottom of Cycle Watch
+  const mdefs = [
+    {key:'claude',   label:'Claude'},
+    {key:'gpt',      label:'GPT-4o'},
+    {key:'gemini',   label:'Gemini'},
+    {key:'deepseek', label:'DeepSeek'},
+  ];
+  let consensusHtml;
+  const models = s && s.models;
+  if (!models) {
+    // No signal yet — show placeholder cards
+    const placeholders = mdefs.map(({label}) => `
+      <div class="bot-vote-card vote-fail">
+        <div class="bot-vote-name">${label}</div>
+        <div class="bot-vote-dir" style="color:var(--muted);font-size:1rem">?</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">Waiting...</div>
+      </div>`).join('');
+    consensusHtml = `<div class="consensus-panel">
+      <div class="consensus-title">AI Bot Votes — What Each Model Is Watching</div>
+      <div class="bot-vote-cards">${placeholders}</div>
+      <div class="consensus-banner cbanner-split">Waiting for next cycle evaluation...</div>
+    </div>`;
+  } else {
+    const voteCards = mdefs.map(({key, label}) => {
+      const m = models[key];
+      if (!m) return `<div class="bot-vote-card vote-fail">
+        <div class="bot-vote-name">${label}</div>
+        <div class="bot-vote-dir" style="color:var(--muted)">&#10007;</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">OFFLINE</div>
+      </div>`;
+      const isYes = m.direction === 'YES';
+      const cls   = isYes ? 'vote-yes' : 'vote-no';
+      const arrow = isYes ? '&#9650;' : '&#9660;';
+      const col   = isYes ? 'var(--green)' : 'var(--red)';
+      const what  = isYes ? 'Expects price <b>ABOVE</b> strike' : 'Expects price <b>BELOW</b> strike';
+      return `<div class="bot-vote-card ${cls}">
+        <div class="bot-vote-name">${label}</div>
+        <div class="bot-vote-dir" style="color:${col}">${arrow} ${m.direction}</div>
+        <div class="bot-vote-prob" style="color:${col}">${m.prob}%</div>
+        <div class="bot-vote-reason">${what}<br><span style="opacity:.7">${m.reasoning || ''}</span></div>
+      </div>`;
+    }).join('');
+    const working  = mdefs.map(d => models[d.key]).filter(Boolean);
+    const yesCount = working.filter(m => m.direction === 'YES').length;
+    const noCount  = working.filter(m => m.direction === 'NO').length;
+    const total    = working.length;
+    const allAgree = total > 0 && (yesCount === total || noCount === total);
+    const winner   = yesCount >= noCount ? 'YES' : 'NO';
+    let bannerHtml;
+    if (total === 0) {
+      bannerHtml = `<div class="consensus-banner cbanner-split">All models offline &mdash; no trade</div>`;
+    } else if (allAgree) {
+      const bcls  = winner === 'YES' ? 'cbanner-yes' : 'cbanner-no';
+      const barrow = winner === 'YES' ? '&#9650;' : '&#9660;';
+      const bwhat  = winner === 'YES' ? 'ABOVE strike' : 'BELOW strike';
+      bannerHtml = `<div class="consensus-banner ${bcls}">
+        ${barrow}&nbsp;FULL CONSENSUS &mdash; BET <b>${winner}</b>
+        &nbsp;&middot;&nbsp; ${total}/${total} bots agree &middot; all expect price to finish <b>${bwhat}</b>
+        <span class="cbanner-sub">&nbsp;&#8594; trade if risk gates pass</span>
+      </div>`;
+    } else {
+      bannerHtml = `<div class="consensus-banner cbanner-split">
+        &#8764; SPLIT VOTE &mdash; ${yesCount} say YES &middot; ${noCount} say NO
+        &nbsp;&middot;&nbsp; leaning <b>${winner}</b> (${Math.max(yesCount,noCount)}/${total})
+        <span class="cbanner-sub">&nbsp;&#8594; models disagree, no trade</span>
+      </div>`;
+    }
+    consensusHtml = `<div class="consensus-panel">
+      <div class="consensus-title">AI Bot Votes — What Each Model Is Watching</div>
+      <div class="bot-vote-cards">${voteCards}</div>
+      ${bannerHtml}
+    </div>`;
   }
 
   wrap.innerHTML = `
@@ -899,7 +896,9 @@ function renderWatchSection(w) {
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    ${signalHtml}`;
+    ${signalHtml}
+    ${checklistHtml}
+    ${consensusHtml}`;
 }
 
 /* ---- render open positions ---- */
