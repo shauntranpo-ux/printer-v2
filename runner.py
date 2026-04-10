@@ -460,8 +460,8 @@ class TradingBot:
         )
         market_obj = Market(
             ticker       = ticker,
-            yes_price    = market.get("yes_ask", 50),
-            no_price     = market.get("no_ask", 50),
+            yes_price    = market.get("yes_ask") or 50,
+            no_price     = market.get("no_ask")  or 50,
             strike_price = float(market.get("strike_price") or 0),
             close_time   = close_dt,
         )

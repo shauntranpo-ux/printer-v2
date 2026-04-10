@@ -132,6 +132,12 @@ class Strategy:
             log.info("Ticker %s already has an open trade — skipping entry", ticker)
             return None
 
+        # Guard: skip entry when there is no order book (both asks = 0).
+        # Placing a limit order at the 50¢ default would always be resting/unfilled.
+        if market.get("yes_ask", 0) == 0 and market.get("no_ask", 0) == 0:
+            log.info("No order book prices for %s — skipping entry (book is empty)", ticker)
+            return None
+
         # Step 1 — edge + Kelly size
         # Use `or 50` so that explicit 0 from the API also falls back to 50¢
         ask_cents    = market.get("yes_ask" if direction == "yes" else "no_ask") or 50
@@ -173,10 +179,10 @@ class Strategy:
             await self._telegram.send_error(str(exc), "enter_trade")
             return None
 
-        # Check fill status — resting means no counter-party at our price
+        # Check fill status — Kalshi statuses: filled, partially_filled, resting, canceled
         order_status = order_result.get("status", "unknown")
         order_id     = order_result.get("order_id", "")
-        if order_status not in ("filled", "executed", "unknown"):
+        if order_status not in ("filled", "partially_filled", "unknown"):
             # Order is sitting unfilled (resting/pending) — cancel it and notify
             log.warning(
                 "Order for %s is %s (unfilled) — cancelling resting order %s",

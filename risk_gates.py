@@ -109,9 +109,9 @@ class RiskGates:
             return False, reason
 
         if direction == "yes":
-            market_price = market.get("yes_ask", 50) / 100.0
+            market_price = (market.get("yes_ask") or 50) / 100.0
         else:
-            market_price = market.get("no_ask", 50) / 100.0
+            market_price = (market.get("no_ask") or 50) / 100.0
 
         edge   = consensus_prob - market_price
         passed = edge >= min_edge
@@ -146,10 +146,10 @@ class RiskGates:
 
         if direction == "yes":
             asks            = ob.get("yes_asks", [])
-            ask_price_cents = market.get("yes_ask", 50)
+            ask_price_cents = market.get("yes_ask") or 50
         else:
             asks            = ob.get("no_asks", [])
-            ask_price_cents = market.get("no_ask", 50)
+            ask_price_cents = market.get("no_ask") or 50
 
         if not asks:
             reason = f"No {direction.upper()} asks in order book"
