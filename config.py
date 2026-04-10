@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Trading
     # ------------------------------------------------------------------
-    MAX_BET_SIZE: float = Field(default=25.0, description="Max dollars per trade")
+    MAX_BET_SIZE: float = Field(default=5.0, description="Max dollars per trade")
     DAILY_LOSS_LIMIT: float = Field(default=100.0, description="Halt trading after losing this much today (dollars)")
     KELLY_FRACTION: float = Field(default=0.5, description="Fractional Kelly multiplier (0.5 = half-Kelly)")
     MIN_EDGE: float = Field(default=0.02, description="Minimum implied edge (2%) required to place a trade")
