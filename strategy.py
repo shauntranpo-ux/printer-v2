@@ -186,7 +186,15 @@ class Strategy:
                     order_type="market",
                 )
             except Exception as exc:
-                # API / network failure — retry
+                exc_str = str(exc).lower()
+                # Permanent errors — don't retry (retrying won't fix these)
+                if any(kw in exc_str for kw in ("insufficient", "balance", "funds", "not enough")):
+                    log.error(
+                        "Market order failed (insufficient balance) for %s: %s — not retrying",
+                        ticker, exc,
+                    )
+                    return None
+                # Transient API / network failure — retry
                 log.error(
                     "Market order attempt %d/%d failed for %s: %s",
                     attempt + 1, _MAX_ATTEMPTS, ticker, exc,
@@ -197,8 +205,9 @@ class Strategy:
                 continue
 
             # Order placed — check fill
+            # Kalshi uses "executed" to mean fully filled (not "filled")
             final_status = order_result.get("status", "unknown")
-            if final_status in ("filled", "partially_filled"):
+            if final_status in ("filled", "partially_filled", "executed"):
                 log.info(
                     "Market order filled — %s  attempt %d/%d  status=%s",
                     ticker, attempt + 1, _MAX_ATTEMPTS, final_status,
@@ -462,7 +471,6 @@ class Strategy:
                         order_type="market",
                     )
                 except Exception as exc:
-                    # API / network failure — retry
                     log.warning(
                         "Trade %d: market sell attempt %d/%d failed (%s)",
                         trade.id, attempt + 1, _MAX_ATTEMPTS, exc,
@@ -477,7 +485,7 @@ class Strategy:
                     continue
 
                 sell_status = sell_result.get("status", "unknown")
-                if sell_status in ("filled", "partially_filled"):
+                if sell_status in ("filled", "partially_filled", "executed"):
                     fp = sell_result.get("filled_price")
                     if fp:
                         final_exit_price = fp

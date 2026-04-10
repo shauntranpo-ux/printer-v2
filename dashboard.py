@@ -744,7 +744,7 @@ function renderCards(stats) {
 }
 
 /* ---- render cycle watch ---- */
-function renderWatchSection(w) {
+function renderWatchSection(w, positions) {
   const wrap = document.getElementById('watch-wrap');
   if (!w || !w.markets || w.markets.length === 0) {
     wrap.innerHTML = '<div class="empty">Waiting for first cycle...</div>';
@@ -890,6 +890,45 @@ function renderWatchSection(w) {
   }
 
   // ── Build all signal panels ──────────────────────────────────────────────
+  // Build a quick lookup: ticker → open trade (from /api/positions)
+  const openByTicker = {};
+  (positions || []).forEach(p => { openByTicker[p.ticker] = p; });
+
+  // Render a "ORDER FILLED" banner when there is already an open trade for a ticker
+  function renderFilledPanel(sig, trade) {
+    const sTicker = sig.ticker || '';
+    const sAsset  = sTicker.replace(/^KX/,'').replace(/15M.*/,'');
+    const sLbl    = tickerLabel(sTicker, sAsset);
+    const sLabel  = sLbl.name + (sLbl.sub ? ' &middot; ' + sLbl.sub : '');
+    const dirCls  = trade.direction === 'YES' ? 'dir-yes' : 'dir-no';
+    const dirArrow = trade.direction === 'YES' ? '&#9650;' : '&#9660;';
+    const dirWord  = trade.direction === 'YES' ? 'UP / YES' : 'DOWN / NO';
+    const entryTs  = trade.timestamp ? ts(trade.timestamp) : '—';
+    const entryPx  = trade.entry_price != null ? trade.entry_price + '¢' : '—';
+    const curPx    = trade.current_price != null ? trade.current_price + '¢' : '—';
+    const pnlPctStr = trade.pnl_pct != null
+      ? `<span class="${trade.pnl_pct >= 0 ? 'dir-yes' : 'dir-no'}">${trade.pnl_pct >= 0 ? '+' : ''}${trade.pnl_pct.toFixed(1)}%</span>`
+      : '—';
+    const costStr = trade.size_dollars != null ? '$' + trade.size_dollars.toFixed(2) : '—';
+    return `<div class="consensus-panel">
+      <div class="consensus-title" style="display:flex;align-items:center;justify-content:space-between">
+        <span>Order Filled &mdash; <span style="color:var(--blue)">${sLabel}</span></span>
+        <span class="ens-action action-TRADE" style="font-size:11px">FILLED</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:18px;padding:14px 0 8px;flex-wrap:wrap">
+        <div style="font-size:2.2rem;font-weight:900;class="${dirCls}"">${dirArrow} <span class="${dirCls}">${dirWord}</span></div>
+        <div style="display:flex;gap:24px;flex-wrap:wrap">
+          <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Filled at</div><div style="font-size:1.3rem;font-weight:700">${entryPx}</div></div>
+          <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Cost</div><div style="font-size:1.3rem;font-weight:700">${costStr}</div></div>
+          <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Current</div><div style="font-size:1.3rem;font-weight:700">${curPx}</div></div>
+          <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">P&amp;L</div><div style="font-size:1.3rem;font-weight:700">${pnlPctStr}</div></div>
+          <div><div style="font-size:10px;color:var(--muted);text-transform:uppercase">Opened</div><div style="font-size:1.1rem;color:var(--muted)">${entryTs}</div></div>
+        </div>
+      </div>
+      <div class="consensus-banner cbanner-yes" style="margin-top:4px">&#10003; Order executed &mdash; position is live. Monitoring for exit conditions.</div>
+    </div>`;
+  }
+
   const allSignals = w.signals && w.signals.length
     ? w.signals
     : (w.last_signal ? [w.last_signal] : []);
@@ -908,7 +947,10 @@ function renderWatchSection(w) {
       <div class="consensus-banner cbanner-split">Waiting for next cycle evaluation...</div>
     </div>`;
   } else {
-    signalPanels = allSignals.map(renderSignalPanel).join('');
+    signalPanels = allSignals.map(sig => {
+      const openTrade = openByTicker[sig.ticker];
+      return openTrade ? renderFilledPanel(sig, openTrade) : renderSignalPanel(sig);
+    }).join('');
   }
 
   wrap.innerHTML = `
@@ -1116,7 +1158,7 @@ async function refresh() {
     const { stats, positions, trades, botStatus, watch, dirStats, modelPerf, dailyPnl } = await fetchAll();
     renderHeader(stats, botStatus);
     renderCards(stats);
-    renderWatchSection(watch);
+    renderWatchSection(watch, positions);
     renderPositions(positions);
     renderTrades(trades);
     renderEnsemble(stats.last_ensemble);
