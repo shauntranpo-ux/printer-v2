@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 import time
@@ -89,6 +90,11 @@ class TradingBot:
         6. Log startup event to database
         7. Check for STOP file — exit immediately if found
         """
+        print("BOT STARTING - ENV CHECK")
+        print(f"KALSHI_KEY SET: {bool(os.getenv('KALSHI_API_KEY'))}")
+        print(f"TELEGRAM SET: {bool(os.getenv('TELEGRAM_BOT_TOKEN'))}")
+        print(f"PRIVATE_KEY SET: {bool(os.getenv('KALSHI_PRIVATE_KEY'))}")
+
         log.info("=== printer-v2 starting [%s] ===", settings.env)
 
         # 2. Database
