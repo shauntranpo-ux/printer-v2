@@ -495,7 +495,7 @@ class TradingBot:
         checks: list[dict] = []
 
         # Check 1: Direction (always has one based on consensus_prob)
-        dir_label = "YES" if result.consensus_prob > 0.5 else "NO"
+        dir_label = "UP" if result.consensus_prob > 0.5 else "DOWN"
         checks.append({
             "id": "signal", "label": "Direction",
             "passed": True,
@@ -537,11 +537,12 @@ class TradingBot:
                 log.info("Skipping %s: %s", ticker, result.skip_reason)
             return
 
-        # Check 4: Momentum (informational only — no longer blocks trades)
+        # Check 4: Momentum — green if price action supports the direction
         direction = result.direction   # "yes" | "no"
+        momentum_ok = (momentum > 0) if direction == "yes" else (momentum < 0)
         checks.append({
             "id": "momentum", "label": "Momentum",
-            "passed": True,
+            "passed": momentum_ok,
             "detail": f"{momentum:+.3f}",
         })
 
@@ -555,8 +556,12 @@ class TradingBot:
         ]:
             gd = gate_result.gate_details.get(gate_key)
             if gd is not None:
+                # Gate reason strings include a verbose prefix (e.g. "Daily loss: $0.00 / $100")
+                # that duplicates the label — strip everything up to and including the first ": "
+                reason = gd["reason"]
+                detail = reason.split(": ", 1)[-1] if ": " in reason else reason
                 checks.append({"id": chk_id, "label": chk_label,
-                               "passed": gd["passed"], "detail": gd["reason"]})
+                               "passed": gd["passed"], "detail": detail})
             else:
                 checks.append({"id": chk_id, "label": chk_label, "passed": None, "detail": "—"})
 
