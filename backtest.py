@@ -4,7 +4,7 @@ backtest.py — Backtest printer-v2 strategy on historical BTC 1m data.
 Usage:
     python backtest.py --file btc_1m_data.xlsx
     python backtest.py --file data.csv --start 2020-01-01 --end 2023-12-31
-    python backtest.py --file data.csv --bankroll 500 --max-bet 25 --tp 0.50 --sl 0.35
+    python backtest.py --file data.csv --bankroll 500 --max-bet 25 --tp 0.55 --sl 0.80
 
 Dependencies (pip install if missing):
     pandas openpyxl scipy matplotlib numpy
@@ -34,8 +34,8 @@ from scipy.stats import norm
 
 DEFAULT_BANKROLL       = 500.0
 DEFAULT_MAX_BET        = 25.0
-DEFAULT_TP             = 0.50   # take profit at +50 %
-DEFAULT_SL             = 0.35   # stop loss at -35 %
+DEFAULT_TP             = 0.55   # take profit at +55 % (or hold to expiry if bid ≥ 75¢)
+DEFAULT_SL             = 0.80   # stop loss at -80 %
 MIN_EDGE               = 0.03
 MIN_EDGE_CHOPPY        = 0.08   # higher bar for mean reversion
 MIN_CONF               = 0.18   # calibrated for rule-based proxy
@@ -606,10 +606,20 @@ def run_backtest(
             sl_threshold = entry_cents * (1.0 - sl_trade)
 
             if contract_at_best >= tp_threshold:
-                reason     = "take_profit"
-                exit_cents = tp_threshold
-                pnl        = (exit_cents - entry_cents) * contracts / 100.0
-                pnl_pct    = pnl / cost
+                if contract_at_best >= 75.0:
+                    # Market bid ≥ 75¢ at TP level → hold to expiry.
+                    # At 75%+ implied probability, expected expiry payout
+                    # beats exiting now — let it settle at 100¢ or 0¢.
+                    won        = (btc_close >= strike) if direction == "YES" else (btc_close < strike)
+                    reason     = "expired_tp"
+                    exit_cents = 100.0 if won else 0.0
+                    pnl        = contracts * (100.0 - entry_cents) / 100.0 if won else -cost
+                    pnl_pct    = pnl / cost
+                else:
+                    reason     = "take_profit"
+                    exit_cents = tp_threshold
+                    pnl        = (exit_cents - entry_cents) * contracts / 100.0
+                    pnl_pct    = pnl / cost
             elif contract_at_worst <= sl_threshold:
                 reason     = "stop_loss"
                 exit_cents = sl_threshold
@@ -821,6 +831,7 @@ def print_report(
 {SEP}
   EXIT REASONS  (single 15-min candle per trade)
 {rl('take_profit', 'Take profit:')}
+{rl('expired_tp',  'Held→expiry (TP):')}
 {rl('stop_loss',   'Stop loss:')}
 {rl('expired',     'Expired (binary):')}
 {SEP}
