@@ -133,12 +133,6 @@ class Strategy:
             log.info("Ticker %s already has an open trade — skipping entry", ticker)
             return None
 
-        # Guard: skip entry when there is no order book (both asks = 0).
-        # Placing a limit order at the 50¢ default would always be resting/unfilled.
-        if market.get("yes_ask", 0) == 0 and market.get("no_ask", 0) == 0:
-            log.info("No order book prices for %s — skipping entry (book is empty)", ticker)
-            return None
-
         # Step 1 — edge + Kelly size
         # Use `or 50` so that explicit 0 from the API also falls back to 50¢
         ask_cents    = market.get("yes_ask" if direction == "yes" else "no_ask") or 50
