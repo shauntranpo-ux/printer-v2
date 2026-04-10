@@ -8,6 +8,7 @@ import asyncio
 import base64
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -444,11 +445,12 @@ class KalshiClient:
         action_lc = action.lower()
 
         body: dict[str, Any] = {
-            "ticker": ticker,
-            "action": action_lc,
-            "side":   side_lc,
-            "type":   order_type,
-            "count":  count,
+            "ticker":          ticker,
+            "client_order_id": str(uuid.uuid4()),   # required by Kalshi v2
+            "action":          action_lc,
+            "side":            side_lc,
+            "type":            order_type,
+            "count":           count,
         }
 
         if order_type == "limit":
@@ -458,6 +460,14 @@ class KalshiClient:
             no_price  = price if side_lc == "no"  else (100 - price)
             body["yes_price"] = yes_price
             body["no_price"]  = no_price
+        elif order_type == "market":
+            # Kalshi market orders still need a worst-acceptable yes_price.
+            # Buy:  sweep aggressively (pay up to 99¢ YES / 99¢ NO side)
+            # Sell: accept any price (down to 1¢)
+            if action_lc == "buy":
+                body["yes_price"] = 99 if side_lc == "yes" else 1
+            else:
+                body["yes_price"] = 1 if side_lc == "yes" else 99
 
         try:
             data = await self._post("/portfolio/orders", body)

@@ -14,7 +14,7 @@ import signal
 import sys
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -449,6 +449,24 @@ class TradingBot:
             )
         except (ValueError, AttributeError):
             log.warning("Invalid close_time for %s — skipping", ticker)
+            return
+
+        # Time window guard: don't trade in the first 2 min or last 3 min of the market
+        now_utc      = datetime.now(timezone.utc)
+        market_open  = close_dt - timedelta(minutes=15)
+        time_in      = (now_utc - market_open).total_seconds()
+        time_left    = (close_dt - now_utc).total_seconds()
+
+        if time_in < 120:
+            log.info(
+                "Market %s too new (%.0fs in, need 120s) — skipping", ticker, time_in
+            )
+            return
+        if time_left < 180:
+            log.info(
+                "Market %s too close to expiry (%.0fs left, need 180s) — skipping",
+                ticker, time_left,
+            )
             return
 
         btc_data   = BtcData(
