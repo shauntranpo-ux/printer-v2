@@ -14,7 +14,7 @@ from pathlib import Path
 
 from config import settings
 from database import Database, TradeRow
-from coinbase_feed import CoinbaseFeed
+from coinbase_feed import CoinbaseFeed, StaleDataError
 from ensemble import EnsembleEngine
 from risk_gates import RiskGates, BotState
 from strategy import Strategy
@@ -148,9 +148,11 @@ class BotRunner:
     async def _run_tick(self) -> None:
         log.info("--- tick ---")
 
-        if self.feed.is_stale(max_age_sec=30):
-            log.warning("BTC feed is stale — skipping tick")
-            await self.telegram.send_error("BTC feed stale — skipped tick", "tick")
+        try:
+            btc_price = self.feed.get_current_price()
+        except StaleDataError as exc:
+            log.warning("BTC feed stale — skipping tick: %s", exc)
+            await self.telegram.send_error(str(exc), "stale_feed")
             return
 
         # 1. Find the active BTC market on Kalshi
@@ -266,7 +268,7 @@ class BotRunner:
             edge=signal.confidence,
             ensemble_confidence=signal.confidence,
             model_spread=spread,
-            btc_price_at_entry=self.feed.get_price(),
+            btc_price_at_entry=btc_price,
             timestamp=ts,
         )
         self._last_trade_ts = time.time()
@@ -278,8 +280,8 @@ class BotRunner:
             entry_price=order_params.price_cents, size_dollars=order_params.dollar_size,
             contracts=order_params.contracts, kelly_fraction=None,
             edge=signal.confidence, ensemble_confidence=signal.confidence,
-            model_spread=spread, btc_price_at_entry=self.feed.get_price(),
-            btc_momentum=None, status="open",
+            model_spread=spread, btc_price_at_entry=btc_price,
+            btc_momentum=self.feed.get_momentum(), status="open",
             exit_price=None, exit_reason=None, pnl_dollars=None, closed_at=None,
         )
         await self.telegram.send_trade_entry(trade_row)

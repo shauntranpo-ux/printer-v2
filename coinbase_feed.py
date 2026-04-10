@@ -1,5 +1,5 @@
 """
-coinbase_feed.py — Coinbase WebSocket BTC price feed
+coinbase_feed.py — Coinbase Advanced Trade WebSocket BTC price feed
 """
 
 from __future__ import annotations
@@ -7,174 +7,166 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
+import math
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import websockets
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, WebSocketException
+
+from config import settings
 
 log = logging.getLogger(__name__)
 
-WS_URL = "wss://advanced-trade-ws.coinbase.com"
-PRODUCT_ID = "BTC-USD"
+CANDLE_SECONDS = 15 * 60   # 900 s per candle
 
 
 # ---------------------------------------------------------------------------
-# Data types
+# Exceptions
+# ---------------------------------------------------------------------------
+
+class StaleDataError(Exception):
+    """Raised when BTC price data is older than PRICE_STALENESS_SECONDS."""
+
+
+# ---------------------------------------------------------------------------
+# Candle dataclass
 # ---------------------------------------------------------------------------
 
 @dataclass
 class Candle:
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-    timestamp: float    # unix seconds, start of candle
-    interval_sec: int
-
-
-@dataclass
-class Tick:
-    price: float
-    volume_24h: float
-    timestamp: float
+    open:      float
+    high:      float
+    low:       float
+    close:     float
+    volume:    float          # approximate incremental vol from 24h delta
+    timestamp: datetime       # UTC start of the 15m interval
 
 
 # ---------------------------------------------------------------------------
-# Candle aggregator
+# Helpers
 # ---------------------------------------------------------------------------
 
-class CandleAggregator:
-    """Aggregates raw ticks into fixed-interval OHLCV candles."""
+def _bucket_for(dt: datetime) -> datetime:
+    """Snap a UTC datetime down to the nearest 15-minute boundary."""
+    snapped_minute = (dt.minute // 15) * 15
+    return dt.replace(minute=snapped_minute, second=0, microsecond=0)
 
-    def __init__(self, interval_sec: int, maxlen: int = 200):
-        self.interval_sec = interval_sec
-        self._candles: deque[Candle] = deque(maxlen=maxlen)
-        self._open: float | None = None
-        self._high: float = 0.0
-        self._low: float = float("inf")
-        self._volume: float = 0.0
-        self._bucket: int = 0   # unix timestamp of current bucket start
 
-    def _bucket_for(self, ts: float) -> int:
-        return int(ts // self.interval_sec) * self.interval_sec
-
-    def update(self, price: float, volume: float, ts: float) -> Candle | None:
-        """Feed a tick. Returns a completed candle when a new interval starts."""
-        bucket = self._bucket_for(ts)
-        completed: Candle | None = None
-
-        if self._open is None:
-            # First tick ever
-            self._bucket = bucket
-            self._open = price
-
-        elif bucket != self._bucket:
-            # New interval — emit completed candle
-            completed = Candle(
-                open=self._open,
-                high=self._high,
-                low=self._low,
-                close=price,        # close of old = first of new
-                volume=self._volume,
-                timestamp=self._bucket,
-                interval_sec=self.interval_sec,
-            )
-            self._candles.append(completed)
-            log.debug("Candle closed [%ds]: O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f",
-                      self.interval_sec, completed.open, completed.high,
-                      completed.low, completed.close, completed.volume)
-
-            # Reset for new bucket
-            self._bucket = bucket
-            self._open = price
-            self._high = price
-            self._low = price
-            self._volume = volume
-            return completed
-
-        # Update current bucket
-        self._high = max(self._high, price)
-        self._low = min(self._low, price)
-        self._volume += volume
-        return None
-
-    def get_candles(self, n: int | None = None) -> list[Candle]:
-        candles = list(self._candles)
-        if n is not None:
-            candles = candles[-n:]
-        return candles
-
-    @property
-    def current_close(self) -> float | None:
-        """Best estimate of current price (close of in-progress candle)."""
-        return None  # updated by feed directly
+def _empty_candle(price: float, bucket: datetime) -> dict:
+    return {"open": price, "high": price, "low": price,
+            "close": price, "volume": 0.0, "timestamp": bucket}
 
 
 # ---------------------------------------------------------------------------
-# Feed
+# CoinbaseFeed
 # ---------------------------------------------------------------------------
 
 class CoinbaseFeed:
-    def __init__(
-        self,
-        api_key: str = "",
-        api_secret: str = "",
-        reconnect_delay: float = 3.0,
-        max_reconnect_delay: float = 60.0,
-    ):
-        self._api_key = api_key
-        self._api_secret = api_secret
-        self._reconnect_delay = reconnect_delay
-        self._max_reconnect_delay = max_reconnect_delay
+    def __init__(self) -> None:
+        # ---- Public state (per spec) ----
+        self.current_price: float = 0.0
+        self.last_update:   datetime | None = None
+        self.candles:       deque[Candle] = deque(maxlen=20)
+        self.current_candle: dict = {}       # open/high/low/close/volume/timestamp
 
-        self._price: float = 0.0
-        self._volume_24h: float = 0.0
-        self._last_tick_ts: float = 0.0
-
-        self._agg_15m = CandleAggregator(interval_sec=15 * 60)
-        self._agg_1h  = CandleAggregator(interval_sec=60 * 60)
+        # ---- Private bookkeeping ----
+        self._volume_24h:     float = 0.0
+        self._candle_start_vol: float = 0.0  # 24h vol snapshot at candle open
+        self._current_bucket: datetime | None = None
 
         self._price_event = asyncio.Event()
-        self._running = False
+        self._running:  bool = False
         self._task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
-    def get_price(self) -> float:
-        return self._price
+    def get_current_price(self) -> float:
+        """Return current BTC price. Raises StaleDataError if data is old."""
+        if self.is_stale():
+            age = "never"
+            if self.last_update:
+                secs = (datetime.now(timezone.utc) - self.last_update).total_seconds()
+                age = f"{secs:.0f}s ago"
+            raise StaleDataError(
+                f"BTC price data is stale (last update: {age}). "
+                f"Threshold: {settings.PRICE_STALENESS_SECONDS}s"
+            )
+        return self.current_price
 
-    def get_volume_24h(self) -> float:
-        return self._volume_24h
+    def get_momentum(self) -> float:
+        """
+        Calculate BTC momentum from the last 4 completed 15m candles.
 
-    def get_candles_15m(self, n: int | None = None) -> list[Candle]:
-        return self._agg_15m.get_candles(n)
+        Three components (all normalised to [-1, 1] via tanh):
+          • Direction  (40%) — recency-weighted candle body direction
+          • Velocity   (40%) — overall price change across the 4-candle window
+          • Volume     (20%) — whether recent volume is above average
+                              (amplifies direction, does not reverse it)
 
-    def get_candles_1h(self, n: int | None = None) -> list[Candle]:
-        return self._agg_1h.get_candles(n)
+        Returns a float in [-1.0, 1.0]:
+          positive → bullish  |  negative → bearish  |  0 → neutral
+        """
+        candles = list(self.candles)[-4:]
+        n = len(candles)
+        if n < 2:
+            return 0.0
 
-    async def wait_for_price(self, timeout: float = 30.0) -> float:
-        """Block until at least one tick has been received."""
-        await asyncio.wait_for(self._price_event.wait(), timeout=timeout)
-        return self._price
+        # --- Direction: recency-weighted body slope per candle ---
+        all_weights = [0.1, 0.2, 0.3, 0.4]    # oldest → newest
+        weights = all_weights[-n:]
+        w_sum = sum(weights)
 
-    def is_stale(self, max_age_sec: float = 10.0) -> bool:
-        if self._last_tick_ts == 0.0:
+        direction_sum = 0.0
+        for c, w in zip(candles, weights):
+            if c.open > 0:
+                pct = (c.close - c.open) / c.open
+                # tanh(pct * 100): a 1% candle move → tanh(1) ≈ 0.76
+                direction_sum += math.tanh(pct * 100) * w
+        direction_score = direction_sum / w_sum
+
+        # --- Velocity: price change across the full window ---
+        first_close = candles[0].close
+        last_close  = candles[-1].close
+        velocity_score = 0.0
+        if first_close > 0:
+            velocity_score = math.tanh((last_close - first_close) / first_close * 100)
+
+        # --- Volume: is recent candle volume above average? ---
+        vols = [c.volume for c in candles]
+        mean_vol = sum(vols) / n
+        vol_factor = 0.0
+        if mean_vol > 0:
+            # ratio > 0 means recent vol is above average
+            ratio = vols[-1] / mean_vol - 1.0
+            # Volume confirms direction; it never flips the sign
+            vol_sign = 1.0 if direction_score >= 0 else -1.0
+            vol_factor = math.tanh(ratio) * vol_sign
+
+        momentum = 0.40 * direction_score + 0.40 * velocity_score + 0.20 * vol_factor
+        return max(-1.0, min(1.0, momentum))
+
+    def get_ohlcv(self, n: int = 4) -> list[Candle]:
+        """Return the last n completed 15m candles."""
+        return list(self.candles)[-n:]
+
+    def is_stale(self) -> bool:
+        """True if no tick received, or last tick is older than PRICE_STALENESS_SECONDS."""
+        if self.last_update is None:
             return True
-        return (time.time() - self._last_tick_ts) > max_age_sec
+        age = (datetime.now(timezone.utc) - self.last_update).total_seconds()
+        return age > settings.PRICE_STALENESS_SECONDS
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        self._running = True
-        self._task = asyncio.create_task(self._run_loop(), name="coinbase-feed")
+        """Launch connect() as a background task."""
+        self._task = asyncio.create_task(self.connect(), name="coinbase-feed")
         log.info("CoinbaseFeed started")
 
     async def stop(self) -> None:
@@ -187,81 +179,213 @@ class CoinbaseFeed:
                 pass
         log.info("CoinbaseFeed stopped")
 
+    async def wait_for_price(self, timeout: float = 30.0) -> float:
+        """Block until the first tick is received. Returns current price."""
+        await asyncio.wait_for(self._price_event.wait(), timeout=timeout)
+        return self.current_price
+
     # ------------------------------------------------------------------
-    # WebSocket loop
+    # Main connect loop (exponential backoff on disconnect)
     # ------------------------------------------------------------------
 
-    async def _run_loop(self) -> None:
-        delay = self._reconnect_delay
+    async def connect(self) -> None:
+        """
+        Long-running reconnect loop. Connects, subscribes, and handles
+        messages until stopped. Backs off exponentially on failures.
+        If a connection was alive for > 30s it is considered successful
+        and backoff resets to 1s.
+        """
+        self._running = True
+        delay   = 1.0
+        attempt = 0
+
         while self._running:
-            try:
-                await self._connect()
-                delay = self._reconnect_delay   # reset on clean run
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:
-                log.warning("Feed disconnected: %s — reconnecting in %.1fs", exc, delay)
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, self._max_reconnect_delay)
+            attempt += 1
+            connect_ts = asyncio.get_event_loop().time()
 
-    async def _connect(self) -> None:
-        log.info("Connecting to Coinbase WebSocket: %s", WS_URL)
-        async with websockets.connect(WS_URL, ping_interval=20, ping_timeout=10) as ws:
-            await self._subscribe(ws)
-            log.info("Subscribed to %s ticker", PRODUCT_ID)
+            try:
+                log.info(
+                    "Connecting to Coinbase WS (attempt %d): %s",
+                    attempt, settings.COINBASE_WS_URL,
+                )
+                await self._connect_once()
+
+            except asyncio.CancelledError:
+                raise
+
+            except (ConnectionClosed, WebSocketException) as exc:
+                log.warning("WS connection closed (attempt %d): %s", attempt, exc)
+
+            except OSError as exc:
+                log.warning("Network error (attempt %d): %s", attempt, exc)
+
+            except Exception as exc:
+                log.error("Unexpected feed error (attempt %d): %s", attempt, exc)
+
+            if not self._running:
+                break
+
+            # How long did the connection actually live?
+            lived = asyncio.get_event_loop().time() - connect_ts
+            if lived > 30.0:
+                # Treat as a healthy connection that dropped — reset backoff
+                log.info(
+                    "Feed reconnecting (was alive for %.0fs) — resetting backoff",
+                    lived,
+                )
+                delay   = 1.0
+                attempt = 0
+                await asyncio.sleep(1.0)
+            else:
+                log.warning(
+                    "Feed reconnecting in %.0fs (attempt %d)...", delay, attempt
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2.0, 60.0)
+
+    async def _connect_once(self) -> None:
+        """Single WebSocket session: connect → subscribe → message loop."""
+        async with websockets.connect(
+            settings.COINBASE_WS_URL,
+            ping_interval=20,
+            ping_timeout=10,
+            open_timeout=15,
+            max_size=2 ** 20,   # 1 MB
+        ) as ws:
+            await ws.send(json.dumps({
+                "type":        "subscribe",
+                "product_ids": [settings.BTC_PRODUCT_ID],
+                "channel":     "ticker",
+            }))
+            log.info("Subscribed to %s ticker channel", settings.BTC_PRODUCT_ID)
+
             async for raw in ws:
                 if not self._running:
                     return
-                self._handle_message(raw)
+                await self._handle_message(raw)
 
-    async def _subscribe(self, ws) -> None:
-        msg = {
-            "type": "subscribe",
-            "product_ids": [PRODUCT_ID],
-            "channel": "ticker",
-        }
-        # Coinbase Advanced Trade WS uses JWT auth for private channels;
-        # the public ticker channel works without credentials.
-        await ws.send(json.dumps(msg))
+    # ------------------------------------------------------------------
+    # Message handling
+    # ------------------------------------------------------------------
 
-    def _handle_message(self, raw: str) -> None:
+    async def _handle_message(self, raw: str | bytes) -> None:
         try:
             msg = json.loads(raw)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
+            log.debug("Unparseable WS message: %r", raw[:120])
             return
 
-        msg_type = msg.get("type") or msg.get("channel")
+        channel = msg.get("channel", "")
 
-        # Coinbase Advanced Trade wraps events in {channel, events:[...]}
-        if msg.get("channel") == "ticker":
+        if channel == "ticker":
             for event in msg.get("events", []):
                 for tick in event.get("tickers", []):
                     self._process_tick(tick)
-        elif msg_type == "ticker":
-            # Legacy format fallback
-            self._process_tick(msg)
+
+        elif channel == "subscriptions":
+            log.info("Subscription confirmed: %s", msg)
+
+        elif channel == "heartbeats":
+            pass    # routine keepalive — ignore
+
+        elif msg.get("type") == "error":
+            log.error(
+                "Coinbase WS error — %s: %s",
+                msg.get("error", "?"),
+                msg.get("message", ""),
+            )
+
+        # Silently drop any other message types (e.g., sequence gaps)
 
     def _process_tick(self, tick: dict) -> None:
-        price_str = tick.get("price") or tick.get("last_trade_price", "0")
-        vol_str   = tick.get("volume_24_h") or tick.get("volume_24h", "0")
+        price_raw = tick.get("price") or tick.get("last_trade_price", "")
+        vol_raw   = tick.get("volume_24_h") or tick.get("volume_24h", "0")
 
         try:
-            price = float(price_str)
-            volume = float(vol_str)
+            price     = float(price_raw)
+            vol_24h   = float(vol_raw)
         except (ValueError, TypeError):
             return
 
         if price <= 0:
             return
 
-        ts = time.time()
-        self._price = price
-        self._volume_24h = volume
-        self._last_tick_ts = ts
+        now    = datetime.now(timezone.utc)
+        bucket = _bucket_for(now)
 
-        # Feed candle aggregators (volume per tick not available from ticker,
-        # use 0 — we track price candles; volume_24h is a snapshot not incremental)
-        self._agg_15m.update(price, 0.0, ts)
-        self._agg_1h.update(price, 0.0, ts)
+        # Update public state
+        self.current_price = price
+        self.last_update   = now
+        self._volume_24h   = vol_24h
+
+        # ---- Candle management ----
+        if not self.current_candle:
+            # Very first tick — open the initial candle
+            self._current_bucket    = bucket
+            self._candle_start_vol  = vol_24h
+            self.current_candle     = _empty_candle(price, bucket)
+
+        elif bucket != self._current_bucket:
+            # 15-minute boundary crossed — finalise and store completed candle
+            incremental_vol = max(vol_24h - self._candle_start_vol, 0.0)
+            finished = Candle(
+                open      = self.current_candle["open"],
+                high      = self.current_candle["high"],
+                low       = self.current_candle["low"],
+                close     = price,          # price at the boundary is the close
+                volume    = incremental_vol,
+                timestamp = self._current_bucket,   # type: ignore[arg-type]
+            )
+            self.candles.append(finished)
+            log.debug(
+                "Candle closed [%s] O=%.2f H=%.2f L=%.2f C=%.2f V=%.4f",
+                self._current_bucket.strftime("%H:%M"),  # type: ignore[union-attr]
+                finished.open, finished.high,
+                finished.low, finished.close, finished.volume,
+            )
+
+            # Open the new candle
+            self._current_bucket   = bucket
+            self._candle_start_vol = vol_24h
+            self.current_candle    = _empty_candle(price, bucket)
+
+        else:
+            # Mid-candle tick — update OHLCV
+            c = self.current_candle
+            if price > c["high"]:
+                c["high"] = price
+            if price < c["low"]:
+                c["low"] = price
+            c["close"]  = price
+            c["volume"] = max(vol_24h - self._candle_start_vol, 0.0)
 
         self._price_event.set()
+
+    # ------------------------------------------------------------------
+    # Backward-compat aliases (used by ensemble.py and runner.py)
+    # ------------------------------------------------------------------
+
+    def get_price(self) -> float:
+        """Alias for get_current_price() — does not raise on stale data."""
+        return self.current_price
+
+    def get_candles_15m(self, n: int | None = None) -> list[Candle]:
+        candles = list(self.candles)
+        return candles if n is None else candles[-n:]
+
+    def get_candles_1h(self, n: int | None = None) -> list[Candle]:
+        """Synthesise 1h candles by merging groups of four 15m candles."""
+        source = list(self.candles)
+        hourly: list[Candle] = []
+        for i in range(0, len(source) - 3, 4):
+            group = source[i : i + 4]
+            if len(group) == 4:
+                hourly.append(Candle(
+                    open      = group[0].open,
+                    high      = max(c.high for c in group),
+                    low       = min(c.low  for c in group),
+                    close     = group[-1].close,
+                    volume    = sum(c.volume for c in group),
+                    timestamp = group[0].timestamp,
+                ))
+        return hourly if n is None else hourly[-n:]
