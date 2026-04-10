@@ -434,10 +434,9 @@ class TradingBot:
         if no_asks:
             market["no_ask"] = no_asks[0]["price"]
 
-        # Skip entirely if there is no ask liquidity on either side
+        # If no ask liquidity, warn but continue — ensemble will use the 50¢ default
         if not yes_asks and not no_asks:
-            log.debug("No ask liquidity for %s — skipping", ticker)
-            return
+            log.debug("No ask liquidity for %s — using 50¢ default price, proceeding to ensemble", ticker)
 
         try:
             close_dt = datetime.fromisoformat(

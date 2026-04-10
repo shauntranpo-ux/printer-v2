@@ -846,16 +846,27 @@ function renderWatchSection(w) {
   ];
   let consensusHtml;
   const models = s && s.models;
+  // Build market label for panel header
+  const evalTicker = s && s.ticker;
+  const evalAsset  = evalTicker ? (evalTicker.replace(/^KX/,'').replace(/15M.*/,'')) : null;
+  const evalLabel  = evalTicker ? (() => {
+    const lbl = tickerLabel(evalTicker, evalAsset);
+    return lbl.name + (lbl.sub ? ' &middot; ' + lbl.sub : '');
+  })() : null;
+  const panelTitle = evalLabel
+    ? `AI Bot Votes &mdash; <span style="color:var(--blue)">${evalLabel}</span>`
+    : 'AI Bot Votes &mdash; What Each Model Is Watching';
+
   if (!models) {
     // No signal yet — show placeholder cards
     const placeholders = mdefs.map(({label}) => `
       <div class="bot-vote-card vote-fail">
         <div class="bot-vote-name">${label}</div>
-        <div class="bot-vote-dir" style="color:var(--muted);font-size:1rem">?</div>
+        <div class="bot-vote-dir" style="color:var(--muted);font-size:1.6rem;font-weight:700">?</div>
         <div style="font-size:10px;color:var(--muted);margin-top:4px">Waiting...</div>
       </div>`).join('');
     consensusHtml = `<div class="consensus-panel">
-      <div class="consensus-title">AI Bot Votes — What Each Model Is Watching</div>
+      <div class="consensus-title">${panelTitle}</div>
       <div class="bot-vote-cards">${placeholders}</div>
       <div class="consensus-banner cbanner-split">Waiting for next cycle evaluation...</div>
     </div>`;
@@ -864,17 +875,19 @@ function renderWatchSection(w) {
       const m = models[key];
       if (!m) return `<div class="bot-vote-card vote-fail">
         <div class="bot-vote-name">${label}</div>
-        <div class="bot-vote-dir" style="color:var(--muted)">&#10007;</div>
+        <div class="bot-vote-dir" style="color:var(--muted);font-size:1.6rem;font-weight:700">&#10007;</div>
         <div style="font-size:10px;color:var(--muted);margin-top:4px">OFFLINE</div>
       </div>`;
       const isYes = m.direction === 'YES';
       const cls   = isYes ? 'vote-yes' : 'vote-no';
-      const arrow = isYes ? '&#9650;' : '&#9660;';
       const col   = isYes ? 'var(--green)' : 'var(--red)';
-      const what  = isYes ? 'Expects price <b>ABOVE</b> strike' : 'Expects price <b>BELOW</b> strike';
+      const badge = isYes
+        ? `<span style="background:#3fb95030;color:var(--green);border:1px solid #3fb95060;border-radius:4px;padding:3px 10px;font-size:1.3rem;font-weight:900;letter-spacing:1px">YES</span>`
+        : `<span style="background:#f8514930;color:var(--red);border:1px solid #f8514960;border-radius:4px;padding:3px 10px;font-size:1.3rem;font-weight:900;letter-spacing:1px">NO</span>`;
+      const what  = isYes ? 'Price will finish <b>above</b> strike' : 'Price will finish <b>below</b> strike';
       return `<div class="bot-vote-card ${cls}">
         <div class="bot-vote-name">${label}</div>
-        <div class="bot-vote-dir" style="color:${col}">${arrow} ${m.direction}</div>
+        <div style="margin:6px 0 4px">${badge}</div>
         <div class="bot-vote-prob" style="color:${col}">${m.prob}%</div>
         <div class="bot-vote-reason">${what}<br><span style="opacity:.7">${m.reasoning || ''}</span></div>
       </div>`;
@@ -905,7 +918,7 @@ function renderWatchSection(w) {
       </div>`;
     }
     consensusHtml = `<div class="consensus-panel">
-      <div class="consensus-title">AI Bot Votes — What Each Model Is Watching</div>
+      <div class="consensus-title">${panelTitle}</div>
       <div class="bot-vote-cards">${voteCards}</div>
       ${bannerHtml}
     </div>`;
