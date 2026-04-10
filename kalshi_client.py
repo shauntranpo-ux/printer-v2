@@ -369,20 +369,22 @@ class KalshiClient:
         side:   str,    # "yes" | "no"
         price:  int,    # cents (1–99)
         count:  int,    # number of contracts
+        action: str = "buy",   # "buy" | "sell"
     ) -> dict:
         """
-        Place a limit buy order.
+        Place a limit order.
 
         Returns:
           {"order_id": str, "status": str, "filled_price": int | None}
         """
-        side_lc = side.lower()
+        side_lc   = side.lower()
+        action_lc = action.lower()
         yes_price = price if side_lc == "yes" else (100 - price)
         no_price  = price if side_lc == "no"  else (100 - price)
 
         body: dict[str, Any] = {
             "ticker":    ticker,
-            "action":    "buy",
+            "action":    action_lc,
             "side":      side_lc,
             "type":      "limit",
             "count":     count,
@@ -400,8 +402,8 @@ class KalshiClient:
 
         order = data.get("order", data)
         log.info(
-            "Order placed: %s  %s %s x%d @ %dc  status=%s",
-            order.get("order_id", "?"), side_lc.upper(), ticker,
+            "Order placed: %s  %s %s %s x%d @ %dc  status=%s",
+            order.get("order_id", "?"), action_lc.upper(), side_lc.upper(), ticker,
             count, price, order.get("status", "?"),
         )
         return {

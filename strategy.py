@@ -314,12 +314,18 @@ class Strategy:
                     side=trade.direction.lower(),
                     price=exit_price,
                     count=trade.contracts,
+                    action="sell",
                 )
             except Exception as exc:
                 log.warning(
                     "Trade %d: sell order failed (%s) — "
-                    "recording close without fill",
+                    "position remains open on Kalshi; recording estimated close",
                     trade.id, exc,
+                )
+                await self._telegram.send_error(
+                    f"Sell failed for trade {trade.id} ({trade.market_ticker}): {exc}\n"
+                    f"Position may still be open on Kalshi — check manually.",
+                    "sell_order_failed",
                 )
 
         pnl       = (exit_price - trade.entry_price) * trade.contracts / 100.0
