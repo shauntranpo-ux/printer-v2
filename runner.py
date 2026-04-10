@@ -46,6 +46,7 @@ _CYCLE_SECONDS  = 15 * 60     # 15-minute interval
 _CYCLE_BUFFER   = 120          # seconds after boundary before first tick (2-min price discovery)
 _MAX_MARKETS    = 10           # top N markets evaluated per cycle
 _STOP_FILE      = Path("STOP")
+_START_FILE     = Path("START")  # must exist for live trading; absent = analysis-only (off mode)
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +151,8 @@ class TradingBot:
 
         # Initialise day tracker so we don't send a summary on first cycle
         self._last_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        log.info("Startup complete — entering main loop")
+        trading_mode = "LIVE TRADING" if _START_FILE.exists() else "OFF MODE (analysis only — press START on dashboard to enable trading)"
+        log.info("Startup complete — entering main loop  [%s]", trading_mode)
 
     # ------------------------------------------------------------------
     # Shutdown
@@ -588,7 +590,14 @@ class TradingBot:
                 )
             return
 
-        # --- Execute trade ---
+        # --- Execute trade (only when START file present — off mode skips this) ---
+        if not _START_FILE.exists():
+            log.info(
+                "Bot in OFF mode (no START file) — signal valid for %s but not trading",
+                ticker,
+            )
+            return
+
         trade = await self.strategy.enter_trade(
             market,
             result,

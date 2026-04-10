@@ -370,12 +370,15 @@ class KalshiClient:
         def _parse(raw: list | None) -> list[dict]:
             out = []
             for entry in (raw or []):
-                # API returns either [price, size] lists or {"price":…,"size":…} dicts
-                if isinstance(entry, list) and len(entry) >= 2:
-                    out.append({"price": int(entry[0]), "size": int(entry[1])})
-                elif isinstance(entry, dict):
-                    out.append({"price": int(entry.get("price", 0)),
-                                "size":  int(entry.get("size", 0))})
+                try:
+                    if isinstance(entry, list):
+                        if len(entry) >= 2:
+                            out.append({"price": int(entry[0]), "size": int(entry[1])})
+                    elif isinstance(entry, dict):
+                        out.append({"price": int(entry.get("price", 0)),
+                                    "size":  int(entry.get("size", 0))})
+                except (ValueError, TypeError):
+                    continue
             return out
 
         return {
@@ -487,10 +490,17 @@ class KalshiClient:
         )
 
         qty_filled = order.get("quantity_filled", 0)
+        fp = None
         if qty_filled:
-            fp = order.get("yes_price") if side_lc == "yes" else order.get("no_price")
-        else:
-            fp = None
+            # Actual fill price lives in the fills array (the sweep yes_price we sent
+            # is NOT the execution price for market orders).
+            fills = order.get("fills", [])
+            if fills:
+                fp = (fills[0].get("yes_price") if side_lc == "yes"
+                      else fills[0].get("no_price"))
+            # Fallback: use order price field if fills absent (limit orders)
+            if fp is None:
+                fp = order.get("yes_price") if side_lc == "yes" else order.get("no_price")
 
         return {
             "order_id":     order.get("order_id", ""),
