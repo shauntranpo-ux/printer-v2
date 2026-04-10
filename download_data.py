@@ -1,11 +1,14 @@
 """
-download_data.py — Download Bybit 1m OHLCV data for WFA/backtest
-(Bybit public API, no auth, no geo-restrictions)
+download_data.py — Download Coinbase Exchange 1m OHLCV data for WFA/backtest
+(Public API, no auth, no geo-restrictions — US-accessible)
+
+Supports: BTC, ETH, SOL, XRP, DOGE
+BNB and HYPE are not listed on Coinbase — skip for backtest.
 
 Usage:
-    py download_data.py               # downloads all 7 assets, 2 years
+    py download_data.py               # all 5 assets, 2 years
     py download_data.py --asset BTC   # single asset
-    py download_data.py --years 3     # extend lookback
+    py download_data.py --years 3     # longer lookback
 """
 
 from __future__ import annotations
@@ -13,140 +16,128 @@ from __future__ import annotations
 import argparse
 import csv
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
 
-BYBIT_REST = "https://api.bybit.com/v5/market/kline"
+COINBASE_REST = "https://api.exchange.coinbase.com/products/{product_id}/candles"
 
-# Bybit linear perpetual / spot symbols for each asset
-SYMBOLS = {
-    "BTC":  "BTCUSDT",
-    "ETH":  "ETHUSDT",
-    "SOL":  "SOLUSDT",
-    "XRP":  "XRPUSDT",
-    "DOGE": "DOGEUSDT",
-    "BNB":  "BNBUSDT",
-    "HYPE": "HYPEUSDT",
+# Coinbase product IDs per asset
+PRODUCTS = {
+    "BTC":  "BTC-USD",
+    "ETH":  "ETH-USD",
+    "SOL":  "SOL-USD",
+    "XRP":  "XRP-USD",
+    "DOGE": "DOGE-USD",
 }
 
+_BATCH  = 300   # max candles per Coinbase request
+_SLEEP  = 0.15  # seconds between requests (~6 req/s, under 10/s limit)
 
-def download(symbol: str, years: int, out_dir: Path) -> Path:
+
+def download(product_id: str, asset: str, years: int, out_dir: Path) -> Path:
     out_dir.mkdir(exist_ok=True)
-    out_path = out_dir / f"{symbol}_1m.csv"
+    out_path = out_dir / f"{asset}USDT_1m.csv"   # keep same naming as before
 
-    end_ms   = int(time.time() * 1000)
-    start_ms = end_ms - years * 365 * 24 * 60 * 60 * 1000
+    end_dt   = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(days=years * 365)
+    total_min = int((end_dt - start_dt).total_seconds() / 60)
+
+    print(f"\n{asset} ({product_id}): downloading ~{total_min:,} candles ({years}y)...")
 
     rows: list[list] = []
-    # Bybit returns results in DESCENDING order — walk backwards from end
-    cursor = end_ms
-    total  = (end_ms - start_ms) // (60 * 1000)
+    cursor_end = end_dt
 
-    print(f"\n{symbol}: downloading ~{total:,} candles ({years}y)...")
+    while cursor_end > start_dt:
+        cursor_start = max(cursor_end - timedelta(minutes=_BATCH), start_dt)
 
-    while cursor > start_ms:
         resp = requests.get(
-            BYBIT_REST,
+            COINBASE_REST.format(product_id=product_id),
             params={
-                "category": "linear",
-                "symbol":   symbol,
-                "interval": "1",        # 1m
-                "start":    start_ms,
-                "end":      cursor,
-                "limit":    1000,
+                "start":       cursor_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "end":         cursor_end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "granularity": 60,   # 1-minute candles
             },
+            headers={"Accept": "application/json"},
             timeout=15,
         )
         resp.raise_for_status()
-        data = resp.json()
+        batch = resp.json()
 
-        if data.get("retCode") != 0:
-            print(f"\n  API error: {data.get('retMsg')} — trying spot category")
-            resp2 = requests.get(
-                BYBIT_REST,
-                params={
-                    "category": "spot",
-                    "symbol":   symbol,
-                    "interval": "1",
-                    "start":    start_ms,
-                    "end":      cursor,
-                    "limit":    1000,
-                },
-                timeout=15,
-            )
-            resp2.raise_for_status()
-            data = resp2.json()
-
-        batch = data.get("result", {}).get("list", [])
         if not batch:
-            break
+            cursor_end = cursor_start - timedelta(seconds=1)
+            continue
 
-        # Each entry: [startTime(ms), open, high, low, close, volume, turnover]
         for k in batch:
-            t = int(k[0])
-            if t < start_ms:
-                continue
+            # Coinbase returns [time, low, high, open, close, volume]
+            # time is already unix seconds
             rows.append([
-                t // 1000,      # time (unix seconds)
-                float(k[1]),    # open
+                int(k[0]),      # time (unix seconds)
+                float(k[3]),    # open
                 float(k[2]),    # high
-                float(k[3]),    # low
+                float(k[1]),    # low
                 float(k[4]),    # close
                 float(k[5]),    # volume
             ])
 
-        # Advance cursor backwards (Bybit returns newest first)
-        oldest_in_batch = int(batch[-1][0])
-        if oldest_in_batch >= cursor:
-            break
-        cursor = oldest_in_batch - 1
+        cursor_end = cursor_start - timedelta(seconds=1)
+        done = total_min - int((cursor_end - start_dt).total_seconds() / 60)
+        pct  = min(done / total_min * 100, 100)
+        print(f"  {pct:5.1f}%  {len(rows):,} rows", end="\r", flush=True)
+        time.sleep(_SLEEP)
 
-        pct = (end_ms - cursor) / (end_ms - start_ms) * 100
-        print(f"  {min(pct,100):5.1f}%  {len(rows):,} rows", end="\r", flush=True)
-        time.sleep(0.05)
-
-    # Sort ascending by time
+    # Sort ascending, deduplicate
     rows.sort(key=lambda r: r[0])
+    seen: set[int] = set()
+    deduped = []
+    for r in rows:
+        if r[0] not in seen:
+            seen.add(r[0])
+            deduped.append(r)
 
     with open(out_path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["time", "open", "high", "low", "close", "volume"])
-        w.writerows(rows)
+        w.writerows(deduped)
 
-    print(f"\n  Saved {len(rows):,} rows -> {out_path}")
+    print(f"\n  Saved {len(deduped):,} rows -> {out_path}")
     return out_path
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Download Bybit 1m data for backtest/WFA")
-    parser.add_argument("--asset",  default="ALL", help="BTC/ETH/SOL/XRP/DOGE/BNB/HYPE or ALL")
-    parser.add_argument("--years",  type=int, default=2, help="Years of history (default 2)")
-    parser.add_argument("--outdir", default=".",  help="Output directory (default: current)")
+    parser = argparse.ArgumentParser(
+        description="Download Coinbase Exchange 1m data for backtest/WFA"
+    )
+    parser.add_argument("--asset",  default="ALL",
+                        help="BTC/ETH/SOL/XRP/DOGE or ALL (BNB/HYPE not on Coinbase)")
+    parser.add_argument("--years",  type=int, default=2,
+                        help="Years of history (default 2)")
+    parser.add_argument("--outdir", default=".",
+                        help="Output directory (default: current)")
     args = parser.parse_args()
 
     out_dir = Path(args.outdir)
     targets = (
-        list(SYMBOLS.keys())
+        list(PRODUCTS.keys())
         if args.asset.upper() == "ALL"
         else [args.asset.upper()]
     )
 
     for asset in targets:
-        sym = SYMBOLS.get(asset)
-        if not sym:
-            print(f"WARNING: {asset} not supported — skipping")
+        product_id = PRODUCTS.get(asset)
+        if not product_id:
+            print(f"WARNING: {asset} not available on Coinbase Exchange — skipping")
             continue
         try:
-            download(sym, args.years, out_dir)
+            download(product_id, asset, args.years, out_dir)
         except Exception as exc:
             print(f"\n  ERROR downloading {asset}: {exc}")
 
     print("\nDone. Run WFA with:")
     for asset in targets:
-        sym = SYMBOLS.get(asset)
-        if sym:
-            csv_path = out_dir / f"{sym}_1m.csv"
+        if asset in PRODUCTS:
+            csv_path = Path(args.outdir) / f"{asset}USDT_1m.csv"
             print(f"  py walkforward.py --file {csv_path} --n-strikes 9 --compound")
 
 
