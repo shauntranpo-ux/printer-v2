@@ -500,11 +500,12 @@ class TradingBot:
 
         # If WAIT or SKIP, fill remaining checks as not-evaluated and store
         _pending = [
-            ("momentum",  "Momentum"),
             ("drawdown",  "Daily loss"),
             ("data_age",  "Data fresh"),
         ]
         if result.action in ("WAIT", "SKIP"):
+            checks.append({"id": "momentum", "label": "Momentum",
+                           "passed": None, "detail": f"{momentum:+.3f}"})
             for cid, clabel in _pending:
                 checks.append({"id": cid, "label": clabel, "passed": None, "detail": "—"})
             await self._store_last_signal(ticker, result, checks)
@@ -515,31 +516,15 @@ class TradingBot:
                 log.info("Skipping %s: %s", ticker, result.skip_reason)
             return
 
-        # Check 4: Momentum confirmation
+        # Check 4: Momentum (informational only — no longer blocks trades)
         direction = result.direction   # "yes" | "no"
-        if direction == "yes":
-            mom_ok     = momentum >= -0.1
-            mom_detail = f"{momentum:+.3f} (need \u2265 -0.10)"
-        else:
-            mom_ok     = momentum <= 0.1
-            mom_detail = f"{momentum:+.3f} (need \u2264 +0.10)"
         checks.append({
             "id": "momentum", "label": "Momentum",
-            "passed": mom_ok,
-            "detail": mom_detail,
+            "passed": True,
+            "detail": f"{momentum:+.3f}",
         })
 
-        if not mom_ok:
-            for cid, clabel in _pending[1:]:   # drawdown, data_age
-                checks.append({"id": cid, "label": clabel, "passed": None, "detail": "—"})
-            await self._store_last_signal(ticker, result, checks)
-            log.info(
-                "Momentum (%.2f) contradicts %s signal on %s — skipping",
-                momentum, direction.upper(), ticker,
-            )
-            return
-
-        # --- 5 risk gates ---
+        # --- Risk gates ---
         gate_result = await self.risk.check_all(market, result, settings.MAX_BET_SIZE, asset=asset)
 
         # Checks 5-6: from gate results (edge/liquidity removed; skip internal confidence gate)
