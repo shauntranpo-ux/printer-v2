@@ -4,6 +4,7 @@ database.py — SQLite trade logging (aiosqlite async)
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from contextlib import asynccontextmanager
@@ -531,5 +532,28 @@ class Database:
                     updated = excluded.updated
                 """,
                 (str(balance), _now_utc()),
+            )
+            await db.commit()
+
+    async def get_market_watch(self) -> dict | None:
+        """Return the latest cycle watch data written by the runner, or None."""
+        async with self._conn() as db:
+            cur = await db.execute(
+                "SELECT value FROM bot_kv WHERE key = 'market_watch'"
+            )
+            row = await cur.fetchone()
+            return json.loads(row[0]) if row else None
+
+    async def set_market_watch(self, data: dict) -> None:
+        """Persist current cycle market scan data for the dashboard."""
+        async with self._conn() as db:
+            await db.execute(
+                """
+                INSERT INTO bot_kv (key, value, updated) VALUES ('market_watch', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value   = excluded.value,
+                    updated = excluded.updated
+                """,
+                (json.dumps(data), _now_utc()),
             )
             await db.commit()

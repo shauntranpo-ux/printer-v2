@@ -276,6 +276,27 @@ class TradingBot:
         markets = sorted(markets, key=lambda m: m.get("volume", 0), reverse=True)[:_MAX_MARKETS]
         log.info("Evaluating %d market(s): %s", len(markets), [m["ticker"] for m in markets])
 
+        # Persist market list for dashboard cycle-watch box
+        try:
+            await self.db.set_market_watch({
+                "cycle_ts":   cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "btc_price":  btc_price,
+                "markets": [
+                    {
+                        "ticker":     m["ticker"],
+                        "strike":     float(m.get("strike_price") or 0),
+                        "close_time": m.get("close_time", ""),
+                        "yes_ask":    m.get("yes_ask", 0),
+                        "no_ask":     m.get("no_ask", 0),
+                        "volume":     m.get("volume", 0),
+                    }
+                    for m in markets
+                ],
+                "last_signal": None,
+            })
+        except Exception as exc:
+            log.debug("market_watch store failed: %s", exc)
+
         # Quick-lookup set of tickers we already hold
         open_tickers = {t.market_ticker for t in open_trades}
 
@@ -370,6 +391,22 @@ class TradingBot:
             action         = result.action,
             skip_reason    = result.skip_reason,
         )
+
+        # Update cycle-watch with the latest signal for the dashboard
+        try:
+            watch = await self.db.get_market_watch() or {}
+            watch["last_signal"] = {
+                "ticker":     ticker,
+                "direction":  result.direction.upper() if result.direction != "flat" else "FLAT",
+                "action":     result.action,
+                "prob":       round(result.raw_prob * 100, 1),
+                "confidence": round(result.confidence * 100, 1),
+                "skip_reason": result.skip_reason,
+                "ts":         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            await self.db.set_market_watch(watch)
+        except Exception as exc:
+            log.debug("market_watch signal update failed: %s", exc)
 
         # Handle WAIT — models disagree; try again next cycle
         if result.action == "WAIT":

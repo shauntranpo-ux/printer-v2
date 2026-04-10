@@ -118,6 +118,11 @@ def _bot_status_info() -> dict:
     return {"status": status, "stop_file": stop, "start_file": start}
 
 
+async def _market_watch() -> dict | None:
+    """Return the latest cycle-watch data from bot_kv."""
+    return await _db.get_market_watch()
+
+
 async def _last_ensemble() -> dict | None:
     """Return the most recent row from ensemble_log as a dict."""
     async with _db._conn() as db:
@@ -271,6 +276,16 @@ def api_bot_status():
     return jsonify(info)
 
 
+@app.get("/api/market_watch")
+def api_market_watch():
+    _ensure_db()
+    try:
+        data = _run(_market_watch())
+        return jsonify(data or {})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.get("/api/balance")
 def api_balance():
     _ensure_db()
@@ -381,6 +396,12 @@ _HTML = r"""<!DOCTYPE html>
   .status-open{color:var(--blue)}.status-closed{color:var(--muted)}
   .status-expired{color:var(--yellow)}
 
+  /* Cycle watch */
+  .watch-meta{font-size:11px;color:var(--muted);margin-bottom:10px;display:flex;gap:16px;flex-wrap:wrap}
+  .watch-signal{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+                margin-top:12px;padding-top:10px;border-top:1px solid var(--border)}
+  .watch-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px}
+
   /* Empty state */
   .empty{color:var(--muted);text-align:center;padding:20px;font-size:12px}
 
@@ -421,6 +442,12 @@ _HTML = r"""<!DOCTYPE html>
 
 <!-- Stats cards -->
 <div class="cards" id="cards"></div>
+
+<!-- Cycle watch -->
+<div class="section">
+  <div class="section-title">Cycle Watch — What the Bot Is Looking At</div>
+  <div id="watch-wrap"><div class="empty">Waiting for first cycle...</div></div>
+</div>
 
 <!-- Open positions -->
 <div class="section">
@@ -480,13 +507,14 @@ function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 /* ---- data fetch ---- */
 async function fetchAll() {
-  const [stats, positions, trades, botStatus] = await Promise.all([
+  const [stats, positions, trades, botStatus, watch] = await Promise.all([
     fetch('/api/stats').then(r => r.json()).catch(()=>({})),
     fetch('/api/positions').then(r => r.json()).catch(()=>[]),
     fetch('/api/trades').then(r => r.json()).catch(()=>[]),
     fetch('/api/bot/status').then(r => r.json()).catch(()=>({})),
+    fetch('/api/market_watch').then(r => r.json()).catch(()=>null),
   ]);
-  return { stats, positions, trades, botStatus };
+  return { stats, positions, trades, botStatus, watch };
 }
 
 /* ---- bot control ---- */
@@ -585,6 +613,76 @@ function renderCards(stats) {
   `;
 }
 
+/* ---- render cycle watch ---- */
+function renderWatchSection(w) {
+  const wrap = document.getElementById('watch-wrap');
+  if (!w || !w.markets || w.markets.length === 0) {
+    wrap.innerHTML = '<div class="empty">Waiting for first cycle...</div>';
+    return;
+  }
+
+  const cycleTime = w.cycle_ts ? ts(w.cycle_ts) : '—';
+  const btcStr   = w.btc_price
+    ? '$' + w.btc_price.toLocaleString('en-US', {maximumFractionDigits: 0})
+    : '—';
+
+  const rows = w.markets.map(m => {
+    const closeDate = m.close_time ? new Date(m.close_time) : null;
+    const minsLeft  = closeDate
+      ? Math.max(0, Math.round((closeDate - Date.now()) / 60000))
+      : null;
+    const expiry    = minsLeft !== null ? minsLeft + 'm left' : '—';
+    const strike    = m.strike ? '$' + m.strike.toLocaleString('en-US') : '—';
+    const noAsk     = m.no_ask || (100 - (m.yes_ask || 0));
+    return `<tr>
+      <td style="color:var(--blue);font-weight:600">${m.ticker}</td>
+      <td>${strike}</td>
+      <td style="color:var(--muted)">${expiry}</td>
+      <td class="dir-yes">${m.yes_ask || '—'}¢ YES</td>
+      <td class="dir-no">${noAsk}¢ NO</td>
+      <td style="color:var(--muted)">${(m.volume || 0).toLocaleString()}</td>
+    </tr>`;
+  }).join('');
+
+  let signalHtml = '<div style="color:var(--muted);font-size:11px">No signal evaluated yet this cycle</div>';
+  if (w.last_signal) {
+    const s       = w.last_signal;
+    const dirCls  = s.direction === 'YES' ? 'dir-yes' : s.direction === 'NO' ? 'dir-no' : 'neu';
+    const actCls  = 'ens-action action-' + (s.action || 'SKIP');
+    const lookFor = s.direction === 'YES'
+      ? 'BTC will be <b style="color:var(--green)">ABOVE</b> strike at expiry'
+      : s.direction === 'NO'
+      ? 'BTC will be <b style="color:var(--red)">BELOW</b> strike at expiry'
+      : '—';
+    signalHtml = `
+      <div class="watch-signal">
+        <span class="watch-label">Last signal</span>
+        <span style="color:var(--blue);font-weight:700">${s.ticker}</span>
+        <span style="color:var(--muted)">→</span>
+        <span class="${dirCls}" style="font-weight:700;font-size:1rem">${s.direction}</span>
+        <span style="font-size:11px;color:var(--muted)">prob ${s.prob}%  ·  conf ${s.confidence}%</span>
+        <span class="${actCls}">${s.action}</span>
+        <span style="font-size:11px;color:var(--muted)">${lookFor}</span>
+        ${s.skip_reason ? '<span style="color:var(--yellow);font-size:10px">(' + s.skip_reason + ')</span>' : ''}
+      </div>`;
+  }
+
+  wrap.innerHTML = `
+    <div class="watch-meta">
+      <span>Cycle: <b>${cycleTime}</b></span>
+      <span>BTC: <b>${btcStr}</b></span>
+      <span>${w.markets.length} market${w.markets.length !== 1 ? 's' : ''} scanned</span>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Ticker</th><th>Strike</th><th>Expiry</th>
+        <th>YES ask</th><th>NO ask</th><th>Volume</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${signalHtml}`;
+}
+
 /* ---- render open positions ---- */
 function renderPositions(positions) {
   const body = document.getElementById('pos-body');
@@ -677,9 +775,10 @@ function renderEnsemble(ens) {
 /* ---- main refresh loop ---- */
 async function refresh() {
   try {
-    const { stats, positions, trades, botStatus } = await fetchAll();
+    const { stats, positions, trades, botStatus, watch } = await fetchAll();
     renderHeader(stats, botStatus);
     renderCards(stats);
+    renderWatchSection(watch);
     renderPositions(positions);
     renderTrades(trades);
     renderEnsemble(stats.last_ensemble);
