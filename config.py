@@ -30,11 +30,11 @@ class Settings(BaseSettings):
     MIN_CONFIDENCE: float = Field(default=0.55, description="Minimum ensemble confidence score to trade")
     MAX_MODEL_SPREAD: float = Field(default=0.35, description="Max allowed disagreement between models (abort if exceeded)")
     MAX_OPEN_POSITIONS: int = Field(default=3, description="Maximum concurrent open positions")
-    STOP_LOSS_PCT: float = Field(default=0.15, description="Close position when it loses this fraction of cost (15%)")
+    STOP_LOSS_PCT: float = Field(default=0.35, description="Close position when it loses this fraction of cost (35%)")
     CONFIDENCE_DECAY_EXIT: float = Field(default=0.40, description="Exit open position if confidence drops below this")
-    TAKE_PROFIT_PCT: float = Field(default=0.30, description="Close position at +30% profit")
-    TRAILING_STOP_LOCK_PCT: float = Field(default=0.15, description="Activate trailing stop once peak P&L reaches +15%")
-    TRAILING_STOP_EXIT_PCT: float = Field(default=0.08, description="Exit trailing stop if P&L drops below +8% from peak")
+    TAKE_PROFIT_PCT: float = Field(default=0.50, description="Close position at +50% profit")
+    TRAILING_STOP_LOCK_PCT: float = Field(default=0.30, description="Activate trailing stop once peak P&L reaches +30%")
+    TRAILING_STOP_EXIT_PCT: float = Field(default=0.20, description="Exit trailing stop if P&L drops below +20% from peak")
 
     # ------------------------------------------------------------------
     # Kalshi

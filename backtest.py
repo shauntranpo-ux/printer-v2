@@ -34,10 +34,10 @@ from scipy.stats import norm
 
 DEFAULT_BANKROLL       = 500.0
 DEFAULT_MAX_BET        = 25.0
-DEFAULT_TP             = 0.30   # take profit at +30 %
-DEFAULT_SL             = 0.15   # stop loss at -15 %
-TRAILING_LOCK          = 0.15   # activate trailing stop after +15 % peak
-TRAILING_EXIT          = 0.08   # exit trailing stop below +8 %
+DEFAULT_TP             = 0.50   # take profit at +50 %
+DEFAULT_SL             = 0.35   # stop loss at -35 %
+TRAILING_LOCK          = 0.30   # activate trailing stop after +30 % peak
+TRAILING_EXIT          = 0.20   # exit trailing stop below +20 %
 MIN_EDGE               = 0.03   # lower than live (rule-based proxy has smaller edge)
 MIN_CONF               = 0.18   # calibrated for rule-based proxy (max achievable ~0.60)
 MAX_SPREAD             = 0.35

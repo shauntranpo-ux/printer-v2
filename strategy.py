@@ -230,7 +230,7 @@ class Strategy:
         Triggers checked per trade (first match wins):
           1. Market resolved → expired
           2. Close time < now + 2min → let expire naturally (skip)
-          3. pnl_pct <= -STOP_LOSS_PCT → stop_loss
+          3. pnl_pct <= -STOP_LOSS_PCT (35%) → stop_loss
           4. current bid < CONFIDENCE_DECAY_EXIT × 100¢ → decay
 
         Returns the list of trades closed this cycle.
