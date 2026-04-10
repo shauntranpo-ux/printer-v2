@@ -47,6 +47,16 @@ KELLY_FRACTION         = 0.5
 MIN_BET                = 1.0
 STRIKE_OFFSETS         = [+0.005, 0.0, -0.005]
 
+# ── High-frequency / high-quality mode (toggled via --hf flag) ──────────────
+# Drops TRENDING (low WR), expands to 7 strikes, adds volume+momentum scoring.
+HF_MIN_CONF            = 0.14   # lower base bar — scoring filter compensates
+HF_MAX_SPREAD          = 0.28   # tighter model agreement
+HF_STRIKE_OFFSETS      = [-0.015, -0.010, -0.005, 0.0, 0.005, 0.010, 0.015]
+HF_MAX_POSITIONS       = 7
+HF_MIN_MOMENTUM        = 0.20   # |momentum| must be at least this strong
+HF_VOL_SURGE           = 1.30   # volume must be 1.3× rolling average
+HF_MIN_SIGNAL_SCORE    = 3      # need 3+ of 5 confirmation signals to trade
+
 # Regime thresholds
 ADX_VOLATILE           = 25
 ADX_TRENDING           = 15     # was 20 — more candles classified as TRENDING
@@ -415,6 +425,11 @@ def run_backtest(
     max_bet   = args.max_bet
     tp_base   = args.tp
     sl_base   = args.sl
+    hf_mode   = getattr(args, "hf", False)
+
+    # Apply high-frequency overrides
+    strike_offsets  = HF_STRIKE_OFFSETS if hf_mode else STRIKE_OFFSETS
+    max_positions   = HF_MAX_POSITIONS  if hf_mode else MAX_POSITIONS
 
     opens     = df["open"].values
     highs     = df["high"].values
@@ -517,54 +532,124 @@ def run_backtest(
 
         else:
             # TRENDING or VOLATILE
-            ens = ensemble_at(i, ind, regime)
-            if ens["action"] != "TRADE":
-                continue
-            if ens["confidence"] < effective_min_conf:
-                continue
+            if hf_mode:
+                # ── High-frequency mode: VOLATILE-only + signal scoring ───────
+                if regime != "VOLATILE":
+                    continue   # skip TRENDING entirely (lower WR)
 
-            direction = ens["direction"]
-            momentum  = ens["momentum"]
+                ens = ensemble_at(i, ind, regime)
+                if ens["action"] != "TRADE":
+                    continue
+                if ens["confidence"] < HF_MIN_CONF:
+                    continue
+                if ens["spread"] > HF_MAX_SPREAD:
+                    continue
 
-            # Skip on strong counter-momentum
-            if direction == "YES" and momentum < -0.3:
-                continue
-            if direction == "NO"  and momentum >  0.3:
-                continue
+                direction = ens["direction"]
+                momentum  = ens["momentum"]
+                rsi       = float(ind["rsi"][i])
+                vol_ma    = float(ind["vol_ma10"][i])
+                macd_abv  = float(ind["macd_abv"][i])
+                ema9_v    = float(ind["ema9"][i])
 
-            # ── Upgrade 3a: RSI range filter ──────────────────────────────────
-            rsi = float(ind["rsi"][i])
-            if direction == "YES" and not (30 <= rsi <= 80):
-                continue
-            if direction == "NO"  and not (20 <= rsi <= 70):
-                continue
+                # ── Signal scoring: require 3+ of 5 confirmations ─────────────
+                # Each indicator must independently agree with the trade direction.
+                score = 0
 
-            # ── Upgrade 3b: volume filter removed (was 0.9× average) ─────────
+                # 1. Strong momentum in direction
+                if direction == "YES" and momentum >= HF_MIN_MOMENTUM:
+                    score += 1
+                elif direction == "NO" and momentum <= -HF_MIN_MOMENTUM:
+                    score += 1
 
-            # ── Upgrade 3c: candle body filter (remove extreme doji) ─────────
-            candle_range = btc_high - btc_low
-            candle_body  = abs(btc_close - btc_open)
-            if candle_range > 0 and candle_body / candle_range < BODY_RATIO_MIN:
-                continue
+                # 2. Volume surge (heightened activity = real move)
+                if volumes[i] >= vol_ma * HF_VOL_SURGE:
+                    score += 1
 
-            # ── Upgrade 3d: EMA alignment — CHOPPY only; skip for TRENDING/VOLATILE
+                # 3. RSI confirms direction (not at extreme against trade)
+                if direction == "YES" and 40 <= rsi <= 75:
+                    score += 1
+                elif direction == "NO" and 25 <= rsi <= 60:
+                    score += 1
 
-            # ── Upgrade 4: dynamic TP/SL ──────────────────────────────────────
-            if regime == "VOLATILE":
+                # 4. MACD aligns with direction
+                if direction == "YES" and macd_abv >= 0.5:
+                    score += 1
+                elif direction == "NO" and macd_abv < 0.5:
+                    score += 1
+
+                # 5. EMA9 price alignment (price above EMA for YES, below for NO)
+                if direction == "YES" and btc_close > ema9_v:
+                    score += 1
+                elif direction == "NO" and btc_close < ema9_v:
+                    score += 1
+
+                if score < HF_MIN_SIGNAL_SCORE:
+                    continue
+
+                # ── Candle body filter (remove doji noise) ────────────────────
+                candle_range = btc_high - btc_low
+                candle_body  = abs(btc_close - btc_open)
+                if candle_range > 0 and candle_body / candle_range < BODY_RATIO_MIN:
+                    continue
+
+                # ── Counter-momentum hard block ───────────────────────────────
+                if direction == "YES" and momentum < -0.10:
+                    continue
+                if direction == "NO"  and momentum >  0.10:
+                    continue
+
                 tp_trade  = max(tp_base, atr_pct * 15)
                 sl_trade  = max(sl_base, atr_pct * 10)
                 size_mult = 1.0 * time_mult * streak_mult
-            else:   # TRENDING
-                tp_trade  = 0.45
-                sl_trade  = 0.30
-                size_mult = 0.75 * time_mult * streak_mult
+                min_edge_use = MIN_EDGE
 
-            min_edge_use = MIN_EDGE
+            else:
+                # ── Standard mode: TRENDING + VOLATILE ───────────────────────
+                ens = ensemble_at(i, ind, regime)
+                if ens["action"] != "TRADE":
+                    continue
+                if ens["confidence"] < effective_min_conf:
+                    continue
+
+                direction = ens["direction"]
+                momentum  = ens["momentum"]
+
+                # Skip on strong counter-momentum
+                if direction == "YES" and momentum < -0.3:
+                    continue
+                if direction == "NO"  and momentum >  0.3:
+                    continue
+
+                # ── Upgrade 3a: RSI range filter ──────────────────────────────
+                rsi = float(ind["rsi"][i])
+                if direction == "YES" and not (30 <= rsi <= 80):
+                    continue
+                if direction == "NO"  and not (20 <= rsi <= 70):
+                    continue
+
+                # ── Upgrade 3c: candle body filter (remove extreme doji) ──────
+                candle_range = btc_high - btc_low
+                candle_body  = abs(btc_close - btc_open)
+                if candle_range > 0 and candle_body / candle_range < BODY_RATIO_MIN:
+                    continue
+
+                # ── Upgrade 4: dynamic TP/SL ──────────────────────────────────
+                if regime == "VOLATILE":
+                    tp_trade  = max(tp_base, atr_pct * 15)
+                    sl_trade  = max(sl_base, atr_pct * 10)
+                    size_mult = 1.0 * time_mult * streak_mult
+                else:   # TRENDING
+                    tp_trade  = 0.45
+                    sl_trade  = 0.30
+                    size_mult = 0.75 * time_mult * streak_mult
+
+                min_edge_use = MIN_EDGE
 
         candle_trades = 0
 
-        for offset in STRIKE_OFFSETS:
-            if candle_trades >= MAX_POSITIONS:
+        for offset in strike_offsets:
+            if candle_trades >= max_positions:
                 break
 
             strike         = btc_open * (1.0 + offset)
@@ -806,9 +891,10 @@ def print_report(
 
     SEP = "=" * 47
 
+    mode_label = m.get("mode", "STANDARD")
     print(f"""
 {SEP}
-        PRINTER V2 BACKTEST RESULTS
+     PRINTER V2 BACKTEST  [{mode_label}]
 {SEP}
   Period:          {df['dt'].iloc[0].date()} to {df['dt'].iloc[-1].date()}
   Total candles:   {len(df):,}
@@ -831,7 +917,7 @@ def print_report(
 {SEP}
   EXIT REASONS  (single 15-min candle per trade)
 {rl('take_profit', 'Take profit:')}
-{rl('expired_tp',  'Held→expiry (TP):')}
+{rl('expired_tp',  'Held->expiry (TP):')}
 {rl('stop_loss',   'Stop loss:')}
 {rl('expired',     'Expired (binary):')}
 {SEP}
@@ -1104,10 +1190,16 @@ def parse_args() -> argparse.Namespace:
                    help=f"Take profit fraction (default: {DEFAULT_TP})")
     p.add_argument("--sl",       type=float, default=DEFAULT_SL,
                    help=f"Stop loss fraction (default: {DEFAULT_SL})")
+    p.add_argument("--hf",       action="store_true", default=False,
+                   help="High-frequency mode: VOLATILE-only, 7 strikes, volume+momentum scoring")
     return p.parse_args()
 
 
 def main() -> None:
+    # Ensure UTF-8 output on Windows terminals
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     args = parse_args()
 
     df = load_and_resample(args.file, args.start, args.end)
@@ -1126,6 +1218,7 @@ def main() -> None:
         sys.exit(0)
 
     metrics = compute_metrics(trades, equity, args.bankroll)
+    metrics["mode"] = "HIGH-FREQ / VOLATILE-ONLY" if args.hf else "STANDARD"
     print_report(metrics, df, args.bankroll)
     save_csv(trades)
     save_json(metrics, args)
