@@ -312,11 +312,11 @@ class EnsembleEngine:
     # Ordered list of Gemini models to try — first success wins.
     # Google frequently deprecates specific versions; this auto-advances.
     _GEMINI_FALLBACKS = [
-        "gemini-2.5-flash",          # primary working model
-        "gemini-1.5-flash",          # stable fallback, always available
-        "gemini-2.0-flash",          # stable name
-        "gemini-2.0-flash-001",      # versioned
-        "gemini-2.0-flash-lite",     # lite variant
+        "gemini-2.5-flash",                  # primary
+        "gemini-2.5-flash-preview-04-17",    # versioned stable
+        "gemini-2.5-pro",                    # pro fallback
+        "gemini-2.0-flash-lite-001",         # lite stable versioned
+        "gemini-2.0-flash-latest",           # latest alias
     ]
 
     # Models confirmed dead (404) this session — skip without API call

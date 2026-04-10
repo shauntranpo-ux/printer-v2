@@ -231,6 +231,7 @@ class TradingBot:
         """
         cycle_start = datetime.now(timezone.utc)
         self._cycle_signals = []   # fresh slate for this cycle's dashboard signals
+        self._wait_list.clear()    # clear stale wait entries from previous 15m window
         Path("heartbeat.txt").write_text(cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"))
         print(f"=== CYCLE START === {cycle_start.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         log.info("--- Cycle %s ---", cycle_start.strftime("%Y-%m-%d %H:%M:%S UTC"))

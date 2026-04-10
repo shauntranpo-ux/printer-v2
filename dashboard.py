@@ -779,16 +779,12 @@ function renderWatchSection(w) {
   }
 
   const rows = w.markets.map(m => {
-    const closeDate = m.close_time ? new Date(m.close_time) : null;
-    const minsLeft  = closeDate
-      ? Math.max(0, Math.round((closeDate - Date.now()) / 60000))
-      : null;
-    const expiry = minsLeft !== null ? minsLeft + 'm left' : '—';
     const strike = m.strike ? '$' + m.strike.toLocaleString('en-US', {maximumFractionDigits:4}) : '—';
     const yesAsk = m.yes_ask > 0 ? m.yes_ask + '¢' : '—';
     const noAsk  = m.no_ask  > 0 ? m.no_ask  + '¢' : (m.yes_ask > 0 ? (100 - m.yes_ask) + '¢' : '—');
     const lbl    = tickerLabel(m.ticker, m.asset);
     const titleTip = m.title ? ` title="${m.title.replace(/"/g,'&quot;')}"` : '';
+    const closeIso = m.close_time || '';
     return `<tr${titleTip}>
       <td>
         <div style="color:var(--text);font-weight:600">${lbl.name}</div>
@@ -796,7 +792,7 @@ function renderWatchSection(w) {
         <div style="font-size:9px;color:var(--border)">${m.ticker}</div>
       </td>
       <td>${strike}</td>
-      <td style="color:var(--muted)">${expiry}</td>
+      <td><span class="market-countdown" data-close="${closeIso}" style="font-variant-numeric:tabular-nums">—</span></td>
       <td class="dir-yes">${yesAsk}</td>
       <td class="dir-no">${noAsk}</td>
       <td style="color:var(--muted)">${(m.volume || 0).toLocaleString()}</td>
@@ -1088,6 +1084,31 @@ function renderDailyPnl(days) {
   }).join('');
   wrap.innerHTML = `<div class="bar-chart">${bars}</div>`;
 }
+
+/* ---- live countdown ticker (updates every second) ---- */
+function updateCountdowns() {
+  const now = Date.now();
+  document.querySelectorAll('.market-countdown').forEach(el => {
+    const closeIso = el.dataset.close;
+    if (!closeIso) { el.textContent = '—'; return; }
+    const closeMs = new Date(closeIso).getTime();
+    const secsLeft = Math.max(0, Math.floor((closeMs - now) / 1000));
+    if (secsLeft === 0) {
+      el.textContent = 'EXPIRED';
+      el.style.color = 'var(--muted)';
+      return;
+    }
+    const m = Math.floor(secsLeft / 60);
+    const s = secsLeft % 60;
+    const txt = m + ':' + String(s).padStart(2, '0');
+    el.textContent = txt;
+    // Color: green > 5min, yellow 2-5min, red < 2min
+    el.style.color = secsLeft > 300 ? 'var(--green)'
+                   : secsLeft > 120 ? 'var(--yellow)'
+                   : 'var(--red)';
+  });
+}
+setInterval(updateCountdowns, 1000);
 
 /* ---- main refresh loop ---- */
 async function refresh() {
