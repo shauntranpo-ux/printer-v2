@@ -24,7 +24,8 @@ from kalshi_client import KalshiClient
 
 app = Flask(__name__)
 
-_STOP_FILE = Path("STOP")
+_STOP_FILE  = Path("STOP")
+_START_FILE = Path("START")
 
 # ---------------------------------------------------------------------------
 # Async bridge — one background event loop for all async calls from Flask
@@ -103,6 +104,19 @@ def _get_balance() -> float | None:
 # Database helpers
 # ---------------------------------------------------------------------------
 
+def _bot_status_info() -> dict:
+    """Derive bot state from sentinel files."""
+    stop  = _STOP_FILE.exists()
+    start = _START_FILE.exists()
+    if stop:
+        status = "stopped"
+    elif start:
+        status = "running"
+    else:
+        status = "waiting"
+    return {"status": status, "stop_file": stop, "start_file": start}
+
+
 async def _last_ensemble() -> dict | None:
     """Return the most recent row from ensemble_log as a dict."""
     async with _db._conn() as db:
@@ -140,7 +154,7 @@ def api_stats():
         btc_price   = _get_btc_price()
         balance     = _get_balance()
         ensemble    = _run(_last_ensemble())
-        bot_status  = "stopped" if _STOP_FILE.exists() else "running"
+        bot_status  = _bot_status_info()["status"]
 
         pnl_pct = (
             (today.total_pnl / today.total_wagered * 100)
@@ -149,6 +163,7 @@ def api_stats():
 
         return jsonify({
             "bot_status":  bot_status,
+            "env":         settings.env,
             "btc_price":   btc_price,
             "balance":     balance,
             "pnl_pct":     round(pnl_pct, 2),
@@ -234,6 +249,40 @@ def api_trades():
         ])
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/bot/status")
+def api_bot_status():
+    _ensure_db()
+    info = _bot_status_info()
+    try:
+        ens = _run(_last_ensemble())
+        if ens and ens.get("timestamp"):
+            ts_str = ens["timestamp"]
+            dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            secs = int((datetime.now(timezone.utc) - dt).total_seconds())
+            info["last_cycle_secs"] = secs
+            info["last_cycle_ts"]   = ts_str
+        else:
+            info["last_cycle_secs"] = None
+            info["last_cycle_ts"]   = None
+    except Exception:
+        info["last_cycle_secs"] = None
+        info["last_cycle_ts"]   = None
+    return jsonify(info)
+
+
+@app.post("/api/bot/start")
+def api_bot_start():
+    _STOP_FILE.unlink(missing_ok=True)
+    _START_FILE.touch()
+    return jsonify({"ok": True, "status": "running"})
+
+
+@app.post("/api/bot/stop")
+def api_bot_stop():
+    _STOP_FILE.touch()
+    return jsonify({"ok": True, "status": "stopped"})
 
 
 @app.get("/")
@@ -326,6 +375,18 @@ _HTML = r"""<!DOCTYPE html>
   /* Empty state */
   .empty{color:var(--muted);text-align:center;padding:20px;font-size:12px}
 
+  /* Bot control buttons */
+  .dot-yellow{background:var(--yellow);box-shadow:0 0 6px var(--yellow)}
+  .btn-start{background:#238636;color:#fff;border:none;border-radius:6px;
+             padding:6px 14px;font-family:var(--font);font-size:12px;
+             cursor:pointer;font-weight:600;letter-spacing:.5px}
+  .btn-start:hover{background:#2ea043}
+  .btn-stop{background:#b62324;color:#fff;border:none;border-radius:6px;
+            padding:6px 14px;font-family:var(--font);font-size:12px;
+            cursor:pointer;font-weight:600;letter-spacing:.5px}
+  .btn-stop:hover{background:#da3633}
+  .btn-start:disabled,.btn-stop:disabled{opacity:.5;cursor:not-allowed}
+
   @media(max-width:600px){
     body{padding:12px}
     .card-value{font-size:1.2rem}
@@ -340,7 +401,13 @@ _HTML = r"""<!DOCTYPE html>
   <div class="dot" id="status-dot"></div>
   <h1>&#9608; PRINTER-V2</h1>
   <span id="mode-badge" class="badge">—</span>
-  <span class="refresh-ts" id="refresh-ts">Loading...</span>
+  <span id="bot-status-text" style="font-size:12px;font-weight:600"></span>
+  <span id="last-cycle" style="font-size:11px;color:var(--muted)"></span>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <button id="btn-start" class="btn-start" onclick="botStart()">START BOT</button>
+    <button id="btn-stop" class="btn-stop" onclick="botStop()">STOP BOT</button>
+    <span class="refresh-ts" id="refresh-ts">Loading...</span>
+  </div>
 </div>
 
 <!-- Stats cards -->
@@ -404,20 +471,56 @@ function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 /* ---- data fetch ---- */
 async function fetchAll() {
-  const [stats, positions, trades] = await Promise.all([
+  const [stats, positions, trades, botStatus] = await Promise.all([
     fetch('/api/stats').then(r => r.json()).catch(()=>({})),
     fetch('/api/positions').then(r => r.json()).catch(()=>[]),
     fetch('/api/trades').then(r => r.json()).catch(()=>[]),
+    fetch('/api/bot/status').then(r => r.json()).catch(()=>({})),
   ]);
-  return { stats, positions, trades };
+  return { stats, positions, trades, botStatus };
+}
+
+/* ---- bot control ---- */
+async function botStart() {
+  const btn = document.getElementById('btn-start');
+  btn.disabled = true;
+  try { await fetch('/api/bot/start', {method:'POST'}); await refresh(); }
+  finally { btn.disabled = false; }
+}
+async function botStop() {
+  const btn = document.getElementById('btn-stop');
+  btn.disabled = true;
+  try { await fetch('/api/bot/stop', {method:'POST'}); await refresh(); }
+  finally { btn.disabled = false; }
+}
+
+function cycleAgo(secs) {
+  if (secs == null) return '—';
+  if (secs < 60) return secs + 's ago';
+  const m = Math.floor(secs / 60), s = secs % 60;
+  return m + 'm ' + (s ? s + 's ' : '') + 'ago';
 }
 
 /* ---- render header ---- */
-function renderHeader(stats) {
-  const running = stats.bot_status === 'running';
-  const dot = document.getElementById('status-dot');
-  dot.className = 'dot ' + (running ? 'dot-green' : 'dot-red');
-  dot.title = stats.bot_status || 'unknown';
+function renderHeader(stats, botStatus) {
+  const status = botStatus?.status || stats.bot_status || 'waiting';
+  const dot  = document.getElementById('status-dot');
+  const text = document.getElementById('bot-status-text');
+
+  if (status === 'running') {
+    dot.className = 'dot dot-green';
+    text.innerHTML = '<span style="color:var(--green)">&#11044; RUNNING</span>';
+  } else if (status === 'stopped') {
+    dot.className = 'dot dot-red';
+    text.innerHTML = '<span style="color:var(--red)">&#11044; STOPPED</span>';
+  } else {
+    dot.className = 'dot dot-yellow';
+    text.innerHTML = '<span style="color:var(--yellow)">&#11044; WAITING</span>';
+  }
+
+  const lc = document.getElementById('last-cycle');
+  const secs = botStatus?.last_cycle_secs;
+  lc.textContent = secs != null ? 'Last cycle: ' + cycleAgo(secs) : '';
 
   const mb = document.getElementById('mode-badge');
   const env = (stats.env || 'live').toUpperCase();
@@ -565,8 +668,8 @@ function renderEnsemble(ens) {
 /* ---- main refresh loop ---- */
 async function refresh() {
   try {
-    const { stats, positions, trades } = await fetchAll();
-    renderHeader(stats);
+    const { stats, positions, trades, botStatus } = await fetchAll();
+    renderHeader(stats, botStatus);
     renderCards(stats);
     renderPositions(positions);
     renderTrades(trades);
