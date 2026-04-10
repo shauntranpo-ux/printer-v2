@@ -133,7 +133,7 @@ class Strategy:
             log.info("Ticker %s already has an open trade — skipping entry", ticker)
             return None
 
-        # Step 1 — edge + Kelly size
+        # Step 1 — edge check + flat bet sizing
         # Use `or 50` so that explicit 0 from the API also falls back to 50¢
         ask_cents    = market.get("yes_ask" if direction == "yes" else "no_ask") or 50
         market_price = ask_cents / 100.0
@@ -144,14 +144,18 @@ class Strategy:
                  else 1.0 - ensemble_result.consensus_prob)
         edge  = p_win - market_price
 
-        bet_size = await self.calculate_bet_size(edge, market_price, direction)
-        bet_size = math.floor(bet_size * size_multiplier / _ROUNDING) * _ROUNDING
-        if bet_size < _MIN_BET_DOLLARS:
+        if edge <= 0.0:
             log.info(
-                "Bet size $%.2f below minimum $%.2f — skipping entry",
-                bet_size, _MIN_BET_DOLLARS,
+                "No edge on %s (p_win=%.3f price=%.2f edge=%.3f) — skipping entry",
+                ticker, p_win, market_price, edge,
             )
             return None
+
+        # Flat bet: MAX_BET_SIZE scaled by time/streak multiplier.
+        # Kelly is too aggressive/conservative at small bankrolls with narrow AI edges —
+        # it consistently rounds to $0 and blocks valid TRADE signals.
+        bet_size = math.floor(settings.MAX_BET_SIZE * size_multiplier / _ROUNDING) * _ROUNDING
+        bet_size = max(bet_size, _MIN_BET_DOLLARS)
 
         # Step 2/3 — contracts (floor division; each contract costs ask_cents¢)
         contracts = int(bet_size / market_price)    # both in $
