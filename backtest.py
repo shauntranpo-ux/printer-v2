@@ -49,13 +49,12 @@ STRIKE_OFFSETS         = [+0.005, 0.0, -0.005]
 
 # Regime thresholds
 ADX_VOLATILE           = 25
-ADX_TRENDING           = 20
-ATR_VOLATILE           = 0.003
+ADX_TRENDING           = 15     # was 20 — more candles classified as TRENDING
+ATR_VOLATILE           = 0.002  # was 0.003 — lower bar for VOLATILE regime
 ATR_TRENDING           = 0.002
 
-# Entry filters
-VOL_CONFIRM_RATIO      = 0.9    # volume at or above recent average
-BODY_RATIO_MIN         = 0.30   # body/range — removes true doji candles
+# Entry filters  (volume filter removed; EMA filter moved to CHOPPY only)
+BODY_RATIO_MIN         = 0.25   # body/range — removes extreme doji candles
 
 # Streak protection
 STREAK_SOFT            = 3      # 3 losses → 25% bet size, raise conf
@@ -463,16 +462,15 @@ def run_backtest(
         regime  = classify_regime(adx, atr_pct)
 
         # ── Upgrade 7: time-based sizing multiplier ───────────────────────────
+        # Dead-zone min_conf gate removed — off-hours just use reduced size
         hour = ts.hour
         if HIGH_ACTIVITY_START <= hour < HIGH_ACTIVITY_END:
             time_mult     = 1.0
-            time_min_conf = MIN_CONF
         elif MED_ACTIVITY_START <= hour < MED_ACTIVITY_END:
             time_mult     = 0.75
-            time_min_conf = MIN_CONF
-        else:  # dead zone 06-12 UTC
+        else:
             time_mult     = 0.50
-            time_min_conf = 0.35
+        time_min_conf = MIN_CONF    # same confidence bar for all hours
 
         # ── Upgrade 6: streak soft trigger ───────────────────────────────────
         recent_losses = sum(1 for w in recent_results[-3:] if not w)
@@ -497,6 +495,13 @@ def run_backtest(
                 mr_direction = "NO"
             else:
                 continue   # no mean reversion trigger
+
+            # EMA alignment applied in CHOPPY to confirm mean-reversion bias
+            ema9_val = float(ind["ema9"][i])
+            if mr_direction == "YES" and btc_close <= ema9_val:
+                continue
+            if mr_direction == "NO"  and btc_close >= ema9_val:
+                continue
 
             ens = ensemble_at(i, ind, "CHOPPY")
             if ens["action"] == "WAIT":
@@ -529,32 +534,20 @@ def run_backtest(
 
             # ── Upgrade 3a: RSI range filter ──────────────────────────────────
             rsi = float(ind["rsi"][i])
-            if direction == "YES" and not (35 <= rsi <= 80):
+            if direction == "YES" and not (30 <= rsi <= 80):
                 continue
-            if direction == "NO"  and not (20 <= rsi <= 65):
-                continue
-
-            # ── Upgrade 3b: volume confirmation ───────────────────────────────
-            vol_ma10 = float(ind["vol_ma10"][i])
-            if vol_ma10 > 0 and volumes[i] < VOL_CONFIRM_RATIO * vol_ma10:
+            if direction == "NO"  and not (20 <= rsi <= 70):
                 continue
 
-            # ── Upgrade 3c: candle body filter (remove doji) ─────────────────
+            # ── Upgrade 3b: volume filter removed (was 0.9× average) ─────────
+
+            # ── Upgrade 3c: candle body filter (remove extreme doji) ─────────
             candle_range = btc_high - btc_low
             candle_body  = abs(btc_close - btc_open)
             if candle_range > 0 and candle_body / candle_range < BODY_RATIO_MIN:
                 continue
 
-            # ── Upgrade 3d: price vs short-term EMA alignment ─────────────────
-            # For YES: current close must be above EMA9 (price above recent avg)
-            # For NO:  current close must be below EMA9 (price below recent avg)
-            # Uses EMA9 (9×15min = 2.25h) rather than EMA9/EMA21 crossover
-            # since 15m EMA crossovers change too slowly for single-candle trades
-            ema9 = float(ind["ema9"][i])
-            if direction == "YES" and btc_close <= ema9:
-                continue
-            if direction == "NO"  and btc_close >= ema9:
-                continue
+            # ── Upgrade 3d: EMA alignment — CHOPPY only; skip for TRENDING/VOLATILE
 
             # ── Upgrade 4: dynamic TP/SL ──────────────────────────────────────
             if regime == "VOLATILE":
