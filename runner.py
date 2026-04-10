@@ -108,6 +108,8 @@ class TradingBot:
 
         # 4. Kalshi
         balance = await self.kalshi.get_balance()
+        await self.db.set_balance(balance)
+        print(f"Balance: ${balance:.2f}")
         log.info("Kalshi balance: $%.2f  mode: %s", balance, settings.env.upper())
 
         # 5. Telegram
@@ -207,6 +209,8 @@ class TradingBot:
           5. For each: ensemble → gates → momentum check → enter
         """
         cycle_start = datetime.now(timezone.utc)
+        Path("heartbeat.txt").write_text(cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        print(f"=== CYCLE START === {cycle_start.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         log.info("--- Cycle %s ---", cycle_start.strftime("%Y-%m-%d %H:%M:%S UTC"))
 
         # Step 1 — exits
@@ -230,6 +234,14 @@ class TradingBot:
         ohlcv     = self.feed.get_ohlcv(4)
         log.info("BTC=$%.2f  momentum=%.3f  candles=%d", btc_price, momentum, len(ohlcv))
 
+        # Balance — fetch once per cycle, persist to DB for dashboard
+        balance = None
+        try:
+            balance = await self.kalshi.get_balance()
+            await self.db.set_balance(balance)
+        except Exception as exc:
+            log.warning("Balance fetch failed: %s", exc)
+
         # Step 4 — markets
         try:
             markets = await self.kalshi.get_btc_15m_markets()
@@ -240,6 +252,11 @@ class TradingBot:
         except Exception as exc:
             log.error("Failed to fetch Kalshi markets: %s", exc)
             return
+
+        print(f"BTC Price: ${btc_price:,.2f}")
+        print(f"Balance: ${balance:.2f}" if balance is not None else "Balance: unavailable")
+        print(f"Open positions: {len(open_trades)}")
+        print(f"Markets found: {len(markets)}")
 
         if not markets:
             log.info("No active 15m BTC markets found")

@@ -82,6 +82,12 @@ CREATE TABLE IF NOT EXISTS bot_events (
     message     TEXT
 );
 
+CREATE TABLE IF NOT EXISTS bot_kv (
+    key     TEXT PRIMARY KEY,
+    value   TEXT NOT NULL,
+    updated TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_status    ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
 CREATE INDEX IF NOT EXISTS idx_ensemble_ts      ON ensemble_log(timestamp);
@@ -500,3 +506,30 @@ class Database:
             )
             await db.commit()
         log.info("Event logged: [%s] %s", event_type, message[:120] if message else "")
+
+    # ------------------------------------------------------------------
+    # bot_kv — simple key/value store for live state
+    # ------------------------------------------------------------------
+
+    async def get_balance(self) -> float | None:
+        """Return the last balance written by the runner, or None."""
+        async with self._conn() as db:
+            cur = await db.execute(
+                "SELECT value FROM bot_kv WHERE key = 'balance'"
+            )
+            row = await cur.fetchone()
+            return float(row[0]) if row else None
+
+    async def set_balance(self, balance: float) -> None:
+        """Persist the current Kalshi cash balance (dollars)."""
+        async with self._conn() as db:
+            await db.execute(
+                """
+                INSERT INTO bot_kv (key, value, updated) VALUES ('balance', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value   = excluded.value,
+                    updated = excluded.updated
+                """,
+                (str(balance), _now_utc()),
+            )
+            await db.commit()

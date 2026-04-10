@@ -24,8 +24,9 @@ from kalshi_client import KalshiClient
 
 app = Flask(__name__)
 
-_STOP_FILE  = Path("STOP")
-_START_FILE = Path("START")
+_STOP_FILE      = Path("STOP")
+_START_FILE     = Path("START")
+_HEARTBEAT_FILE = Path("heartbeat.txt")
 
 # ---------------------------------------------------------------------------
 # Async bridge — one background event loop for all async calls from Flask
@@ -253,12 +254,10 @@ def api_trades():
 
 @app.get("/api/bot/status")
 def api_bot_status():
-    _ensure_db()
     info = _bot_status_info()
     try:
-        ens = _run(_last_ensemble())
-        if ens and ens.get("timestamp"):
-            ts_str = ens["timestamp"]
+        if _HEARTBEAT_FILE.exists():
+            ts_str = _HEARTBEAT_FILE.read_text().strip()
             dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
             secs = int((datetime.now(timezone.utc) - dt).total_seconds())
             info["last_cycle_secs"] = secs
@@ -270,6 +269,16 @@ def api_bot_status():
         info["last_cycle_secs"] = None
         info["last_cycle_ts"]   = None
     return jsonify(info)
+
+
+@app.get("/api/balance")
+def api_balance():
+    _ensure_db()
+    try:
+        balance = _run(_db.get_balance())
+        return jsonify({"balance": balance})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.post("/api/bot/start")
