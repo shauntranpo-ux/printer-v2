@@ -44,7 +44,7 @@ MAX_SPREAD             = 0.35
 MAX_POSITIONS          = 3
 DAILY_LOSS_LIMIT       = 100.0
 KELLY_FRACTION         = 0.5
-MIN_BET                = 1.0
+MIN_BET                = 0.50
 STRIKE_OFFSETS         = [+0.005, 0.0, -0.005]
 
 # ── High-frequency / high-quality mode (toggled via --hf flag) ──────────────

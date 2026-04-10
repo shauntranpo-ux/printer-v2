@@ -18,7 +18,7 @@ from database import TradeRow
 
 log = logging.getLogger(__name__)
 
-_MIN_BET_DOLLARS = 1.00     # never risk less than $1
+_MIN_BET_DOLLARS = 0.50     # never risk less than $0.50
 _ROUNDING        = 0.50     # round to nearest $0.50
 
 
