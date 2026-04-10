@@ -1,117 +1,174 @@
 # printer-v2
 
-Kalshi BTC options trading bot. 15-minute loop, 4-model ensemble, Kelly sizing, 5-gate risk checks.
+Kalshi BTC prediction market trading bot. Runs a 4-model AI ensemble (Claude, GPT-4o, Gemini, DeepSeek) in parallel every 15 minutes to score active markets, apply 5-gate risk checks, size via half-Kelly, and place limit orders.
 
 ## Architecture
 
 ```
-coinbase_feed.py  →  ensemble.py  →  risk_gates.py  →  strategy.py  →  kalshi_client.py
-      ↓                                                                        ↓
-  (BTC price)                                                           (place order)
-                                         ↓
-                                    database.py  →  dashboard.py
-                                         ↓
-                                  telegram_alerts.py
+coinbase_feed.py  ──▶  ensemble.py  ──▶  risk_gates.py  ──▶  strategy.py  ──▶  kalshi_client.py
+    (BTC price)       (4 AI models)      (5 risk gates)    (Kelly sizing)       (place order)
+                                               │
+                                          database.py ──▶ dashboard.py
+                                               │
+                                        telegram_alerts.py
 ```
 
-All components are orchestrated by `runner.py` on a 15-minute clock-aligned cadence.
+`runner.py` (TradingBot) orchestrates everything on 15-minute clock-aligned cycles.
 
-## Setup
+---
 
-### 1. Clone and install dependencies
+## 1. Setup
+
+### Clone and install
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/shauntranpo-ux/printer-v2
 cd printer-v2
 python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
+source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Configure environment
+### Configure environment
 
 ```bash
 cp .env.template .env
-# Edit .env and fill in all required values
+# Open .env and fill in every required value
 ```
 
-Required keys:
-- `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY_PATH` — from your Kalshi account
-- `COINBASE_API_KEY` and `COINBASE_API_SECRET` — from Coinbase Advanced Trade
+---
 
-### 3. Add your Kalshi private key
+## 2. API Keys
 
-Place your RSA private key at the path specified in `KALSHI_PRIVATE_KEY_PATH` (default: `./kalshi_private_key.pem`).
+| Service | Where to get it |
+|---------|----------------|
+| **Kalshi** API key + RSA key pair | [kalshi.com](https://kalshi.com) → Account → API → Create key (download the `.pem` file) |
+| **Anthropic** (Claude) | [console.anthropic.com](https://console.anthropic.com) → API Keys |
+| **OpenAI** (GPT-4o) | [platform.openai.com](https://platform.openai.com) → API Keys |
+| **Google** (Gemini) | [aistudio.google.com](https://aistudio.google.com) → Get API key |
+| **DeepSeek** | [platform.deepseek.com](https://platform.deepseek.com) → API Keys |
+| **Telegram** bot token | Message [@BotFather](https://t.me/BotFather) → `/newbot` |
+| **Telegram** chat ID | Message [@userinfobot](https://t.me/userinfobot) to get your chat ID |
 
-### 4. Run locally
+### Kalshi RSA key
+
+After creating an API key on Kalshi, place the downloaded `.pem` file in the project root and set in `.env`:
+
+```
+KALSHI_PRIVATE_KEY=./kalshi_private_key.pem
+```
+
+Or paste the raw PEM content directly as the value:
+
+```
+KALSHI_PRIVATE_KEY=-----BEGIN RSA PRIVATE KEY-----\n...
+```
+
+---
+
+## 3. Run locally
 
 ```bash
-# Start the trading bot
+# Terminal 1 — trading bot
 python runner.py
 
-# Start the dashboard (separate terminal)
+# Terminal 2 — dashboard
 python dashboard.py
 ```
 
-Dashboard available at `http://localhost:5000` (password from `DASHBOARD_PASSWORD`).
+Dashboard at `http://localhost:8080`. Auto-refreshes every 30 seconds.
 
-## Deploy to Railway
+---
 
-### One-time setup
+## 4. Deploy to Railway
 
-1. Install the Railway CLI: `npm install -g @railway/cli`
-2. `railway login`
-3. `railway init` in the project directory
-4. Add all env vars from `.env.template` in the Railway dashboard
+### Initial deploy
 
-### Deploy
+1. Create a new project at [railway.app](https://railway.app)
+2. Connect your GitHub repo
+3. Railway auto-detects the `Procfile` and starts two services:
+   - **web** — Flask dashboard (Railway assigns `$PORT` automatically)
+   - **worker** — trading bot loop
+
+### Set environment variables
+
+In the Railway dashboard → Variables, add every key from `.env.template`. For the Kalshi private key, paste the raw PEM string as `KALSHI_PRIVATE_KEY`.
+
+### Persistent database
+
+Attach a Railway Volume mounted at `/app` so `printer_v2.db` survives redeploys:
+
+Railway dashboard → your service → Volumes → Add volume → mount at `/app`
+
+Then set `DB_PATH=/app/printer_v2.db` in Railway variables.
+
+### Demo / paper trade first
+
+Set `KALSHI_DEMO=true` to run on Kalshi's demo environment with no real money.
+
+---
+
+## 5. Kill switch
+
+To stop the bot without killing the process (useful in production):
 
 ```bash
-railway up
+# In the project directory (or Railway shell)
+touch STOP
 ```
 
-Railway will start two processes from the `Procfile`:
-- **web** — Flask dashboard (auto-assigned port)
-- **worker** — Trading bot loop
+The bot checks for a `STOP` file at the top of every cycle. When found it:
+1. Sends a Telegram kill-switch alert
+2. Logs the shutdown event
+3. Exits the loop cleanly
 
-### Persistent volume (recommended)
+Remove the file to allow restart:
 
-Attach a Railway volume at `/app` so `printer_v2.db` survives redeploys.
+```bash
+rm STOP
+```
 
-## Risk Gates
+---
 
-All 5 gates must pass before any order is placed:
+## 6. Dashboard
 
-| Gate | Check | Default Threshold |
-|------|-------|-------------------|
-| 1 | Daily drawdown | < 5% of balance |
-| 2 | Open exposure | < 20% of balance |
-| 3 | Ensemble confidence | ≥ 0.60 |
-| 4 | BTC realized volatility | < 4% (1h) |
-| 5 | Trade frequency | ≥ 15 min since last trade |
+Navigate to the Railway web service URL (or `http://localhost:8080`).
 
-## Ensemble Models
+| Section | What it shows |
+|---------|--------------|
+| **Status dot** | Green = bot running, Red = STOP file detected |
+| **BTC Price** | Live price from Coinbase public API (30s cache) |
+| **Balance** | Kalshi available cash (60s cache) |
+| **Today P&L** | Realised P&L in dollars and percentage of wagered |
+| **Daily Loss Used** | Progress bar — red fills toward $100 limit |
+| **Win Rate** | Wins / total closed trades today |
+| **Sharpe** | Trade-level Sharpe ratio (mean P&L / std P&L) |
+| **Open Positions** | Live bid price, P&L%, and time since entry |
+| **Last 20 Trades** | Entry/exit prices, P&L, and exit reason |
+| **Last Ensemble** | Per-model probability, consensus, and TRADE/SKIP/WAIT action |
 
-| Model | Strategy |
-|-------|----------|
-| Trend | EMA crossover + ADX |
-| Mean Reversion | Bollinger Band + RSI |
-| Momentum | Rate of change + MACD |
-| Volatility Regime | ATR + VIX proxy |
+API endpoints (JSON):
 
-Weights are recalibrated dynamically based on each model's rolling accuracy.
+```
+GET /api/stats       — all dashboard data
+GET /api/positions   — open positions with live prices
+GET /api/trades      — last 20 trades
+GET /health          — {"status": "ok"} for Railway healthcheck
+```
+
+---
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `runner.py` | Main 15-minute trading loop |
-| `kalshi_client.py` | Kalshi REST API wrapper |
-| `coinbase_feed.py` | Coinbase WebSocket BTC feed |
-| `ensemble.py` | 4-model AI ensemble engine |
-| `risk_gates.py` | 5-gate pre-trade risk checks |
-| `strategy.py` | Kelly sizing + entry/exit logic |
-| `dashboard.py` | Flask web dashboard |
-| `telegram_alerts.py` | Telegram notification system |
-| `database.py` | SQLite trade logging |
-| `config.py` | Settings loaded from .env |
+| `runner.py` | TradingBot — 15-minute orchestration loop |
+| `ensemble.py` | 4 AI models in parallel, consensus aggregation |
+| `risk_gates.py` | 5-gate async pre-trade filter |
+| `strategy.py` | Kelly sizing, enter_trade, check_exits |
+| `kalshi_client.py` | Kalshi REST API v2 (RSA auth, rate limiter) |
+| `coinbase_feed.py` | Coinbase WebSocket BTC feed + candle builder |
+| `telegram_alerts.py` | Trade entry/exit/error alerts via Telegram Bot API |
+| `database.py` | SQLite via aiosqlite — trades, stats, ensemble log |
+| `dashboard.py` | Flask single-page dashboard + JSON API |
+| `config.py` | pydantic-settings — all env vars, validation |

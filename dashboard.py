@@ -8,6 +8,7 @@ All async DB/API calls are bridged via a dedicated event loop.
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -589,7 +590,8 @@ setInterval(refresh, 30000);
 def run_dashboard() -> None:
     """Start Flask in a daemon thread. Returns immediately."""
     host = getattr(settings, "DASHBOARD_HOST", "0.0.0.0")
-    port = getattr(settings, "DASHBOARD_PORT", 8080)
+    # Railway injects $PORT; fall back to settings value
+    port = int(os.environ.get("PORT", getattr(settings, "DASHBOARD_PORT", 8080)))
 
     def _serve() -> None:
         import logging as _logging
