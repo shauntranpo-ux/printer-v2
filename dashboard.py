@@ -803,31 +803,25 @@ function renderWatchSection(w) {
     </tr>`;
   }).join('');
 
-  // Signal summary (shown when a market has been evaluated)
-  let signalHtml = '';
-  let checklistHtml = '';
-  const s = w.last_signal;
-  if (s) {
-    const dirCls  = s.direction === 'YES' ? 'dir-yes' : s.direction === 'NO' ? 'dir-no' : 'neu';
-    const actCls  = 'ens-action action-' + (s.action || 'SKIP');
-    const asset   = (s.ticker || '').split('-')[0].replace(/\d.*/,'') || 'asset';
-    const lookFor = s.direction === 'YES'
-      ? asset + ' will finish <b style="color:var(--green)">ABOVE</b> strike'
-      : s.direction === 'NO'
-      ? asset + ' will finish <b style="color:var(--red)">BELOW</b> strike'
-      : '—';
-    signalHtml = `<div class="watch-signal">
-      <span class="watch-label">Last signal</span>
-      <span style="color:var(--blue);font-weight:700">${s.ticker}</span>
-      <span style="color:var(--muted)">&#8594;</span>
-      <span class="${dirCls}" style="font-weight:700;font-size:1rem">${s.direction}</span>
-      <span style="font-size:11px;color:var(--muted)">prob ${s.prob}% &middot; conf ${s.confidence}%</span>
-      <span class="${actCls}">${s.action}</span>
-      <span style="font-size:11px;color:var(--muted)">${lookFor}</span>
-      ${s.skip_reason ? '<span style="color:var(--yellow);font-size:10px">(' + s.skip_reason + ')</span>' : ''}
-    </div>`;
-    if (s.checks && s.checks.length) {
-      const items = s.checks.map(c => {
+  // ── Helper: render one AI vote panel for a single signal ───────────────
+  const mdefs = [
+    {key:'claude',   label:'Claude'},
+    {key:'gpt',      label:'GPT-4o'},
+    {key:'gemini',   label:'Gemini'},
+    {key:'deepseek', label:'DeepSeek'},
+  ];
+
+  function renderSignalPanel(sig) {
+    const sTicker = sig.ticker || '';
+    const sAsset  = sTicker.replace(/^KX/,'').replace(/15M.*/,'');
+    const sLbl    = tickerLabel(sTicker, sAsset);
+    const sLabel  = sLbl.name + (sLbl.sub ? ' &middot; ' + sLbl.sub : '');
+    const actCls  = 'ens-action action-' + (sig.action || 'SKIP');
+
+    // Checklist
+    let checklistHtml = '';
+    if (sig.checks && sig.checks.length) {
+      const items = sig.checks.map(c => {
         const icon = c.passed === true ? '&#10003;' : c.passed === false ? '&#10007;' : '&#8212;';
         const cls  = c.passed === true ? 'chk-pass' : c.passed === false ? 'chk-fail' : 'chk-skip';
         const det  = (c.detail && c.detail !== '—') ? `<span class="chk-detail">${c.detail}</span>` : '';
@@ -835,42 +829,9 @@ function renderWatchSection(w) {
       }).join('');
       checklistHtml = `<div class="checklist">${items}</div>`;
     }
-  }
 
-  // AI Bot Votes — always shown at the bottom of Cycle Watch
-  const mdefs = [
-    {key:'claude',   label:'Claude'},
-    {key:'gpt',      label:'GPT-4o'},
-    {key:'gemini',   label:'Gemini'},
-    {key:'deepseek', label:'DeepSeek'},
-  ];
-  let consensusHtml;
-  const models = s && s.models;
-  // Build market label for panel header
-  const evalTicker = s && s.ticker;
-  const evalAsset  = evalTicker ? (evalTicker.replace(/^KX/,'').replace(/15M.*/,'')) : null;
-  const evalLabel  = evalTicker ? (() => {
-    const lbl = tickerLabel(evalTicker, evalAsset);
-    return lbl.name + (lbl.sub ? ' &middot; ' + lbl.sub : '');
-  })() : null;
-  const panelTitle = evalLabel
-    ? `AI Bot Votes &mdash; <span style="color:var(--blue)">${evalLabel}</span>`
-    : 'AI Bot Votes &mdash; What Each Model Is Watching';
-
-  if (!models) {
-    // No signal yet — show placeholder cards
-    const placeholders = mdefs.map(({label}) => `
-      <div class="bot-vote-card vote-fail">
-        <div class="bot-vote-name">${label}</div>
-        <div class="bot-vote-dir" style="color:var(--muted);font-size:1.6rem;font-weight:700">?</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">Waiting...</div>
-      </div>`).join('');
-    consensusHtml = `<div class="consensus-panel">
-      <div class="consensus-title">${panelTitle}</div>
-      <div class="bot-vote-cards">${placeholders}</div>
-      <div class="consensus-banner cbanner-split">Waiting for next cycle evaluation...</div>
-    </div>`;
-  } else {
+    // Vote cards
+    const models   = sig.models || {};
     const voteCards = mdefs.map(({key, label}) => {
       const m = models[key];
       if (!m) return `<div class="bot-vote-card vote-fail">
@@ -892,6 +853,8 @@ function renderWatchSection(w) {
         <div class="bot-vote-reason">${what}<br><span style="opacity:.7">${m.reasoning || ''}</span></div>
       </div>`;
     }).join('');
+
+    // Consensus banner
     const working  = mdefs.map(d => models[d.key]).filter(Boolean);
     const yesCount = working.filter(m => m.direction === 'YES').length;
     const noCount  = working.filter(m => m.direction === 'NO').length;
@@ -913,16 +876,43 @@ function renderWatchSection(w) {
       </div>`;
     } else {
       bannerHtml = `<div class="consensus-banner cbanner-split">
-        &#8764; SPLIT VOTE &mdash; ${yesCount} say YES &middot; ${noCount} say NO
-        &nbsp;&middot;&nbsp; leaning <b>${winner}</b> (${Math.max(yesCount,noCount)}/${total})
+        &#8764; SPLIT VOTE &mdash; ${yesCount} say UP &middot; ${noCount} say DOWN
+        &nbsp;&middot;&nbsp; leaning <b>${winner === 'YES' ? 'UP' : 'DOWN'}</b> (${Math.max(yesCount,noCount)}/${total})
         <span class="cbanner-sub">&nbsp;&#8594; models disagree, no trade</span>
       </div>`;
     }
-    consensusHtml = `<div class="consensus-panel">
-      <div class="consensus-title">${panelTitle}</div>
+
+    return `<div class="consensus-panel">
+      <div class="consensus-title" style="display:flex;align-items:center;justify-content:space-between">
+        <span>AI Bot Votes &mdash; <span style="color:var(--blue)">${sLabel}</span></span>
+        <span class="${actCls}" style="font-size:11px">${sig.action}</span>
+      </div>
       <div class="bot-vote-cards">${voteCards}</div>
       ${bannerHtml}
+      ${checklistHtml}
     </div>`;
+  }
+
+  // ── Build all signal panels ──────────────────────────────────────────────
+  const allSignals = w.signals && w.signals.length
+    ? w.signals
+    : (w.last_signal ? [w.last_signal] : []);
+
+  let signalPanels;
+  if (allSignals.length === 0) {
+    const placeholders = mdefs.map(({label}) => `
+      <div class="bot-vote-card vote-fail">
+        <div class="bot-vote-name">${label}</div>
+        <div class="bot-vote-dir" style="color:var(--muted);font-size:1.6rem;font-weight:700">?</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:4px">Waiting...</div>
+      </div>`).join('');
+    signalPanels = `<div class="consensus-panel">
+      <div class="consensus-title">AI Bot Votes &mdash; What Each Model Is Watching</div>
+      <div class="bot-vote-cards">${placeholders}</div>
+      <div class="consensus-banner cbanner-split">Waiting for next cycle evaluation...</div>
+    </div>`;
+  } else {
+    signalPanels = allSignals.map(renderSignalPanel).join('');
   }
 
   wrap.innerHTML = `
@@ -938,9 +928,7 @@ function renderWatchSection(w) {
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    ${signalHtml}
-    ${checklistHtml}
-    ${consensusHtml}`;
+    ${signalPanels}`;
 }
 
 /* ---- render open positions ---- */

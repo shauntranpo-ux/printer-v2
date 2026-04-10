@@ -79,6 +79,8 @@ class TradingBot:
         # Streak protection: track last 5 trade outcomes (True=win)
         self._recent_results: list[bool] = []
         self._pause_cycles: int = 0        # cycles to skip after 5-loss streak
+        # All signals produced this cycle — accumulated for the dashboard
+        self._cycle_signals: list[dict] = []
 
     # ------------------------------------------------------------------
     # Startup sequence
@@ -226,6 +228,7 @@ class TradingBot:
           5. For each: ensemble → gates → momentum check → enter
         """
         cycle_start = datetime.now(timezone.utc)
+        self._cycle_signals = []   # fresh slate for this cycle's dashboard signals
         Path("heartbeat.txt").write_text(cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"))
         print(f"=== CYCLE START === {cycle_start.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         log.info("--- Cycle %s ---", cycle_start.strftime("%Y-%m-%d %H:%M:%S UTC"))
@@ -371,10 +374,9 @@ class TradingBot:
 
         print(f"Total markets scanned: {len(all_markets_found)} across {len(supported_assets)} assets")
 
-        # Persist market watch for dashboard — preserve any last_signal written
-        # during this cycle's market evaluations (do NOT overwrite with None)
+        # Persist market watch for dashboard — save all signals from this cycle
         try:
-            existing = await self.db.get_market_watch() or {}
+            last_sig = self._cycle_signals[-1] if self._cycle_signals else None
             await self.db.set_market_watch({
                 "cycle_ts":   cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "btc_price":  btc_price,
@@ -391,7 +393,8 @@ class TradingBot:
                     }
                     for m in all_markets_found
                 ],
-                "last_signal": existing.get("last_signal"),
+                "last_signal": last_sig,
+                "signals":     self._cycle_signals,
             })
         except Exception as exc:
             log.debug("market_watch store failed: %s", exc)
@@ -593,37 +596,35 @@ class TradingBot:
     async def _store_last_signal(
         self, ticker: str, result: Any, checks: list[dict]
     ) -> None:
-        """Persist the cycle-watch last_signal including the trade-entry checklist."""
-        try:
-            def _mdata(r: Any) -> dict | None:
-                if r is None:
-                    return None
-                return {
-                    "prob":      round(r.probability * 100, 1),
-                    "direction": r.direction,
-                    "reasoning": r.reasoning[:120],
-                }
-
-            watch = await self.db.get_market_watch() or {}
-            watch["last_signal"] = {
-                "ticker":      ticker,
-                "direction":   result.direction.upper() if result.direction != "flat" else "FLAT",
-                "action":      result.action,
-                "prob":        round(result.raw_prob * 100, 1),
-                "confidence":  round(result.confidence * 100, 1),
-                "skip_reason": result.skip_reason,
-                "checks":      checks,
-                "models": {
-                    "claude":   _mdata(result.claude),
-                    "gpt":      _mdata(result.gpt),
-                    "gemini":   _mdata(result.gemini),
-                    "deepseek": _mdata(result.deepseek),
-                },
-                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        """Accumulate this market's signal into _cycle_signals for the dashboard."""
+        def _mdata(r: Any) -> dict | None:
+            if r is None:
+                return None
+            return {
+                "prob":      round(r.probability * 100, 1),
+                "direction": r.direction,
+                "reasoning": r.reasoning[:120],
             }
-            await self.db.set_market_watch(watch)
-        except Exception as exc:
-            log.debug("market_watch signal update failed: %s", exc)
+
+        signal = {
+            "ticker":      ticker,
+            "direction":   result.direction.upper() if result.direction != "flat" else "FLAT",
+            "action":      result.action,
+            "prob":        round(result.raw_prob * 100, 1),
+            "confidence":  round(result.confidence * 100, 1),
+            "skip_reason": result.skip_reason,
+            "checks":      checks,
+            "models": {
+                "claude":   _mdata(result.claude),
+                "gpt":      _mdata(result.gpt),
+                "gemini":   _mdata(result.gemini),
+                "deepseek": _mdata(result.deepseek),
+            },
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        # Replace existing entry for this ticker (re-evaluation) or append new
+        self._cycle_signals = [s for s in self._cycle_signals if s["ticker"] != ticker]
+        self._cycle_signals.append(signal)
 
     # ------------------------------------------------------------------
     # Crash handler
