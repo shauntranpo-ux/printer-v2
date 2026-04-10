@@ -291,20 +291,29 @@ class EnsembleEngine:
     # Ordered list of Gemini models to try — first success wins.
     # Google frequently deprecates specific versions; this auto-advances.
     _GEMINI_FALLBACKS = [
-        "gemini-2.5-flash",          # primary working model (may be busy)
+        "gemini-2.5-flash",          # primary working model
         "gemini-1.5-flash",          # stable fallback, always available
-        "gemini-2.0-flash",          # try stable name before versioned
-        "gemini-2.0-flash-001",      # versioned (404 in some regions)
+        "gemini-2.0-flash",          # stable name
+        "gemini-2.0-flash-001",      # versioned
         "gemini-2.0-flash-lite",     # lite variant
     ]
+
+    # Models confirmed dead (404) this session — skip without API call
+    _GEMINI_DEAD: set[str] = set()
 
     async def _call_gemini(self, context: str, symbol: str = "BTC") -> ModelResult:
         t0 = time.monotonic()
 
-        # Build candidate list: configured model first, then the fallbacks
-        candidates = [settings.GEMINI_MODEL] + [
+        # Build candidate list: configured model first, then fallbacks
+        # Skip any model we already know returns 404 this session
+        all_candidates = [settings.GEMINI_MODEL] + [
             m for m in self._GEMINI_FALLBACKS if m != settings.GEMINI_MODEL
         ]
+        candidates = [m for m in all_candidates if m not in EnsembleEngine._GEMINI_DEAD]
+        if not candidates:
+            # All known models dead — reset and try everything once more
+            EnsembleEngine._GEMINI_DEAD.clear()
+            candidates = all_candidates
 
         last_exc: Exception = RuntimeError("No Gemini models available")
         for model in candidates:
@@ -317,20 +326,21 @@ class EnsembleEngine:
                         temperature=0.1,
                     ),
                 )
-                if model != settings.GEMINI_MODEL:
+                if model != settings.GEMINI_MODEL and model not in EnsembleEngine._GEMINI_DEAD:
                     log.info("Gemini: fell back to model '%s'", model)
                 text = response.text
                 return self._parse_result(text, "gemini", (time.monotonic() - t0) * 1000)
             except Exception as exc:
                 msg = str(exc)
-                # 503 = service unavailable — no point trying fallbacks, fail fast
+                # 503 = service temporarily overloaded — try next fallback model
                 if "503" in msg or "UNAVAILABLE" in msg or "Service Unavailable" in msg:
-                    log.warning(
-                        "Gemini model unavailable (503) - switching to fallback immediately"
-                    )
-                    raise
+                    log.warning("Gemini '%s' overloaded (503) — trying next fallback", model)
+                    last_exc = exc
+                    continue
+                # 404 = model doesn't exist — remember and skip permanently this session
                 if "404" in msg or "NOT_FOUND" in msg or "no longer available" in msg or "not found" in msg.lower():
-                    log.debug("Gemini model '%s' unavailable — trying next", model)
+                    EnsembleEngine._GEMINI_DEAD.add(model)
+                    log.debug("Gemini model '%s' unavailable (404) — added to skip list", model)
                     last_exc = exc
                     continue
                 raise   # unexpected error — don't swallow it

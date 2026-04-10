@@ -371,8 +371,10 @@ class TradingBot:
 
         print(f"Total markets scanned: {len(all_markets_found)} across {len(supported_assets)} assets")
 
-        # Persist market watch for dashboard (BTC-centric summary + all markets)
+        # Persist market watch for dashboard — preserve any last_signal written
+        # during this cycle's market evaluations (do NOT overwrite with None)
         try:
+            existing = await self.db.get_market_watch() or {}
             await self.db.set_market_watch({
                 "cycle_ts":   cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "btc_price":  btc_price,
@@ -389,7 +391,7 @@ class TradingBot:
                     }
                     for m in all_markets_found
                 ],
-                "last_signal": None,
+                "last_signal": existing.get("last_signal"),
             })
         except Exception as exc:
             log.debug("market_watch store failed: %s", exc)

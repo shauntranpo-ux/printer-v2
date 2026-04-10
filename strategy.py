@@ -133,7 +133,8 @@ class Strategy:
             return None
 
         # Step 1 — edge + Kelly size
-        ask_cents    = market.get("yes_ask" if direction == "yes" else "no_ask", 50)
+        # Use `or 50` so that explicit 0 from the API also falls back to 50¢
+        ask_cents    = market.get("yes_ask" if direction == "yes" else "no_ask") or 50
         market_price = ask_cents / 100.0
 
         # P(win): YES trades use P(YES), NO trades use 1-P(YES)
