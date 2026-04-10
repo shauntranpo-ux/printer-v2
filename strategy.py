@@ -162,7 +162,7 @@ class Strategy:
 
         # Step 4 — place order
         try:
-            await self._kalshi.place_order(
+            order_result = await self._kalshi.place_order(
                 ticker=ticker,
                 side=direction,
                 price=ask_cents,
@@ -171,6 +171,28 @@ class Strategy:
         except Exception as exc:
             log.error("Order placement failed for %s: %s", ticker, exc)
             await self._telegram.send_error(str(exc), "enter_trade")
+            return None
+
+        # Check fill status — resting means no counter-party at our price
+        order_status = order_result.get("status", "unknown")
+        order_id     = order_result.get("order_id", "")
+        if order_status not in ("filled", "executed", "unknown"):
+            # Order is sitting unfilled (resting/pending) — cancel it and notify
+            log.warning(
+                "Order for %s is %s (unfilled) — cancelling resting order %s",
+                ticker, order_status, order_id,
+            )
+            if order_id:
+                try:
+                    await self._kalshi.cancel_order(order_id)
+                except Exception as cancel_exc:
+                    log.warning("Failed to cancel resting order %s: %s", order_id, cancel_exc)
+            await self._telegram.send_error(
+                f"Order for {ticker} ({direction.upper()} ×{contracts} @ {ask_cents}¢) "
+                f"could not fill — no counter-party at that price (status: {order_status}). "
+                f"Order cancelled.",
+                "Order unfilled",
+            )
             return None
 
         # Step 5 — log to database
