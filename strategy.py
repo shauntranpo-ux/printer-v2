@@ -115,10 +115,10 @@ class Strategy:
         """
         Full entry flow:
           1. Calculate edge + bet size via Kelly
-          2. Determine limit bid price (take ask liquidity)
+          2. Estimate ask price for contract sizing (market order fills at best available)
           3. Derive contract count (floor)
-          4. Place order via KalshiClient
-          5. Log trade to database
+          4. Place market order with up to 4 retries (1 s gap)
+          5. Log trade to database using actual fill price
           6. Send Telegram entry alert
           7. Return TradeRow (or None on any failure)
         """
@@ -305,8 +305,11 @@ class Strategy:
         Triggers checked per trade (first match wins):
           1. Market resolved → expired
           2. Close time < now + 2min → let expire naturally (skip)
-          3. pnl_pct <= -STOP_LOSS_PCT (35%) → stop_loss
-          4. current bid < CONFIDENCE_DECAY_EXIT × 100¢ → decay
+          3. pnl_pct >= TAKE_PROFIT_PCT (+55%) → take_profit
+          4. Trailing stop activates at peak >= TRAILING_STOP_LOCK_PCT
+          5. pnl_pct <= -STOP_LOSS_PCT (67%) → stop_loss
+             e.g. entry 60¢ → triggers at ~20¢ (60 × 0.33 = 20)
+          6. current bid < CONFIDENCE_DECAY_EXIT × 100¢ (20¢) → decay
 
         Returns the list of trades closed this cycle.
         """
@@ -423,43 +426,90 @@ class Strategy:
     async def _close_trade(
         self,
         trade:       TradeRow,
-        exit_price:  int,       # cents
-        exit_reason: str,       # "stop_loss" | "decay" | "expired" | "manual"
+        exit_price:  int,       # cents — current best bid, used as P&L fallback
+        exit_reason: str,       # "stop_loss" | "decay" | "take_profit" |
+                                # "trailing_stop" | "expired" | "manual"
     ) -> TradeRow:
         """
-        Place a best-effort sell order, update the database, and alert.
-        Sell failures are logged but do not block the database update
-        (the position will resolve via market expiry).
+        Place a market sell order with up to 4 retries (1 s between attempts).
+        Uses actual fill price for P&L; falls back to current bid estimate.
+        Sell failures are logged but never block the database update —
+        the position resolves naturally at market expiry.
         """
-        if exit_reason != "expired":
-            try:
-                await self._kalshi.place_order(
-                    ticker=trade.market_ticker,
-                    side=trade.direction.lower(),
-                    price=exit_price,
-                    count=trade.contracts,
-                    action="sell",
-                )
-            except Exception as exc:
-                log.warning(
-                    "Trade %d: sell order failed (%s) — "
-                    "position remains open on Kalshi; recording estimated close",
-                    trade.id, exc,
-                )
-                await self._telegram.send_error(
-                    f"Sell failed for trade {trade.id} ({trade.market_ticker}): {exc}\n"
-                    f"Position may still be open on Kalshi — check manually.",
-                    "sell_order_failed",
-                )
+        final_exit_price = exit_price   # updated to fill price if order confirms
 
-        pnl       = (exit_price - trade.entry_price) * trade.contracts / 100.0
+        if exit_reason != "expired":
+            _MAX_ATTEMPTS = 5   # 1 initial + 4 retries
+            for attempt in range(_MAX_ATTEMPTS):
+                if attempt > 0:
+                    await asyncio.sleep(1.0)
+                    log.info(
+                        "Market sell retry %d/%d — trade %d (%s)",
+                        attempt, _MAX_ATTEMPTS - 1, trade.id, trade.market_ticker,
+                    )
+
+                try:
+                    sell_result = await self._kalshi.place_order(
+                        ticker=trade.market_ticker,
+                        side=trade.direction.lower(),
+                        count=trade.contracts,
+                        action="sell",
+                        order_type="market",
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Trade %d: market sell attempt %d/%d failed (%s)",
+                        trade.id, attempt + 1, _MAX_ATTEMPTS, exc,
+                    )
+                    if attempt == _MAX_ATTEMPTS - 1:
+                        await self._telegram.send_error(
+                            f"Market sell failed for trade {trade.id} "
+                            f"({trade.market_ticker}): {exc}\n"
+                            f"Position may still be open on Kalshi — check manually.",
+                            "sell_order_failed",
+                        )
+                    continue
+
+                sell_status = sell_result.get("status", "unknown")
+                if sell_status in ("filled", "partially_filled"):
+                    fp = sell_result.get("filled_price")
+                    if fp:
+                        final_exit_price = fp
+                    log.info(
+                        "Trade %d: market sell filled — attempt %d/%d  fill=%d¢",
+                        trade.id, attempt + 1, _MAX_ATTEMPTS, final_exit_price,
+                    )
+                    break
+
+                # Cancel the resting sell order before retrying
+                order_id = sell_result.get("order_id", "")
+                if order_id:
+                    try:
+                        await self._kalshi.cancel_order(order_id)
+                    except Exception as cancel_exc:
+                        log.warning("Failed to cancel sell order %s: %s", order_id, cancel_exc)
+
+                if attempt == _MAX_ATTEMPTS - 1:
+                    log.warning(
+                        "Trade %d: market sell for %s unfilled after %d attempts "
+                        "(status: %s) — recording at estimated bid price",
+                        trade.id, trade.market_ticker, _MAX_ATTEMPTS, sell_status,
+                    )
+                    await self._telegram.send_error(
+                        f"Market sell for trade {trade.id} ({trade.market_ticker}) "
+                        f"could not fill after {_MAX_ATTEMPTS} attempts — "
+                        f"position may still be open on Kalshi. Check manually.",
+                        "sell_order_failed",
+                    )
+
+        pnl       = (final_exit_price - trade.entry_price) * trade.contracts / 100.0
         closed_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         db_status = "expired" if exit_reason == "expired" else "closed"
 
         await self._db.update_trade(
             trade.id,
             status      = db_status,
-            exit_price  = float(exit_price),
+            exit_price  = float(final_exit_price),
             exit_reason = exit_reason,
             pnl_dollars = pnl,
             closed_at   = closed_ts,
@@ -469,7 +519,7 @@ class Strategy:
         closed_trade = TradeRow(
             **{**trade.__dict__,
                "status":      db_status,
-               "exit_price":  float(exit_price),
+               "exit_price":  float(final_exit_price),
                "exit_reason": exit_reason,
                "pnl_dollars": pnl,
                "closed_at":   closed_ts},
@@ -477,6 +527,6 @@ class Strategy:
         await self._telegram.send_trade_exit(closed_trade, exit_reason)
         log.info(
             "Trade %d closed  ticker=%s  reason=%s  exit=%d¢  P&L=$%.2f",
-            trade.id, trade.market_ticker, exit_reason, exit_price, pnl,
+            trade.id, trade.market_ticker, exit_reason, final_exit_price, pnl,
         )
         return closed_trade
