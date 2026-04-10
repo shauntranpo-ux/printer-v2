@@ -15,7 +15,7 @@ from pathlib import Path
 from config import settings
 from database import Database, TradeRow
 from coinbase_feed import CoinbaseFeed, StaleDataError
-from ensemble import EnsembleEngine
+from ensemble import EnsembleEngine, BtcData, Market
 from risk_gates import RiskGates, BotState
 from strategy import Strategy
 from kalshi_client import (
@@ -65,10 +65,7 @@ class BotRunner:
 
         self.db      = Database(Path(settings.DB_PATH))
         self.feed    = CoinbaseFeed()
-        self.ensemble = EnsembleEngine(
-            weights=settings.ensemble_weights,
-            confidence_min=settings.MIN_CONFIDENCE,
-        )
+        self.ensemble = EnsembleEngine()
         self.risk = RiskGates(
             max_daily_drawdown_pct=settings.DAILY_LOSS_LIMIT / 10_000,  # rough pct; refined at runtime
             max_position_exposure=settings.MAX_OPEN_POSITIONS / 10.0,
@@ -174,24 +171,67 @@ class BotRunner:
             await self.telegram.send_error(str(exc), "find_market")
             return
 
-        # 2. Run ensemble
-        candles_15m = self.feed.get_candles_15m()
-        signal = self.ensemble.predict(candles_15m)
-        log.info("Signal: %s  conf=%.3f  prob=%.3f", signal.direction, signal.confidence, signal.raw_prob)
+        # 2. Fetch orderbook early (needed for imbalance calc + order sizing later)
+        try:
+            orderbook = await self.kalshi.get_order_book(ticker)
+        except KalshiMarketClosedError as exc:
+            log.warning("Market %s closed before ensemble: %s", ticker, exc)
+            return
+        except Exception as exc:
+            log.error("Failed to fetch orderbook for %s: %s", ticker, exc)
+            return
 
-        # 3. Log ensemble decision
-        await self.db.log_ensemble(
-            ticker,
-            consensus_prob=signal.raw_prob,
-            model_spread=max(signal.models, key=lambda m: m.prob).prob
-                         - min(signal.models, key=lambda m: m.prob).prob
-                         if signal.models else None,
-            confidence=signal.confidence,
-            action="TRADE" if signal.direction in ("yes", "no") else "SKIP",
-            skip_reason=None if signal.direction in ("yes", "no") else "flat_signal",
+        # 3. Build ensemble inputs
+        bid_vol   = sum(l["size"] for l in orderbook.get("yes_bids", []))
+        ask_vol   = sum(l["size"] for l in orderbook.get("yes_asks", []))
+        imbalance = bid_vol / (ask_vol + 1e-9)
+
+        try:
+            close_dt = datetime.fromisoformat(
+                market.get("close_time", "").replace("Z", "+00:00")
+            )
+        except (ValueError, AttributeError):
+            log.error("Invalid close_time for market %s — skipping tick", ticker)
+            return
+
+        btc_data = BtcData(
+            price     = btc_price,
+            momentum  = self.feed.get_momentum(),
+            candles   = self.feed.get_ohlcv(4),
+            imbalance = imbalance,
+        )
+        market_obj = Market(
+            ticker       = ticker,
+            yes_price    = market.get("yes_ask", 50),
+            no_price     = market.get("no_ask", 50),
+            strike_price = float(market.get("strike_price") or 0),
+            close_time   = close_dt,
         )
 
-        # 4. Build bot state for risk gates
+        # 4. Run ensemble
+        try:
+            signal = await self.ensemble.debate(btc_data, market_obj)
+        except RuntimeError as exc:
+            log.error("Ensemble failed (too few models responded): %s", exc)
+            await self.telegram.send_error(str(exc), "ensemble_debate")
+            return
+
+        log.info(
+            "Signal: %s  conf=%.3f  prob=%.3f  action=%s",
+            signal.direction, signal.confidence, signal.raw_prob, signal.action,
+        )
+
+        # 5. Log ensemble decision
+        await self.db.log_ensemble(
+            ticker,
+            consensus_prob = signal.raw_prob,
+            model_spread   = signal.spread if signal.models else None,
+            confidence     = signal.confidence,
+            action         = signal.action,
+            skip_reason    = signal.skip_reason,
+        )
+
+        # 6b. Build bot state for risk gates
         try:
             balance_dollars = await self.kalshi.get_balance()
             balance_cents   = int(balance_dollars * 100)
@@ -215,7 +255,7 @@ class BotRunner:
             candles_1h=self.feed.get_candles_1h(),
         )
 
-        # 5. Risk gates
+        # 7. Risk gates
         gate_result = self.risk.check_all(signal, state)
         if not gate_result.passed:
             await self.db.log_event(
@@ -231,16 +271,7 @@ class BotRunner:
                 )
             return
 
-        # 6. Build order
-        try:
-            orderbook = await self.kalshi.get_order_book(ticker)
-        except KalshiMarketClosedError as exc:
-            log.warning("Market %s closed before order: %s", ticker, exc)
-            return
-        except Exception as exc:
-            log.error("Failed to fetch orderbook for %s: %s", ticker, exc)
-            return
-
+        # 8b. Build order
         order_params = self.strategy.build_order(
             signal, ticker, orderbook, balance_cents
         )
@@ -248,7 +279,7 @@ class BotRunner:
             log.info("No order produced (signal too weak or size too small)")
             return
 
-        # 7. Place order
+        # 8. Place order
         try:
             order = await self.kalshi.place_order(
                 ticker=order_params.ticker,
@@ -268,7 +299,7 @@ class BotRunner:
             await self.telegram.send_error(str(exc), "place_order")
             return
 
-        # 8. Log trade + alert
+        # 9. Log trade + alert
         spread = (
             max(signal.models, key=lambda m: m.prob).prob
             - min(signal.models, key=lambda m: m.prob).prob
