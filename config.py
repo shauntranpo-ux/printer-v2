@@ -226,13 +226,6 @@ class Settings(BaseSettings):
                 "  • KALSHI_PRIVATE_KEY must be a raw PEM string starting with '-----BEGIN'"
             )
 
-        # Confidence ordering
-        if self.CONFIDENCE_DECAY_EXIT >= self.MIN_CONFIDENCE:
-            errors.append(
-                f"  • CONFIDENCE_DECAY_EXIT ({self.CONFIDENCE_DECAY_EXIT}) must be "
-                f"< MIN_CONFIDENCE ({self.MIN_CONFIDENCE})"
-            )
-
         # Stop-loss vs bet size sanity
         if self.STOP_LOSS_PCT >= 1.0:
             errors.append(f"  • STOP_LOSS_PCT ({self.STOP_LOSS_PCT}) must be < 1.0")
