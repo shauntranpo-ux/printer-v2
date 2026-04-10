@@ -5,7 +5,6 @@ config.py — All settings loaded from environment variables via pydantic-settin
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -38,7 +37,7 @@ class Settings(BaseSettings):
     # Kalshi
     # ------------------------------------------------------------------
     KALSHI_API_KEY: str = Field(default="", description="Kalshi API key ID")
-    KALSHI_PRIVATE_KEY: str = Field(default="", description="RSA private key — file path or raw PEM string")
+    KALSHI_PRIVATE_KEY: str = Field(default="", description="RSA private key — raw PEM string (paste full key including headers)")
     KALSHI_BASE_URL: str = Field(
         default="https://trading-api.kalshi.com/trade-api/v2",
         description="Kalshi REST API base URL",
@@ -167,26 +166,6 @@ class Settings(BaseSettings):
             "deepseek": self.DEEPSEEK_WEIGHT,
         }
 
-    @property
-    def private_key_path(self) -> Path:
-        """
-        Resolves KALSHI_PRIVATE_KEY to a file Path.
-        If the value looks like a raw PEM string, writes it to a temp file and
-        returns that path. The caller should not delete this file during the
-        process lifetime.
-        """
-        val = self.KALSHI_PRIVATE_KEY.strip()
-        if val.startswith("-----BEGIN"):
-            # Raw PEM — write to a named temp file (not deleted on close)
-            tmp = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".pem", delete=False, prefix="kalshi_key_"
-            )
-            tmp.write(val)
-            tmp.flush()
-            tmp.close()
-            return Path(tmp.name)
-        return Path(val)
-
     # ------------------------------------------------------------------
     # validate() — explicit startup check with aggregated errors
     # ------------------------------------------------------------------
@@ -218,15 +197,11 @@ class Settings(BaseSettings):
                 "(or both left empty)"
             )
 
-        # Kalshi private key — resolve and verify
-        if self.KALSHI_PRIVATE_KEY.strip():
-            val = self.KALSHI_PRIVATE_KEY.strip()
-            if not val.startswith("-----BEGIN"):
-                p = Path(val)
-                if not p.exists():
-                    errors.append(
-                        f"  • KALSHI_PRIVATE_KEY looks like a file path but '{p}' does not exist"
-                    )
+        # Kalshi private key — must look like a PEM block
+        if self.KALSHI_PRIVATE_KEY.strip() and not self.KALSHI_PRIVATE_KEY.strip().startswith("-----BEGIN"):
+            errors.append(
+                "  • KALSHI_PRIVATE_KEY must be a raw PEM string starting with '-----BEGIN'"
+            )
 
         # Confidence ordering
         if self.CONFIDENCE_DECAY_EXIT >= self.MIN_CONFIDENCE:

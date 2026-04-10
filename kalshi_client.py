@@ -81,9 +81,12 @@ class _RateLimiter:
 # ---------------------------------------------------------------------------
 
 def _load_key() -> RSAPrivateKey:
-    path = settings.private_key_path   # resolves file path or raw PEM → temp file
-    pem  = path.read_bytes()
-    key  = serialization.load_pem_private_key(pem, password=None)
+    private_key_str = settings.KALSHI_PRIVATE_KEY.strip()
+    if not private_key_str:
+        raise KalshiAuthError("KALSHI_PRIVATE_KEY is not set")
+    key = serialization.load_pem_private_key(
+        private_key_str.encode(), password=None
+    )
     if not isinstance(key, RSAPrivateKey):
         raise KalshiAuthError("KALSHI_PRIVATE_KEY is not an RSA private key")
     return key
