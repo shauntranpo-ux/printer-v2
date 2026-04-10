@@ -451,67 +451,96 @@ class TradingBot:
             skip_reason    = result.skip_reason,
         )
 
-        # Update cycle-watch with the latest signal for the dashboard
-        try:
-            def _mdata(r: Any) -> dict | None:
-                if r is None:
-                    return None
-                return {
-                    "prob":      round(r.probability * 100, 1),
-                    "direction": r.direction,
-                    "reasoning": r.reasoning[:120],
-                }
+        # --- Build trade-entry checklist (shown on dashboard) ---
+        checks: list[dict] = []
 
-            watch = await self.db.get_market_watch() or {}
-            watch["last_signal"] = {
-                "ticker":      ticker,
-                "direction":   result.direction.upper() if result.direction != "flat" else "FLAT",
-                "action":      result.action,
-                "prob":        round(result.raw_prob * 100, 1),
-                "confidence":  round(result.confidence * 100, 1),
-                "skip_reason": result.skip_reason,
-                "models": {
-                    "claude":   _mdata(result.claude),
-                    "gpt":      _mdata(result.gpt),
-                    "gemini":   _mdata(result.gemini),
-                    "deepseek": _mdata(result.deepseek),
-                },
-                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            }
-            await self.db.set_market_watch(watch)
-        except Exception as exc:
-            log.debug("market_watch signal update failed: %s", exc)
+        # Check 1: Direction (always has one based on consensus_prob)
+        dir_label = "YES" if result.consensus_prob > 0.5 else "NO"
+        checks.append({
+            "id": "signal", "label": "Direction",
+            "passed": True,
+            "detail": f"{dir_label} · {result.consensus_prob*100:.0f}%",
+        })
 
-        # Handle WAIT — models disagree; re-evaluate next cycle
-        if result.action == "WAIT":
-            log.info(
-                "Models disagree on %s — adding to wait list (1 cycle pause)", ticker
-            )
-            self._wait_list[ticker] = time.time()
+        # Check 2: Models agree (action != WAIT means spread is within MAX_MODEL_SPREAD)
+        spread_ok = result.action != "WAIT"
+        checks.append({
+            "id": "spread", "label": "Models agree",
+            "passed": spread_ok,
+            "detail": f"spread {result.spread:.2f}",
+        })
+
+        # Check 3: Confidence (action == TRADE means >= MIN_CONFIDENCE; SKIP means failed)
+        conf_ok = result.action == "TRADE"
+        checks.append({
+            "id": "confidence",
+            "label": f"Confidence \u2265{settings.MIN_CONFIDENCE*100:.0f}%",
+            "passed": conf_ok,
+            "detail": f"{result.confidence*100:.0f}%",
+        })
+
+        # If WAIT or SKIP, fill remaining checks as not-evaluated and store
+        _pending = [
+            ("momentum",  "Momentum"),
+            ("edge",      "Edge"),
+            ("liquidity", "Liquidity"),
+            ("drawdown",  "Daily loss"),
+            ("data_age",  "Data fresh"),
+        ]
+        if result.action in ("WAIT", "SKIP"):
+            for cid, clabel in _pending:
+                checks.append({"id": cid, "label": clabel, "passed": None, "detail": "—"})
+            await self._store_last_signal(ticker, result, checks)
+            if result.action == "WAIT":
+                log.info("Models disagree on %s — adding to wait list (1 cycle pause)", ticker)
+                self._wait_list[ticker] = time.time()
+            else:
+                log.info("Skipping %s: %s", ticker, result.skip_reason)
             return
 
-        # Handle SKIP — confidence/spread threshold not met internally
-        if result.action == "SKIP":
-            log.info("Skipping %s: %s", ticker, result.skip_reason)
-            return
-
-        # --- Momentum confirmation ---
+        # Check 4: Momentum confirmation
         direction = result.direction   # "yes" | "no"
-        if direction == "yes" and momentum < -0.1:
+        if direction == "yes":
+            mom_ok     = momentum >= -0.1
+            mom_detail = f"{momentum:+.3f} (need \u2265 -0.10)"
+        else:
+            mom_ok     = momentum <= 0.1
+            mom_detail = f"{momentum:+.3f} (need \u2264 +0.10)"
+        checks.append({
+            "id": "momentum", "label": "Momentum",
+            "passed": mom_ok,
+            "detail": mom_detail,
+        })
+
+        if not mom_ok:
+            for cid, clabel in _pending[1:]:   # edge, liquidity, drawdown, data_age
+                checks.append({"id": cid, "label": clabel, "passed": None, "detail": "—"})
+            await self._store_last_signal(ticker, result, checks)
             log.info(
-                "Momentum (%.2f) contradicts YES signal on %s — skipping",
-                momentum, ticker,
-            )
-            return
-        if direction == "no" and momentum > 0.1:
-            log.info(
-                "Momentum (%.2f) contradicts NO signal on %s — skipping",
-                momentum, ticker,
+                "Momentum (%.2f) contradicts %s signal on %s — skipping",
+                momentum, direction.upper(), ticker,
             )
             return
 
         # --- 5 risk gates ---
         gate_result = await self.risk.check_all(market, result, settings.MAX_BET_SIZE)
+
+        # Checks 5-8: from gate results (skip internal confidence gate — already shown above)
+        for gate_key, chk_id, chk_label in [
+            ("edge",      "edge",      "Edge"),
+            ("liquidity", "liquidity", "Liquidity"),
+            ("drawdown",  "drawdown",  "Daily loss"),
+            ("staleness", "data_age",  "Data fresh"),
+        ]:
+            gd = gate_result.gate_details.get(gate_key)
+            if gd is not None:
+                checks.append({"id": chk_id, "label": chk_label,
+                               "passed": gd["passed"], "detail": gd["reason"]})
+            else:
+                checks.append({"id": chk_id, "label": chk_label, "passed": None, "detail": "—"})
+
+        await self._store_last_signal(ticker, result, checks)
+
         if not gate_result.passed:
             log.info("Gates failed on %s: %s", ticker, gate_result.reason)
             await self.db.log_event(
@@ -541,6 +570,41 @@ class TradingBot:
                 trade.market_ticker, trade.direction, trade.size_dollars,
             )
             open_tickers.add(ticker)   # guard against double-entry this cycle
+
+    async def _store_last_signal(
+        self, ticker: str, result: Any, checks: list[dict]
+    ) -> None:
+        """Persist the cycle-watch last_signal including the trade-entry checklist."""
+        try:
+            def _mdata(r: Any) -> dict | None:
+                if r is None:
+                    return None
+                return {
+                    "prob":      round(r.probability * 100, 1),
+                    "direction": r.direction,
+                    "reasoning": r.reasoning[:120],
+                }
+
+            watch = await self.db.get_market_watch() or {}
+            watch["last_signal"] = {
+                "ticker":      ticker,
+                "direction":   result.direction.upper() if result.direction != "flat" else "FLAT",
+                "action":      result.action,
+                "prob":        round(result.raw_prob * 100, 1),
+                "confidence":  round(result.confidence * 100, 1),
+                "skip_reason": result.skip_reason,
+                "checks":      checks,
+                "models": {
+                    "claude":   _mdata(result.claude),
+                    "gpt":      _mdata(result.gpt),
+                    "gemini":   _mdata(result.gemini),
+                    "deepseek": _mdata(result.deepseek),
+                },
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            await self.db.set_market_watch(watch)
+        except Exception as exc:
+            log.debug("market_watch signal update failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Crash handler

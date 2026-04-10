@@ -469,6 +469,19 @@ _HTML = r"""<!DOCTYPE html>
                         -webkit-line-clamp:2;-webkit-box-orient:vertical}
   .model-card-null{opacity:.4;font-size:11px;color:var(--muted);margin-top:8px}
 
+  /* Trade-entry checklist */
+  .checklist{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;
+             padding-top:10px;border-top:1px solid var(--border)}
+  .chk-item{display:inline-flex;align-items:center;gap:5px;font-size:11px;
+            background:var(--dim);border-radius:4px;padding:4px 8px;white-space:nowrap}
+  .chk-icon{font-weight:700;font-size:12px;width:12px;text-align:center}
+  .chk-pass .chk-icon{color:var(--green)}
+  .chk-fail .chk-icon{color:var(--red)}
+  .chk-skip .chk-icon{color:var(--muted);opacity:.45}
+  .chk-label{color:var(--muted)}
+  .chk-detail{color:var(--text);margin-left:3px;font-size:10px}
+  .chk-fail .chk-label,.chk-fail .chk-detail{color:var(--red)}
+
   /* Direction stats & model performance */
   .dir-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
   .dir-cell{background:var(--dim);border-radius:6px;padding:12px 16px;text-align:center}
@@ -769,6 +782,23 @@ function renderWatchSection(w) {
       }).join('') + '</div>';
     }
 
+    // Checklist
+    let checklistHtml = '';
+    if (s.checks && s.checks.length) {
+      const items = s.checks.map(c => {
+        const passed = c.passed;
+        const icon   = passed === true ? '✓' : passed === false ? '✗' : '—';
+        const cls    = passed === true ? 'chk-pass' : passed === false ? 'chk-fail' : 'chk-skip';
+        const detail = (c.detail && c.detail !== '—')
+          ? `<span class="chk-detail">${c.detail}</span>` : '';
+        return `<div class="chk-item ${cls}">
+          <span class="chk-icon">${icon}</span>
+          <span class="chk-label">${c.label}</span>${detail}
+        </div>`;
+      }).join('');
+      checklistHtml = `<div class="checklist">${items}</div>`;
+    }
+
     signalHtml = `
       <div class="watch-signal">
         <span class="watch-label">Last signal</span>
@@ -780,6 +810,7 @@ function renderWatchSection(w) {
         <span style="font-size:11px;color:var(--muted)">${lookFor}</span>
         ${s.skip_reason ? '<span style="color:var(--yellow);font-size:10px">(' + s.skip_reason + ')</span>' : ''}
       </div>
+      ${checklistHtml}
       ${modelCardsHtml}`;
   }
 
