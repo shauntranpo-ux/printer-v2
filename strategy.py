@@ -125,6 +125,13 @@ class Strategy:
         if direction not in ("yes", "no"):
             return None
 
+        # Guard: only one open trade per market ticker
+        ticker = market.get("ticker", "")
+        open_trades = await self._db.get_open_trades()
+        if any(t.market_ticker == ticker for t in open_trades):
+            log.info("Ticker %s already has an open trade — skipping entry", ticker)
+            return None
+
         # Step 1 — edge + Kelly size
         ask_cents    = market.get("yes_ask" if direction == "yes" else "no_ask", 50)
         market_price = ask_cents / 100.0
@@ -153,7 +160,6 @@ class Strategy:
         actual_cost = contracts * market_price      # dollars
 
         # Step 4 — place order
-        ticker = market.get("ticker", "")
         try:
             await self._kalshi.place_order(
                 ticker=ticker,
