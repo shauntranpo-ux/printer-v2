@@ -4,7 +4,7 @@ backtest.py — Backtest printer-v2 strategy on historical BTC 1m data.
 Usage:
     python backtest.py --file btc_1m_data.xlsx
     python backtest.py --file data.csv --start 2020-01-01 --end 2023-12-31
-    python backtest.py --file data.csv --bankroll 500 --max-bet 25 --tp 0.30 --sl 0.15
+    python backtest.py --file data.csv --bankroll 500 --max-bet 25 --tp 0.50 --sl 0.35
 
 Dependencies (pip install if missing):
     pandas openpyxl scipy matplotlib numpy
@@ -36,17 +36,13 @@ DEFAULT_BANKROLL       = 500.0
 DEFAULT_MAX_BET        = 25.0
 DEFAULT_TP             = 0.50   # take profit at +50 %
 DEFAULT_SL             = 0.35   # stop loss at -35 %
-TRAILING_LOCK          = 0.30   # activate trailing stop after +30 % peak
-TRAILING_EXIT          = 0.20   # exit trailing stop below +20 %
 MIN_EDGE               = 0.03   # lower than live (rule-based proxy has smaller edge)
 MIN_CONF               = 0.18   # calibrated for rule-based proxy (max achievable ~0.60)
 MAX_SPREAD             = 0.35
-CONF_DECAY_THRESH      = 0.12   # below MIN_CONF
-MAX_POSITIONS          = 3
+MAX_POSITIONS          = 3      # max concurrent trades per candle
 DAILY_LOSS_LIMIT       = 100.0
 KELLY_FRACTION         = 0.5
 MIN_BET                = 1.0
-MAX_HOLD_CANDLES       = 4      # 4 × 15 min = 60 min max hold
 STRIKE_OFFSETS         = [+0.005, 0.0, -0.005]   # +0.5 %, flat, -0.5 %
 
 MODEL_WEIGHTS = {"claude": 0.30, "gpt": 0.25, "gemini": 0.25, "deepseek": 0.20}
@@ -85,7 +81,6 @@ class Position:
     entry_price_cents:   float
     bet_size:            float
     contracts:           int
-    peak_pnl_pct:        float
     momentum_at_entry:   float
     confidence_at_entry: float
     edge_at_entry:       float
@@ -301,20 +296,6 @@ def yes_price_cents(btc: float, strike: float, vol: float,
     return max(5.0, min(95.0, prob * 100.0))
 
 
-def current_price_cents(
-    btc: float, strike: float, vol: float,
-    direction: str, candles_remaining: int,
-) -> float:
-    """Mid-life re-pricing accounting for time decay."""
-    if candles_remaining <= 0:
-        raw = 100.0 if btc >= strike else 0.0
-        if direction == "NO":
-            raw = 100.0 - raw
-        return raw
-    tf  = candles_remaining / MAX_HOLD_CANDLES
-    yp  = yes_price_cents(btc, strike, vol, tf)
-    return yp if direction == "YES" else (100.0 - yp)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5 · Kelly sizing
@@ -343,21 +324,36 @@ def run_backtest(
     ind: dict[str, np.ndarray],
     args: argparse.Namespace,
 ) -> tuple[list[Trade], pd.Series]:
+    """
+    Accurate Kalshi single-candle simulation.
+
+    Each 15-min candle is one contract period.  Entry is at candle open;
+    the contract resolves at candle close (binary: $1 win / $0 loss) unless
+    TP or SL is hit intra-candle using candle high/low.
+
+    P&L model (binary):
+      WIN  → pnl = contracts × (1.00 − entry_price)          [+ve]
+      LOSS → pnl = −contracts × entry_price                   [−ve]
+      TP   → pnl = (tp_exit_cents − entry_cents) × contracts / 100
+      SL   → pnl = (sl_exit_cents − entry_cents) × contracts / 100
+    """
     bankroll  = args.bankroll
     max_bet   = args.max_bet
     tp        = args.tp
     sl        = args.sl
 
+    opens     = df["open"].values
+    highs     = df["high"].values
+    lows      = df["low"].values
     closes    = df["close"].values
-    times     = df["dt"].values          # numpy datetime64
+    times     = df["dt"].values
     n         = len(df)
 
-    trades:      list[Trade]    = []
-    positions:   list[Position] = []
-    equity_vals: list[float]    = []     # one per candle
-    daily_loss:  dict           = {}     # date-str → cumulative loss $
+    trades:      list[Trade] = []
+    equity_vals: list[float] = []
+    daily_loss:  dict        = {}
 
-    WARMUP = 30   # candles needed before indicators are reliable
+    WARMUP = 30
 
     for i in range(n):
         ts = pd.Timestamp(times[i]).to_pydatetime()
@@ -366,91 +362,13 @@ def run_backtest(
         if i < WARMUP:
             continue
 
-        btc = closes[i]
+        btc_open  = opens[i]
+        btc_high  = highs[i]
+        btc_low   = lows[i]
+        btc_close = closes[i]
         vol = max(float(ind["vol"][i]), 0.001)
         day = ts.date().isoformat()
 
-        # ── A. Check exits ───────────────────────────────────────────────────
-        keep: list[Position] = []
-        for pos in positions:
-            candles_held      = i - pos.entry_idx
-            candles_remaining = MAX_HOLD_CANDLES - candles_held
-
-            # Re-price the contract at current BTC and time
-            cur_cents = current_price_cents(
-                btc, pos.strike_price, vol, pos.direction, candles_remaining
-            )
-            cur_cents = max(1.0, min(99.0, cur_cents))
-
-            pnl_pct = (cur_cents - pos.entry_price_cents) / pos.entry_price_cents
-
-            # Update peak
-            if pnl_pct > pos.peak_pnl_pct:
-                pos.peak_pnl_pct = pnl_pct
-
-            reason: Optional[str] = None
-
-            # 1. Max hold → binary expiry
-            if candles_remaining <= 0:
-                if pos.direction == "YES":
-                    cur_cents = 100.0 if btc >= pos.strike_price else 0.0
-                else:
-                    cur_cents = 100.0 if btc <  pos.strike_price else 0.0
-                pnl_pct = (cur_cents - pos.entry_price_cents) / pos.entry_price_cents
-                reason = "expired"
-
-            # 2. Take profit
-            elif pnl_pct >= tp:
-                reason = "take_profit"
-
-            # 3. Trailing stop
-            elif pos.peak_pnl_pct >= TRAILING_LOCK and pnl_pct < TRAILING_EXIT:
-                reason = "trailing_stop"
-
-            # 4. Stop loss
-            elif pnl_pct <= -sl:
-                reason = "stop_loss"
-
-            # 5. Confidence decay (re-evaluate ensemble)
-            elif candles_held >= 1:
-                re_ens = ensemble_at(i, ind)
-                if re_ens["confidence"] < CONF_DECAY_THRESH:
-                    reason = "conf_decay"
-
-            if reason:
-                pnl = (cur_cents - pos.entry_price_cents) * pos.contracts / 100.0
-                if pnl < 0:
-                    daily_loss[day] = daily_loss.get(day, 0.0) + abs(pnl)
-                bankroll += pnl
-                equity_vals[-1] = bankroll  # update the already-appended value
-
-                trades.append(Trade(
-                    entry_time          = pos.entry_time,
-                    exit_time           = ts,
-                    direction           = pos.direction,
-                    strike_price        = round(pos.strike_price, 2),
-                    entry_price         = round(pos.entry_price_cents, 2),
-                    exit_price          = round(cur_cents, 2),
-                    bet_size            = round(pos.bet_size, 2),
-                    contracts           = pos.contracts,
-                    pnl_dollars         = round(pnl, 4),
-                    pnl_pct             = round(pnl_pct * 100.0, 2),
-                    exit_reason         = reason,
-                    momentum_at_entry   = round(pos.momentum_at_entry, 4),
-                    confidence_at_entry = round(pos.confidence_at_entry, 4),
-                    edge_at_entry       = round(pos.edge_at_entry, 4),
-                    btc_price_at_entry  = round(pos.btc_price_at_entry, 2),
-                    hold_candles        = candles_held,
-                    peak_pnl_pct        = round(pos.peak_pnl_pct * 100.0, 2),
-                ))
-            else:
-                keep.append(pos)
-
-        positions = keep
-
-        # ── B. Entry checks ──────────────────────────────────────────────────
-        if len(positions) >= MAX_POSITIONS:
-            continue
         if daily_loss.get(day, 0.0) >= DAILY_LOSS_LIMIT:
             continue
 
@@ -458,87 +376,124 @@ def run_backtest(
         if ens["action"] != "TRADE":
             continue
 
-        direction = ens["direction"]       # "YES" | "NO"
+        direction = ens["direction"]
         momentum  = ens["momentum"]
 
-        # Momentum confirmation: skip only on strong counter-momentum
+        # Skip only on strong counter-momentum
         if direction == "YES" and momentum < -0.3:
             continue
         if direction == "NO"  and momentum >  0.3:
             continue
 
-        # Evaluate 3 strike prices; stop when we hit MAX_POSITIONS
+        candle_trades = 0
+
         for offset in STRIKE_OFFSETS:
-            if len(positions) >= MAX_POSITIONS:
+            if candle_trades >= MAX_POSITIONS:
                 break
 
-            strike  = btc * (1.0 + offset)
-            yes_p   = yes_price_cents(btc, strike, vol) / 100.0   # fraction
+            # Strike is based on open price (entry BTC)
+            strike = btc_open * (1.0 + offset)
+
+            # Entry price from Black-Scholes at candle open
+            yes_entry_frac = yes_price_cents(btc_open, strike, vol) / 100.0
 
             if direction == "YES":
-                mkt_p_frac = yes_p
-                edge       = ens["consensus"] - mkt_p_frac
+                entry_frac = yes_entry_frac
+                edge       = ens["consensus"] - entry_frac
             else:
-                mkt_p_frac = 1.0 - yes_p
-                edge       = (1.0 - ens["consensus"]) - mkt_p_frac
+                entry_frac = 1.0 - yes_entry_frac
+                edge       = (1.0 - ens["consensus"]) - entry_frac
 
             if edge < MIN_EDGE:
                 continue
 
-            bet = kelly_size(edge, mkt_p_frac, bankroll, max_bet)
+            bet = kelly_size(edge, entry_frac, bankroll, max_bet)
             if bet < MIN_BET:
                 continue
 
-            contracts = int(bet / mkt_p_frac)
+            contracts = int(bet / entry_frac)
             if contracts < 1:
                 continue
 
-            positions.append(Position(
-                entry_idx           = i,
+            entry_cents = entry_frac * 100.0
+            cost        = contracts * entry_cents / 100.0   # actual dollars at risk
+
+            # ── Intra-candle TP / SL using candle high / low ─────────────────
+            # YES contract rises with BTC → check TP against HIGH, SL against LOW
+            # NO  contract rises with BTC falling → check TP against LOW, SL against HIGH
+
+            if direction == "YES":
+                yes_at_best  = yes_price_cents(btc_high, strike, vol)
+                yes_at_worst = yes_price_cents(btc_low,  strike, vol)
+                contract_at_best  = yes_at_best
+                contract_at_worst = yes_at_worst
+            else:
+                yes_at_best  = yes_price_cents(btc_low,  strike, vol)
+                yes_at_worst = yes_price_cents(btc_high, strike, vol)
+                contract_at_best  = 100.0 - yes_at_best
+                contract_at_worst = 100.0 - yes_at_worst
+
+            tp_threshold = entry_cents * (1.0 + tp)
+            sl_threshold = entry_cents * (1.0 - sl)
+
+            if contract_at_best >= tp_threshold:
+                # TP hit intra-candle — sell at TP price
+                reason      = "take_profit"
+                exit_cents  = tp_threshold
+                pnl         = (exit_cents - entry_cents) * contracts / 100.0
+                pnl_pct     = pnl / cost
+
+            elif contract_at_worst <= sl_threshold:
+                # SL hit intra-candle — sell at SL price
+                reason      = "stop_loss"
+                exit_cents  = sl_threshold
+                pnl         = (exit_cents - entry_cents) * contracts / 100.0
+                pnl_pct     = pnl / cost
+
+            else:
+                # Contract expires at candle close — binary resolution
+                if direction == "YES":
+                    won = btc_close >= strike
+                else:
+                    won = btc_close < strike
+
+                reason     = "expired"
+                exit_cents = 100.0 if won else 0.0
+
+                if won:
+                    # Receive $1 per contract, subtract cost
+                    pnl     = contracts * (100.0 - entry_cents) / 100.0
+                else:
+                    # Lose entire stake
+                    pnl     = -cost
+                pnl_pct = pnl / cost
+
+            if pnl < 0:
+                daily_loss[day] = daily_loss.get(day, 0.0) + abs(pnl)
+            bankroll        += pnl
+            equity_vals[-1]  = bankroll
+
+            trades.append(Trade(
                 entry_time          = ts,
+                exit_time           = ts,   # same 15-min candle
                 direction           = direction,
-                strike_price        = strike,
-                entry_price_cents   = mkt_p_frac * 100.0,
-                bet_size            = bet,
+                strike_price        = round(strike, 2),
+                entry_price         = round(entry_cents, 2),
+                exit_price          = round(exit_cents, 2),
+                bet_size            = round(bet, 2),
                 contracts           = contracts,
-                peak_pnl_pct        = 0.0,
-                momentum_at_entry   = momentum,
-                confidence_at_entry = ens["confidence"],
-                edge_at_entry       = edge,
-                btc_price_at_entry  = btc,
+                pnl_dollars         = round(pnl, 4),
+                pnl_pct             = round(pnl_pct * 100.0, 2),
+                exit_reason         = reason,
+                momentum_at_entry   = round(momentum, 4),
+                confidence_at_entry = round(ens["confidence"], 4),
+                edge_at_entry       = round(edge, 4),
+                btc_price_at_entry  = round(btc_open, 2),
+                hold_candles        = 1,
+                peak_pnl_pct        = round(max(pnl_pct * 100.0, 0.0), 2),
             ))
 
-    # ── Force-close any remaining positions at end of data ──────────────────
-    last_btc = closes[-1]
-    last_ts  = pd.Timestamp(times[-1]).to_pydatetime()
-    for pos in positions:
-        if pos.direction == "YES":
-            fin = 100.0 if last_btc >= pos.strike_price else 0.0
-        else:
-            fin = 100.0 if last_btc <  pos.strike_price else 0.0
-        pnl = (fin - pos.entry_price_cents) * pos.contracts / 100.0
-        bankroll += pnl
-        candles_held = n - 1 - pos.entry_idx
-        pnl_pct = (fin - pos.entry_price_cents) / pos.entry_price_cents
-        trades.append(Trade(
-            entry_time          = pos.entry_time,
-            exit_time           = last_ts,
-            direction           = pos.direction,
-            strike_price        = round(pos.strike_price, 2),
-            entry_price         = round(pos.entry_price_cents, 2),
-            exit_price          = round(fin, 2),
-            bet_size            = round(pos.bet_size, 2),
-            contracts           = pos.contracts,
-            pnl_dollars         = round(pnl, 4),
-            pnl_pct             = round(pnl_pct * 100.0, 2),
-            exit_reason         = "expired",
-            momentum_at_entry   = round(pos.momentum_at_entry, 4),
-            confidence_at_entry = round(pos.confidence_at_entry, 4),
-            edge_at_entry       = round(pos.edge_at_entry, 4),
-            btc_price_at_entry  = round(pos.btc_price_at_entry, 2),
-            hold_candles        = candles_held,
-            peak_pnl_pct        = round(pos.peak_pnl_pct * 100.0, 2),
-        ))
+            candle_trades += 1
 
     equity_series = pd.Series(equity_vals, index=df["dt"])
     return trades, equity_series
@@ -684,14 +639,12 @@ def print_report(
   Avg loss:        ${m['avg_loss']:+.2f}  ({m['avg_loss_pct']:+.1f}%)
   Best trade:      ${m['best_trade']:+.2f}
   Worst trade:     ${m['worst_trade']:+.2f}
-  Avg hold time:   {m['avg_hold_min']:.0f} minutes
+  Hold time:       <=15 min (single candle)
 {SEP}
-  EXIT REASONS
-{rl('take_profit',   'Take profit:')}
-{rl('trailing_stop', 'Trailing stop:')}
-{rl('stop_loss',     'Stop loss:')}
-{rl('expired',       'Expired:')}
-{rl('conf_decay',    'Conf decay:')}
+  EXIT REASONS  (single 15-min candle per trade)
+{rl('take_profit', 'Take profit:')}
+{rl('stop_loss',   'Stop loss:')}
+{rl('expired',     'Expired (binary):')}
 {SEP}
   DIRECTION BREAKDOWN
   YES trades:      {m['yes_count']}  |  WR: {m['yes_win_rate']:.1f}%
