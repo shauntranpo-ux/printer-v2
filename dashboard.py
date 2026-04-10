@@ -882,9 +882,9 @@ function renderWatchSection(w) {
       const cls   = isYes ? 'vote-yes' : 'vote-no';
       const col   = isYes ? 'var(--green)' : 'var(--red)';
       const badge = isYes
-        ? `<span style="background:#3fb95030;color:var(--green);border:1px solid #3fb95060;border-radius:4px;padding:3px 10px;font-size:1.3rem;font-weight:900;letter-spacing:1px">YES</span>`
-        : `<span style="background:#f8514930;color:var(--red);border:1px solid #f8514960;border-radius:4px;padding:3px 10px;font-size:1.3rem;font-weight:900;letter-spacing:1px">NO</span>`;
-      const what  = isYes ? 'Price will finish <b>above</b> strike' : 'Price will finish <b>below</b> strike';
+        ? `<span style="background:#3fb95030;color:var(--green);border:1px solid #3fb95060;border-radius:4px;padding:3px 10px;font-size:1.3rem;font-weight:900;letter-spacing:1px">&#9650; UP</span>`
+        : `<span style="background:#f8514930;color:var(--red);border:1px solid #f8514960;border-radius:4px;padding:3px 10px;font-size:1.3rem;font-weight:900;letter-spacing:1px">&#9660; DOWN</span>`;
+      const what  = isYes ? 'Expects price <b>above</b> strike' : 'Expects price <b>below</b> strike';
       return `<div class="bot-vote-card ${cls}">
         <div class="bot-vote-name">${label}</div>
         <div style="margin:6px 0 4px">${badge}</div>
@@ -902,11 +902,12 @@ function renderWatchSection(w) {
     if (total === 0) {
       bannerHtml = `<div class="consensus-banner cbanner-split">All models offline &mdash; no trade</div>`;
     } else if (allAgree) {
-      const bcls  = winner === 'YES' ? 'cbanner-yes' : 'cbanner-no';
+      const bcls   = winner === 'YES' ? 'cbanner-yes' : 'cbanner-no';
       const barrow = winner === 'YES' ? '&#9650;' : '&#9660;';
-      const bwhat  = winner === 'YES' ? 'ABOVE strike' : 'BELOW strike';
+      const bdir   = winner === 'YES' ? 'UP' : 'DOWN';
+      const bwhat  = winner === 'YES' ? 'above strike' : 'below strike';
       bannerHtml = `<div class="consensus-banner ${bcls}">
-        ${barrow}&nbsp;FULL CONSENSUS &mdash; BET <b>${winner}</b>
+        ${barrow}&nbsp;FULL CONSENSUS &mdash; <b>${bdir}</b>
         &nbsp;&middot;&nbsp; ${total}/${total} bots agree &middot; all expect price to finish <b>${bwhat}</b>
         <span class="cbanner-sub">&nbsp;&#8594; trade if risk gates pass</span>
       </div>`;
