@@ -1,8 +1,11 @@
 """
-risk_gates.py — 5-gate pre-trade risk filter
+risk_gates.py — 3-gate pre-trade risk filter
 
-All 5 gates must pass for a trade to execute.
-Each gate logs its result independently.
+Active gates: drawdown, confidence, staleness.
+Edge and liquidity gate methods exist but are intentionally not wired
+into check_all() (markets have no order-book depth, so liquidity always
+fails; edge threshold is enforced by ensemble confidence instead).
+All 3 active gates must pass for a trade to execute.
 """
 
 from __future__ import annotations
