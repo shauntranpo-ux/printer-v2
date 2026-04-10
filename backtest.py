@@ -102,7 +102,7 @@ def load_and_resample(
     end:   Optional[str] = None,
 ) -> pd.DataFrame:
     path = Path(file_path)
-    print(f"Loading {path.name} …")
+    print(f"Loading {path.name} ...")
 
     if path.suffix.lower() in (".xlsx", ".xls"):
         df = pd.read_excel(path)
@@ -119,7 +119,7 @@ def load_and_resample(
 
     df = df.set_index("dt")[["open", "high", "low", "close", "volume"]].astype(float)
 
-    print(f"  1m rows: {len(df):,}  ({df.index[0].date()} → {df.index[-1].date()})")
+    print(f"  1m rows: {len(df):,}  ({df.index[0].date()} to {df.index[-1].date()})")
 
     # Resample 1m → 15m
     df15 = df.resample("15min").agg(
@@ -138,7 +138,7 @@ def load_and_resample(
     if end:
         df15 = df15[df15.index <= pd.Timestamp(end, tz="UTC")]
 
-    print(f"  15m candles: {len(df15):,}  ({df15.index[0].date()} → {df15.index[-1].date()})")
+    print(f"  15m candles: {len(df15):,}  ({df15.index[0].date()} to {df15.index[-1].date()})")
     return df15.reset_index()   # 'dt' becomes a regular column
 
 
@@ -661,7 +661,7 @@ def print_report(
     best_p  = monthly[best_m]["pnl"]  if best_m  != "—" else 0.0
     worst_p = monthly[worst_m]["pnl"] if worst_m != "—" else 0.0
 
-    SEP = "═" * 47
+    SEP = "=" * 47
 
     print(f"""
 {SEP}
@@ -968,10 +968,10 @@ def main() -> None:
         print("ERROR: fewer than 50 candles after filtering — nothing to backtest.")
         sys.exit(1)
 
-    print("Computing indicators …")
+    print("Computing indicators ...")
     ind = compute_indicators(df)
 
-    print(f"Running backtest on {len(df):,} 15m candles …")
+    print(f"Running backtest on {len(df):,} 15m candles ...")
     trades, equity = run_backtest(df, ind, args)
 
     if not trades:
