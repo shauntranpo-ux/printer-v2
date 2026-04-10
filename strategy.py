@@ -1,115 +1,30 @@
 """
-strategy.py — Kelly sizing + entry/exit logic
+strategy.py — Kelly sizing, trade entry, and exit management
+
+Owns the full lifecycle of a trade: sizing, entry, stop-loss/decay/expiry
+exits. All database writes and Telegram alerts happen here so runner.py
+only needs to call enter_trade() and check_exits().
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import math
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
-from ensemble import EnsembleSignal
-from kalshi_client import OrderBook
+from config import settings
+from database import TradeRow
 
 log = logging.getLogger(__name__)
 
-# Kalshi contracts are $1 face value, prices in cents (1–99).
-# One contract costs `price` cents and pays $1 if it resolves YES.
-CONTRACT_FACE_VALUE_CENTS = 100
+_MIN_BET_DOLLARS = 1.00     # never risk less than $1
+_ROUNDING        = 0.50     # round to nearest $0.50
 
 
-# ---------------------------------------------------------------------------
-# Order parameters
-# ---------------------------------------------------------------------------
-
-@dataclass
-class OrderParams:
-    ticker: str
-    side: str           # "yes" | "no"
-    contracts: int
-    price_cents: int    # limit price in cents (1–99)
-    take_profit_cents: int
-    stop_loss_cents: int
-    dollar_size: float  # nominal cost in dollars
-
-
-# ---------------------------------------------------------------------------
-# Kelly sizing
-# ---------------------------------------------------------------------------
-
-def kelly_fraction(
-    prob: float,
-    *,
-    win_payout: float = 1.0,    # net gain per dollar if correct
-    loss_payout: float = 1.0,   # loss per dollar if wrong
-) -> float:
-    """
-    Full Kelly fraction: f* = (p * b - q) / b
-    where p = win probability, q = 1-p, b = win_payout / loss_payout.
-
-    Clamps to [0, 1].
-    """
-    if prob <= 0 or prob >= 1:
-        return 0.0
-    q = 1.0 - prob
-    b = win_payout / loss_payout
-    f = (prob * b - q) / b
-    return max(0.0, min(f, 1.0))
-
-
-def size_position(
-    kelly: float,
-    kelly_fraction_multiplier: float,   # e.g. 0.5 for half-Kelly
-    balance_cents: int,
-    max_position_pct: float,            # hard cap
-) -> int:
-    """Returns position size in cents (cost basis)."""
-    fractional_kelly = kelly * kelly_fraction_multiplier
-    raw_size_cents = int(balance_cents * fractional_kelly)
-    max_size_cents = int(balance_cents * max_position_pct)
-    size_cents = min(raw_size_cents, max_size_cents)
-    return max(0, size_cents)
-
-
-# ---------------------------------------------------------------------------
-# Entry pricing
-# ---------------------------------------------------------------------------
-
-def get_entry_price(orderbook: OrderBook, side: str) -> int | None:
-    """
-    Returns the best available ask price for the desired side.
-    We are always buyers, so we lift the ask.
-    """
-    if side == "yes":
-        return orderbook.best_yes_ask()
-    else:
-        return orderbook.best_no_ask()
-
-
-# ---------------------------------------------------------------------------
-# Exit targets
-# ---------------------------------------------------------------------------
-
-def get_exit_targets(
-    entry_cents: int,
-    side: str,
-    *,
-    take_profit_mult: float = 1.5,  # TP at 1.5× the implied edge
-    stop_loss_mult: float = 0.5,    # SL at 50% of cost
-) -> tuple[int, int]:
-    """
-    Returns (take_profit_cents, stop_loss_cents) as market value targets.
-
-    Since Kalshi pays $1 (100 cents) on resolution, our edge is:
-      - YES side: we bought at `entry_cents`, potential gain = 100 - entry_cents
-      - NO  side: we bought at `entry_cents`, potential gain = 100 - entry_cents
-
-    Take profit: sell when the contract has appreciated by TP fraction of our edge.
-    Stop loss:   sell when we've lost SL fraction of our entry cost.
-    """
-    edge = CONTRACT_FACE_VALUE_CENTS - entry_cents
-    tp = min(entry_cents + int(edge * take_profit_mult), 99)
-    sl = max(entry_cents - int(entry_cents * stop_loss_mult), 1)
-    return tp, sl
+def _round_half(value: float) -> float:
+    """Round value down to the nearest $0.50 increment."""
+    return math.floor(value / _ROUNDING) * _ROUNDING
 
 
 # ---------------------------------------------------------------------------
@@ -117,102 +32,321 @@ def get_exit_targets(
 # ---------------------------------------------------------------------------
 
 class Strategy:
-    def __init__(
+    def __init__(self, kalshi_client, database, telegram) -> None:
+        self._kalshi   = kalshi_client
+        self._db       = database
+        self._telegram = telegram
+
+    # ------------------------------------------------------------------
+    # Kelly sizing
+    # ------------------------------------------------------------------
+
+    async def calculate_bet_size(
         self,
-        kelly_fraction_multiplier: float = 0.5,
-        max_position_pct: float = 0.10,
-        take_profit_mult: float = 1.5,
-        stop_loss_mult: float = 0.5,
-    ):
-        self.kelly_fraction_multiplier = kelly_fraction_multiplier
-        self.max_position_pct = max_position_pct
-        self.take_profit_mult = take_profit_mult
-        self.stop_loss_mult = stop_loss_mult
-
-        # Rolling win rate for Kelly calibration
-        self._wins = 0
-        self._total = 0
-        self._avg_win_cents = 50    # initial estimates
-        self._avg_loss_cents = 25
-
-    def build_order(
-        self,
-        signal: EnsembleSignal,
-        ticker: str,
-        orderbook: OrderBook,
-        balance_cents: int,
-    ) -> OrderParams | None:
+        edge:         float,    # consensus_prob - market_ask (decimal)
+        market_price: float,    # ask price in decimal (0.01 – 0.99)
+        direction:    str,      # "yes" | "no"  (for logging only)
+    ) -> float:
         """
-        Converts an ensemble signal into a concrete order.
-        Returns None if the position would be too small to be worth placing.
+        Half-Kelly position sizing:
+
+          odds      = (1 - market_price) / market_price
+          kelly_pct = edge / odds
+          kelly_pct *= KELLY_FRACTION          (0.5 → half-Kelly)
+          raw_size  = kelly_pct * bankroll
+          size      = min(raw_size, MAX_BET_SIZE)
+          size      = round down to nearest $0.50
+          minimum   = $1.00 (returns 0.0 if below minimum)
         """
-        side = signal.direction   # "yes" or "no"
-        if side not in ("yes", "no"):
-            return None
+        if market_price <= 0.0 or market_price >= 1.0 or edge <= 0.0:
+            return 0.0
 
-        entry_price = get_entry_price(orderbook, side)
-        if entry_price is None:
-            log.warning("No ask available on %s side for %s", side, ticker)
-            return None
+        odds      = (1.0 - market_price) / market_price
+        kelly_pct = (edge / odds) * settings.KELLY_FRACTION
 
-        # Kelly uses the win probability from the ensemble
-        win_prob = signal.raw_prob if side == "yes" else (1.0 - signal.raw_prob)
-        win_payout = (CONTRACT_FACE_VALUE_CENTS - entry_price) / entry_price
-        loss_payout = 1.0
+        if kelly_pct <= 0.0:
+            return 0.0
 
-        kelly = kelly_fraction(win_prob, win_payout=win_payout, loss_payout=loss_payout)
-        size_cents = size_position(
-            kelly,
-            self.kelly_fraction_multiplier,
-            balance_cents,
-            self.max_position_pct,
+        bankroll = await self._kalshi.get_balance()    # dollars
+        raw_size = kelly_pct * bankroll
+        size     = min(raw_size, settings.MAX_BET_SIZE)
+        size     = _round_half(size)
+
+        log.debug(
+            "Kelly [%s]: edge=%.3f price=%.2f odds=%.3f kelly=%.3f "
+            "bankroll=$%.2f raw=$%.2f → size=$%.2f",
+            direction, edge, market_price, odds,
+            kelly_pct, bankroll, raw_size, size,
         )
 
-        if size_cents < entry_price:
-            # Can't even afford 1 contract
+        return size if size >= _MIN_BET_DOLLARS else 0.0
+
+    # ------------------------------------------------------------------
+    # Position limit check
+    # ------------------------------------------------------------------
+
+    async def can_open_position(self) -> bool:
+        """True if fewer than MAX_OPEN_POSITIONS trades are currently open."""
+        open_trades = await self._db.get_open_trades()
+        below_limit = len(open_trades) < settings.MAX_OPEN_POSITIONS
+        if not below_limit:
             log.info(
-                "Position too small: size=$%.2f < 1 contract @ %dc",
-                size_cents / 100, entry_price,
+                "Position limit: %d/%d open — skipping new entry",
+                len(open_trades), settings.MAX_OPEN_POSITIONS,
+            )
+        return below_limit
+
+    # ------------------------------------------------------------------
+    # Entry
+    # ------------------------------------------------------------------
+
+    async def enter_trade(
+        self,
+        market:          dict,
+        ensemble_result: Any,
+        gate_result:     Any,
+        *,
+        btc_price:       float | None = None,
+        btc_momentum:    float | None = None,
+    ) -> TradeRow | None:
+        """
+        Full entry flow:
+          1. Calculate edge + bet size via Kelly
+          2. Determine limit bid price (take ask liquidity)
+          3. Derive contract count (floor)
+          4. Place order via KalshiClient
+          5. Log trade to database
+          6. Send Telegram entry alert
+          7. Return TradeRow (or None on any failure)
+        """
+        direction = ensemble_result.direction   # "yes" | "no" | "flat"
+        if direction not in ("yes", "no"):
+            return None
+
+        # Step 1 — edge + Kelly size
+        ask_cents   = market.get("yes_ask" if direction == "yes" else "no_ask", 50)
+        market_price = ask_cents / 100.0
+        edge         = ensemble_result.consensus_prob - market_price
+
+        bet_size = await self.calculate_bet_size(edge, market_price, direction)
+        if bet_size < _MIN_BET_DOLLARS:
+            log.info(
+                "Bet size $%.2f below minimum $%.2f — skipping entry",
+                bet_size, _MIN_BET_DOLLARS,
             )
             return None
 
-        contracts = size_cents // entry_price
-        actual_cost_cents = contracts * entry_price
+        # Step 2/3 — contracts (floor division; each contract costs ask_cents¢)
+        contracts = int(bet_size / market_price)    # both in $
+        if contracts < 1:
+            log.info("Contract count rounds to 0 — skipping entry")
+            return None
 
-        tp, sl = get_exit_targets(
-            entry_price,
-            side,
-            take_profit_mult=self.take_profit_mult,
-            stop_loss_mult=self.stop_loss_mult,
+        actual_cost = contracts * market_price      # dollars
+
+        # Step 4 — place order
+        ticker = market.get("ticker", "")
+        try:
+            await self._kalshi.place_order(
+                ticker=ticker,
+                side=direction,
+                price=ask_cents,
+                count=contracts,
+            )
+        except Exception as exc:
+            log.error("Order placement failed for %s: %s", ticker, exc)
+            await self._telegram.send_error(str(exc), "enter_trade")
+            return None
+
+        # Step 5 — log to database
+        spread   = ensemble_result.spread if ensemble_result.models else None
+        ts       = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        trade_id = await self._db.log_trade(
+            market_ticker       = ticker,
+            direction           = direction.upper(),
+            entry_price         = float(ask_cents),
+            size_dollars        = actual_cost,
+            contracts           = contracts,
+            edge                = edge,
+            ensemble_confidence = ensemble_result.confidence,
+            model_spread        = spread,
+            btc_price_at_entry  = btc_price,
+            btc_momentum        = btc_momentum,
+            timestamp           = ts,
         )
+
+        trade = TradeRow(
+            id                  = trade_id,
+            timestamp           = ts,
+            market_ticker       = ticker,
+            direction           = direction.upper(),
+            entry_price         = float(ask_cents),
+            size_dollars        = actual_cost,
+            contracts           = contracts,
+            kelly_fraction      = None,
+            edge                = edge,
+            ensemble_confidence = ensemble_result.confidence,
+            model_spread        = spread,
+            btc_price_at_entry  = btc_price,
+            btc_momentum        = btc_momentum,
+            status              = "open",
+            exit_price          = None,
+            exit_reason         = None,
+            pnl_dollars         = None,
+            closed_at           = None,
+        )
+
+        # Step 6 — Telegram alert
+        await self._telegram.send_trade_entry(trade)
 
         log.info(
-            "Order built: %s %s × %d @ %dc | TP=%dc SL=%dc | Kelly=%.3f size=$%.2f",
-            side, ticker, contracts, entry_price, tp, sl,
-            kelly, actual_cost_cents / 100,
+            "Trade entered: id=%d %s %s ×%d @ %d¢ | "
+            "edge=%.3f conf=%.3f cost=$%.2f",
+            trade_id, direction.upper(), ticker, contracts,
+            ask_cents, edge, ensemble_result.confidence, actual_cost,
         )
+        return trade
 
-        return OrderParams(
-            ticker=ticker,
-            side=side,
-            contracts=contracts,
-            price_cents=entry_price,
-            take_profit_cents=tp,
-            stop_loss_cents=sl,
-            dollar_size=actual_cost_cents / 100,
-        )
+    # ------------------------------------------------------------------
+    # Exit management
+    # ------------------------------------------------------------------
 
-    def record_trade_outcome(self, entry_cents: int, exit_cents: int, contracts: int) -> None:
-        """Update win/loss stats for Kelly calibration."""
-        pnl = (exit_cents - entry_cents) * contracts
-        self._total += 1
-        if pnl > 0:
-            self._wins += 1
-            # Exponential moving average of win/loss size
-            self._avg_win_cents = int(0.8 * self._avg_win_cents + 0.2 * pnl)
+    async def check_exits(self, open_trades: list[TradeRow]) -> list[TradeRow]:
+        """
+        Evaluate every open trade for exit conditions.
+
+        Triggers checked per trade (first match wins):
+          1. Market resolved → expired
+          2. Close time < now + 2min → let expire naturally (skip)
+          3. pnl_pct <= -STOP_LOSS_PCT → stop_loss
+          4. current bid < CONFIDENCE_DECAY_EXIT × 100¢ → decay
+
+        Returns the list of trades closed this cycle.
+        """
+        closed: list[TradeRow] = []
+        for trade in open_trades:
+            result = await self._evaluate_exit(trade)
+            if result is not None:
+                closed.append(result)
+        return closed
+
+    async def _evaluate_exit(self, trade: TradeRow) -> TradeRow | None:
+        ticker = trade.market_ticker
+
+        # --- Trigger 1: market already resolved ---
+        try:
+            ob = await self._kalshi.get_order_book(ticker)
+        except Exception as exc:
+            # Lazy import avoids a circular reference at module level
+            from kalshi_client import KalshiMarketClosedError
+            if isinstance(exc, KalshiMarketClosedError):
+                log.info(
+                    "Trade %d: %s resolved — marking expired", trade.id, ticker
+                )
+                return await self._close_trade(trade, int(trade.entry_price), "expired")
+            log.warning(
+                "Trade %d: orderbook fetch failed (%s) — skipping exit check",
+                trade.id, exc,
+            )
+            return None
+
+        # Current best bid for our side
+        if trade.direction == "YES":
+            bids        = ob.get("yes_bids", [])
+            current_bid = bids[0]["price"] if bids else int(trade.entry_price)
         else:
-            self._avg_loss_cents = int(0.8 * self._avg_loss_cents + 0.2 * abs(pnl))
+            bids        = ob.get("no_bids", [])
+            current_bid = bids[0]["price"] if bids else int(trade.entry_price)
 
-    @property
-    def win_rate(self) -> float:
-        return self._wins / self._total if self._total > 0 else 0.5
+        # --- Trigger 2: less than 2 minutes to close → let expire ---
+        try:
+            mkt = await self._kalshi.get_market(ticker)
+            close_str = mkt.get("close_time", "")
+            if close_str:
+                close_dt = datetime.fromisoformat(
+                    close_str.replace("Z", "+00:00")
+                )
+                if close_dt - datetime.now(timezone.utc) < timedelta(minutes=2):
+                    log.debug(
+                        "Trade %d: %s closes in <2min — letting expire naturally",
+                        trade.id, ticker,
+                    )
+                    return None
+        except Exception:
+            pass    # don't block other checks if market fetch fails
+
+        # --- Trigger 3: stop loss ---
+        entry = trade.entry_price  # cents (stored as float, cast when needed)
+        pnl_pct = (current_bid - entry) / entry if entry else 0.0
+        if pnl_pct <= -settings.STOP_LOSS_PCT:
+            log.info(
+                "Trade %d: stop loss — pnl_pct=%.1f%% (bid=%d¢ entry=%.0f¢)",
+                trade.id, pnl_pct * 100, current_bid, entry,
+            )
+            return await self._close_trade(trade, current_bid, "stop_loss")
+
+        # --- Trigger 4: confidence decay (market price collapsed) ---
+        decay_threshold_cents = int(settings.CONFIDENCE_DECAY_EXIT * 100)
+        if current_bid < decay_threshold_cents:
+            log.info(
+                "Trade %d: decay — bid %d¢ < threshold %d¢",
+                trade.id, current_bid, decay_threshold_cents,
+            )
+            return await self._close_trade(trade, current_bid, "decay")
+
+        return None
+
+    async def _close_trade(
+        self,
+        trade:       TradeRow,
+        exit_price:  int,       # cents
+        exit_reason: str,       # "stop_loss" | "decay" | "expired" | "manual"
+    ) -> TradeRow:
+        """
+        Place a best-effort sell order, update the database, and alert.
+        Sell failures are logged but do not block the database update
+        (the position will resolve via market expiry).
+        """
+        if exit_reason != "expired":
+            try:
+                await self._kalshi.place_order(
+                    ticker=trade.market_ticker,
+                    side=trade.direction.lower(),
+                    price=exit_price,
+                    count=trade.contracts,
+                )
+            except Exception as exc:
+                log.warning(
+                    "Trade %d: sell order failed (%s) — "
+                    "recording close without fill",
+                    trade.id, exc,
+                )
+
+        pnl       = (exit_price - trade.entry_price) * trade.contracts / 100.0
+        closed_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        db_status = "expired" if exit_reason == "expired" else "closed"
+
+        await self._db.update_trade(
+            trade.id,
+            status      = db_status,
+            exit_price  = float(exit_price),
+            exit_reason = exit_reason,
+            pnl_dollars = pnl,
+            closed_at   = closed_ts,
+        )
+        await self._db.update_daily_stats()
+
+        closed_trade = TradeRow(
+            **{**trade.__dict__,
+               "status":      db_status,
+               "exit_price":  float(exit_price),
+               "exit_reason": exit_reason,
+               "pnl_dollars": pnl,
+               "closed_at":   closed_ts},
+        )
+        await self._telegram.send_trade_exit(closed_trade, exit_reason)
+        log.info(
+            "Trade %d closed  ticker=%s  reason=%s  exit=%d¢  P&L=$%.2f",
+            trade.id, trade.market_ticker, exit_reason, exit_price, pnl,
+        )
+        return closed_trade
