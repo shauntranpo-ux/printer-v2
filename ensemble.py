@@ -300,13 +300,17 @@ class EnsembleEngine:
         resp = await self._deepseek_client.chat.completions.create(  # type: ignore[union-attr]
             model      = settings.DEEPSEEK_MODEL,
             temperature= 0.1,
-            max_tokens = 512,   # deepseek-reasoner has internal CoT, needs more tokens
+            max_tokens = 512,
             messages   = [
                 {"role": "system", "content": _DEEPSEEK_SYSTEM},
                 {"role": "user",   "content": context},
             ],
         )
-        text = resp.choices[0].message.content or ""
+        msg  = resp.choices[0].message
+        text = msg.content or ""
+        # deepseek-reasoner sometimes emits only reasoning_content with empty content
+        if not text:
+            text = getattr(msg, "reasoning_content", "") or ""
         return self._parse_result(text, "deepseek", (time.monotonic() - t0) * 1000)
 
     # ------------------------------------------------------------------

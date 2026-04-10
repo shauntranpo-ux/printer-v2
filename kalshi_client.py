@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+from urllib.parse import urlparse
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
 from config import settings
@@ -96,7 +97,15 @@ def _load_key() -> RSAPrivateKey:
 
 
 def _rsa_sign(key: RSAPrivateKey, message: str) -> str:
-    raw = key.sign(message.encode(), padding.PKCS1v15(), hashes.SHA256())
+    """RSA-PSS-SHA256 signature as required by the Kalshi v2 API."""
+    raw = key.sign(
+        message.encode(),
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.DIGEST_LENGTH,
+        ),
+        hashes.SHA256(),
+    )
     return base64.b64encode(raw).decode()
 
 
@@ -169,15 +178,17 @@ class KalshiClient:
 
     async def auth_headers(self, method: str, path: str) -> dict[str, str]:
         """
-        Generate RSA-SHA256 signed auth headers for a Kalshi v2 request.
+        Generate RSA-PSS-SHA256 signed auth headers for a Kalshi v2 request.
 
-        Signature covers:  timestamp_ms + METHOD_UPPER + path_without_query
+        Signature covers:  timestamp_ms + METHOD_UPPER + full_path_without_query
+        Full path includes the base URL path, e.g. /trade-api/v2/portfolio/balance
         """
         ts  = str(int(time.time() * 1000))
-        # Kalshi signs with the endpoint path only, not the base URL prefix.
-        # e.g. "/portfolio/balance" not "/trade-api/v2/portfolio/balance"
-        bare_path = path.split("?")[0]
-        msg = ts + method.upper() + bare_path
+        bare_path  = path.split("?")[0]
+        # Sign with the full URL path (base path prefix + endpoint)
+        base_path  = urlparse(self._base_url).path.rstrip("/")
+        full_path  = base_path + bare_path
+        msg = ts + method.upper() + full_path
         sig = _rsa_sign(self._key, msg)
         return {
             "KALSHI-ACCESS-KEY":       self._api_key,

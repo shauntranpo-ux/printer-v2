@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     CLAUDE_MODEL: str = Field(default="claude-sonnet-4-5", description="Claude model ID")
     GPT_MODEL: str = Field(default="gpt-4o", description="OpenAI model ID")
     GEMINI_MODEL: str = Field(default="gemini-2.0-flash", description="Gemini model ID")
-    DEEPSEEK_MODEL: str = Field(default="deepseek-reasoner", description="DeepSeek model ID")
+    DEEPSEEK_MODEL: str = Field(default="deepseek-chat", description="DeepSeek model ID (deepseek-chat for JSON, deepseek-reasoner for CoT)")
 
     # ------------------------------------------------------------------
     # Ensemble weights (auto-normalized if they don't sum to 1.0)
