@@ -18,7 +18,12 @@ from coinbase_feed import CoinbaseFeed, StaleDataError
 from ensemble import EnsembleEngine
 from risk_gates import RiskGates, BotState
 from strategy import Strategy
-from kalshi_client import KalshiClient
+from kalshi_client import (
+    KalshiClient,
+    KalshiAuthError,
+    KalshiMarketClosedError,
+    KalshiInsufficientFundsError,
+)
 from telegram_alerts import TelegramAlerter
 
 logging.basicConfig(
@@ -75,11 +80,7 @@ class BotRunner:
             kelly_fraction_multiplier=settings.KELLY_FRACTION,
             max_position_pct=min(settings.MAX_BET_SIZE / 1000, 0.10),
         )
-        self.kalshi  = KalshiClient(
-            settings.KALSHI_API_KEY,
-            settings.private_key_path,
-            settings.KALSHI_BASE_URL,
-        )
+        self.kalshi  = KalshiClient()
         self.telegram = TelegramAlerter()
 
         self._last_trade_ts: float = 0.0
@@ -101,9 +102,9 @@ class BotRunner:
         btc_price = await self.feed.wait_for_price(timeout=30.0)
         log.info("BTC price: $%.2f", btc_price)
 
-        balance = await self.kalshi.get_balance()
-        self._starting_balance_cents = balance.available_balance
-        log.info("Kalshi balance: $%.2f", balance.available_balance / 100)
+        balance_dollars = await self.kalshi.get_balance()
+        self._starting_balance_cents = int(balance_dollars * 100)
+        log.info("Kalshi balance: $%.2f", balance_dollars)
 
         await self.db.log_event("startup", f"printer-v2 started [{settings.env}] BTC=${btc_price:,.2f}")
         await self.telegram.send_startup()
@@ -155,15 +156,21 @@ class BotRunner:
             await self.telegram.send_error(str(exc), "stale_feed")
             return
 
-        # 1. Find the active BTC market on Kalshi
+        # 1. Find the nearest active BTC 15m market on Kalshi
         try:
-            market = await self.kalshi.find_btc_market()
-            if not market:
-                log.warning("No active BTC market found on Kalshi")
+            markets = await self.kalshi.get_btc_15m_markets()
+            if not markets:
+                log.warning("No active BTC 15m markets found on Kalshi")
                 return
+            market = markets[0]
             ticker = market["ticker"]
+            log.info("Target market: %s  close=%s", ticker, market.get("close_time", "?"))
+        except KalshiAuthError as exc:
+            log.error("Kalshi auth failed — check API key: %s", exc)
+            await self.telegram.send_error(str(exc), "kalshi_auth")
+            return
         except Exception as exc:
-            log.error("Failed to fetch Kalshi market: %s", exc)
+            log.error("Failed to fetch Kalshi markets: %s", exc)
             await self.telegram.send_error(str(exc), "find_market")
             return
 
@@ -186,8 +193,8 @@ class BotRunner:
 
         # 4. Build bot state for risk gates
         try:
-            balance = await self.kalshi.get_balance()
-            positions = await self.kalshi.get_positions()
+            balance_dollars = await self.kalshi.get_balance()
+            balance_cents   = int(balance_dollars * 100)
         except Exception as exc:
             log.error("Failed to fetch account state: %s", exc)
             await self.telegram.send_error(str(exc), "account_fetch")
@@ -200,7 +207,7 @@ class BotRunner:
         today_stats = await self.db.get_daily_stats()
 
         state = BotState(
-            balance_cents=balance.available_balance,
+            balance_cents=balance_cents,
             starting_balance_cents=self._starting_balance_cents,
             daily_pnl_cents=int(today_stats.total_pnl * 100),
             open_exposure_cents=open_exposure_cents,
@@ -226,13 +233,16 @@ class BotRunner:
 
         # 6. Build order
         try:
-            orderbook = await self.kalshi.get_orderbook(ticker, depth=5)
+            orderbook = await self.kalshi.get_order_book(ticker)
+        except KalshiMarketClosedError as exc:
+            log.warning("Market %s closed before order: %s", ticker, exc)
+            return
         except Exception as exc:
             log.error("Failed to fetch orderbook for %s: %s", ticker, exc)
             return
 
         order_params = self.strategy.build_order(
-            signal, ticker, orderbook, balance.available_balance
+            signal, ticker, orderbook, balance_cents
         )
         if order_params is None:
             log.info("No order produced (signal too weak or size too small)")
@@ -243,10 +253,16 @@ class BotRunner:
             order = await self.kalshi.place_order(
                 ticker=order_params.ticker,
                 side=order_params.side,
-                contracts=order_params.contracts,
                 price=order_params.price_cents,
+                count=order_params.contracts,
             )
-            log.info("Order placed: %s", order.order_id)
+            log.info("Order placed: %s  status=%s", order["order_id"], order["status"])
+        except KalshiInsufficientFundsError as exc:
+            log.warning("Insufficient funds — skipping trade: %s", exc)
+            return
+        except KalshiMarketClosedError as exc:
+            log.warning("Market closed before order could be placed: %s", exc)
+            return
         except Exception as exc:
             log.error("Order placement failed: %s", exc)
             await self.telegram.send_error(str(exc), "place_order")
@@ -306,69 +322,74 @@ class BotRunner:
             return
 
         for trade in open_trades:
+            # Get current market price from the orderbook
             try:
-                order = await self.kalshi.get_order(trade.kalshi_order_id)
+                ob = await self.kalshi.get_order_book(trade.market_ticker)
+            except KalshiMarketClosedError:
+                # Market resolved — treat as expiry
+                log.info("Trade %d: market %s resolved", trade.id, trade.market_ticker)
+                await self._close_trade(trade, trade.entry_price, "expired")
+                continue
             except Exception as exc:
-                log.warning("Could not fetch order %s: %s", trade.kalshi_order_id, exc)
+                log.warning("Could not fetch orderbook for %s: %s", trade.market_ticker, exc)
                 continue
 
-            # If order fully filled, get current market price for TP/SL check
-            if order.status in ("filled", "partially_filled"):
-                try:
-                    ob = await self.kalshi.get_orderbook(trade.market_ticker, depth=1)
-                except Exception:
-                    continue
+            # Best ask on our side = current fair value to exit at
+            if trade.direction == "YES":
+                levels = ob.get("yes_asks") or ob.get("yes_bids") or []
+            else:
+                levels = ob.get("no_asks") or ob.get("no_bids") or []
 
-                current_price = (
-                    ob.best_yes_ask() if trade.direction == "YES" else ob.best_no_ask()
-                ) or trade.entry_price
+            current_price = levels[0]["price"] if levels else trade.entry_price
 
-                tp = trade.entry_price * 1.5
-                sl = trade.entry_price * (1 - settings.STOP_LOSS_PCT)
+            tp = trade.entry_price * 1.5
+            sl = trade.entry_price * (1 - settings.STOP_LOSS_PCT)
 
-                if current_price >= tp:
-                    exit_reason = "manual"   # TP hit
-                elif current_price <= sl:
-                    exit_reason = "stop_loss"
-                elif order.status == "filled":
-                    exit_reason = "expired"
-                else:
-                    exit_reason = None
+            if current_price >= tp:
+                exit_reason = "manual"
+            elif current_price <= sl:
+                exit_reason = "stop_loss"
+            else:
+                exit_reason = None
 
-                if exit_reason:
-                    pnl = (current_price - trade.entry_price) * trade.contracts / 100
-                    closed_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    await self.db.update_trade(
-                        trade.id,
-                        status="closed",
-                        exit_price=current_price,
-                        exit_reason=exit_reason,
-                        pnl_dollars=pnl,
-                        closed_at=closed_ts,
-                    )
-                    await self.db.update_daily_stats()
-                    self.strategy.record_trade_outcome(
-                        int(trade.entry_price), int(current_price), trade.contracts
-                    )
-                    self.ensemble.record_outcome(trade.entry_price, current_price)
-                    # Populate the closed fields on the trade object for the alert
-                    closed_trade = TradeRow(
-                        **{**trade.__dict__,
-                           "exit_price": current_price,
-                           "pnl_dollars": pnl,
-                           "closed_at": closed_ts}
-                    )
-                    await self.telegram.send_trade_exit(closed_trade, exit_reason)
-                    log.info("Trade %d closed  reason=%s  P&L=$%.2f", trade.id, exit_reason, pnl)
+            if exit_reason:
+                await self._close_trade(trade, current_price, exit_reason)
 
-            elif order.status == "canceled":
-                await self.db.update_trade(
-                    trade.id,
-                    status="expired",
-                    exit_price=trade.entry_price,
-                    exit_reason="expired",
-                    pnl_dollars=0.0,
-                )
+    async def _close_trade(self, trade, exit_price: float, exit_reason: str) -> None:
+        pnl = (exit_price - trade.entry_price) * trade.contracts / 100
+        closed_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        await self.db.update_trade(
+            trade.id,
+            status="closed",
+            exit_price=exit_price,
+            exit_reason=exit_reason,
+            pnl_dollars=pnl,
+            closed_at=closed_ts,
+        )
+        await self.db.update_daily_stats()
+        self.strategy.record_trade_outcome(
+            int(trade.entry_price), int(exit_price), trade.contracts
+        )
+        self.ensemble.record_outcome(trade.entry_price, exit_price)
+        closed_trade = TradeRow(
+            **{**trade.__dict__,
+               "exit_price": exit_price,
+               "pnl_dollars": pnl,
+               "closed_at": closed_ts}
+        )
+        await self.telegram.send_trade_exit(closed_trade, exit_reason)
+        log.info("Trade %d closed  reason=%s  P&L=$%.2f", trade.id, exit_reason, pnl)
+
+    async def _expire_trade(self, trade) -> None:
+        await self.db.update_trade(
+            trade.id,
+            status="expired",
+            exit_price=trade.entry_price,
+            exit_reason="expired",
+            pnl_dollars=0.0,
+        )
+        log.info("Trade %d marked expired", trade.id)
+
 
 
 # ---------------------------------------------------------------------------
