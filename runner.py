@@ -71,8 +71,9 @@ class TradingBot:
             telegram      = self.telegram,
         )
 
-        # Tickers the ensemble returned WAIT on — skip one cycle then retry
-        self._wait_list: set[str] = set()
+        # Tickers the ensemble returned WAIT on — re-evaluate next cycle
+        # Maps ticker → Unix timestamp of when it was added to the wait list
+        self._wait_list: dict[str, float] = {}
         # Current UTC date string — used to detect midnight for daily summary
         self._last_day: str = ""
 
@@ -303,19 +304,30 @@ class TradingBot:
         # Quick-lookup set of tickers we already hold
         open_tickers = {t.market_ticker for t in open_trades}
 
-        # Step 6 — per-market evaluation
+        # Step 6 — waited markets get re-evaluated FIRST, then new markets
+        market_by_ticker = {m["ticker"]: m for m in markets}
+        waited_tickers   = set(self._wait_list.keys())
+
+        # Clear waited tickers that no longer appear in the market list (expired)
+        for ticker in waited_tickers - market_by_ticker.keys():
+            log.info("Waited market %s no longer available — clearing", ticker)
+            self._wait_list.pop(ticker, None)
+
+        # Re-evaluate waited markets
+        for ticker in list(waited_tickers & market_by_ticker.keys()):
+            self._wait_list.pop(ticker, None)
+            if ticker in open_tickers:
+                continue
+            log.info("Re-evaluating waited market %s", ticker)
+            await self._evaluate_market(
+                market_by_ticker[ticker], btc_price, momentum, ohlcv, open_tickers
+            )
+
+        # Evaluate remaining new markets
         for market in markets:
             ticker = market["ticker"]
-
-            if ticker in open_tickers:
-                log.debug("Already open in %s — skipping", ticker)
+            if ticker in open_tickers or ticker in waited_tickers:
                 continue
-
-            if ticker in self._wait_list:
-                log.info("Market %s in wait list — skipping this cycle", ticker)
-                self._wait_list.discard(ticker)
-                continue
-
             await self._evaluate_market(
                 market, btc_price, momentum, ohlcv, open_tickers
             )
@@ -397,26 +409,41 @@ class TradingBot:
 
         # Update cycle-watch with the latest signal for the dashboard
         try:
+            def _mdata(r: Any) -> dict | None:
+                if r is None:
+                    return None
+                return {
+                    "prob":      round(r.probability * 100, 1),
+                    "direction": r.direction,
+                    "reasoning": r.reasoning[:120],
+                }
+
             watch = await self.db.get_market_watch() or {}
             watch["last_signal"] = {
-                "ticker":     ticker,
-                "direction":  result.direction.upper() if result.direction != "flat" else "FLAT",
-                "action":     result.action,
-                "prob":       round(result.raw_prob * 100, 1),
-                "confidence": round(result.confidence * 100, 1),
+                "ticker":      ticker,
+                "direction":   result.direction.upper() if result.direction != "flat" else "FLAT",
+                "action":      result.action,
+                "prob":        round(result.raw_prob * 100, 1),
+                "confidence":  round(result.confidence * 100, 1),
                 "skip_reason": result.skip_reason,
-                "ts":         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "models": {
+                    "claude":   _mdata(result.claude),
+                    "gpt":      _mdata(result.gpt),
+                    "gemini":   _mdata(result.gemini),
+                    "deepseek": _mdata(result.deepseek),
+                },
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
             await self.db.set_market_watch(watch)
         except Exception as exc:
             log.debug("market_watch signal update failed: %s", exc)
 
-        # Handle WAIT — models disagree; try again next cycle
+        # Handle WAIT — models disagree; re-evaluate next cycle
         if result.action == "WAIT":
             log.info(
                 "Models disagree on %s — adding to wait list (1 cycle pause)", ticker
             )
-            self._wait_list.add(ticker)
+            self._wait_list[ticker] = time.time()
             return
 
         # Handle SKIP — confidence/spread threshold not met internally
@@ -510,12 +537,19 @@ class TradingBot:
 
     async def _send_daily_summary(self) -> None:
         try:
-            stats  = await self.db.get_daily_stats()
-            recent = await self.db.get_recent_trades(limit=50)
-            pnls   = [t.pnl_dollars for t in recent if t.pnl_dollars is not None]
-            best   = max(pnls) if pnls else None
-            worst  = min(pnls) if pnls else None
-            await self.telegram.send_daily_summary(stats, best_trade=best, worst_trade=worst)
+            stats     = await self.db.get_daily_stats()
+            recent    = await self.db.get_recent_trades(limit=50)
+            pnls      = [t.pnl_dollars for t in recent if t.pnl_dollars is not None]
+            best      = max(pnls) if pnls else None
+            worst     = min(pnls) if pnls else None
+            dir_stats = await self.db.get_win_rate_by_direction()
+            await self.telegram.send_daily_summary(
+                stats,
+                best_trade   = best,
+                worst_trade  = worst,
+                win_rate_yes = dir_stats["YES"]["win_rate"],
+                win_rate_no  = dir_stats["NO"]["win_rate"],
+            )
             log.info("Daily summary sent")
         except Exception as exc:
             log.error("Daily summary failed: %s", exc)

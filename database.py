@@ -42,10 +42,14 @@ CREATE TABLE IF NOT EXISTS trades (
     status                  TEXT    NOT NULL DEFAULT 'open'
                                     CHECK(status IN ('open', 'closed', 'expired')),
     exit_price              REAL,
-    exit_reason             TEXT    CHECK(exit_reason IN
-                                    ('stop_loss', 'decay', 'expired', 'manual', NULL)),
+    exit_reason             TEXT,
     pnl_dollars             REAL,
-    closed_at               TEXT
+    closed_at               TEXT,
+    peak_pnl_pct            REAL,
+    claude_prob             REAL,
+    gpt_prob                REAL,
+    gemini_prob             REAL,
+    deepseek_prob           REAL
 );
 
 CREATE TABLE IF NOT EXISTS daily_stats (
@@ -120,6 +124,11 @@ class TradeRow:
     exit_reason: str | None
     pnl_dollars: float | None
     closed_at: str | None
+    peak_pnl_pct: float | None = None
+    claude_prob: float | None = None
+    gpt_prob: float | None = None
+    gemini_prob: float | None = None
+    deepseek_prob: float | None = None
 
 
 @dataclass
@@ -231,6 +240,82 @@ class Database:
             raise RuntimeError("Call connect() before init_db()")
         await self._db.executescript(_SCHEMA)
         await self._db.commit()
+        await self._migrate()
+
+    async def _migrate(self) -> None:
+        """Forward-only schema migrations — safe to run on every startup."""
+        async with self._conn() as db:
+            # Add new columns to trades (no-op if they already exist)
+            for col, coltype in [
+                ("peak_pnl_pct",  "REAL"),
+                ("claude_prob",   "REAL"),
+                ("gpt_prob",      "REAL"),
+                ("gemini_prob",   "REAL"),
+                ("deepseek_prob", "REAL"),
+            ]:
+                try:
+                    await db.execute(f"ALTER TABLE trades ADD COLUMN {col} {coltype}")
+                    await db.commit()
+                    log.info("Migration: added column trades.%s", col)
+                except Exception:
+                    pass  # column already exists
+
+            # Remove the old restrictive CHECK on exit_reason so new exit types
+            # (take_profit, trailing_stop) can be written without constraint errors.
+            cur = await db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='trades'"
+            )
+            row = await cur.fetchone()
+            if row and "CHECK(exit_reason IN" in (row[0] or ""):
+                log.info("Migration: relaxing exit_reason CHECK constraint")
+                await db.execute("""
+                    CREATE TABLE trades_migrated (
+                        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp           TEXT    NOT NULL,
+                        market_ticker       TEXT    NOT NULL,
+                        direction           TEXT    NOT NULL CHECK(direction IN ('YES','NO')),
+                        entry_price         REAL    NOT NULL,
+                        size_dollars        REAL    NOT NULL,
+                        contracts           INTEGER NOT NULL,
+                        kelly_fraction      REAL,
+                        edge                REAL,
+                        ensemble_confidence REAL,
+                        model_spread        REAL,
+                        btc_price_at_entry  REAL,
+                        btc_momentum        REAL,
+                        status              TEXT NOT NULL DEFAULT 'open'
+                                            CHECK(status IN ('open','closed','expired')),
+                        exit_price          REAL,
+                        exit_reason         TEXT,
+                        pnl_dollars         REAL,
+                        closed_at           TEXT,
+                        peak_pnl_pct        REAL,
+                        claude_prob         REAL,
+                        gpt_prob            REAL,
+                        gemini_prob         REAL,
+                        deepseek_prob       REAL
+                    )
+                """)
+                await db.execute("""
+                    INSERT INTO trades_migrated
+                        SELECT id, timestamp, market_ticker, direction, entry_price,
+                               size_dollars, contracts, kelly_fraction, edge,
+                               ensemble_confidence, model_spread, btc_price_at_entry,
+                               btc_momentum, status, exit_price, exit_reason,
+                               pnl_dollars, closed_at,
+                               peak_pnl_pct, claude_prob, gpt_prob, gemini_prob, deepseek_prob
+                        FROM trades
+                """)
+                await db.execute("DROP TABLE trades")
+                await db.execute("ALTER TABLE trades_migrated RENAME TO trades")
+                await db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)"
+                )
+                await db.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)"
+                )
+                await db.commit()
+                log.info("Migration: trades table updated successfully")
 
     @asynccontextmanager
     async def _conn(self) -> AsyncIterator[aiosqlite.Connection]:
@@ -256,6 +341,10 @@ class Database:
         model_spread: float | None = None,
         btc_price_at_entry: float | None = None,
         btc_momentum: float | None = None,
+        claude_prob: float | None = None,
+        gpt_prob: float | None = None,
+        gemini_prob: float | None = None,
+        deepseek_prob: float | None = None,
         timestamp: str | None = None,
     ) -> int:
         """Insert a new trade. Returns the new row id."""
@@ -268,14 +357,16 @@ class Database:
                     timestamp, market_ticker, direction, entry_price,
                     size_dollars, contracts, kelly_fraction, edge,
                     ensemble_confidence, model_spread,
-                    btc_price_at_entry, btc_momentum
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    btc_price_at_entry, btc_momentum,
+                    claude_prob, gpt_prob, gemini_prob, deepseek_prob
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ts, market_ticker, direction, entry_price,
                     size_dollars, contracts, kelly_fraction, edge,
                     ensemble_confidence, model_spread,
                     btc_price_at_entry, btc_momentum,
+                    claude_prob, gpt_prob, gemini_prob, deepseek_prob,
                 ),
             )
             await db.commit()
@@ -557,3 +648,117 @@ class Database:
                 (json.dumps(data), _now_utc()),
             )
             await db.commit()
+
+    # ------------------------------------------------------------------
+    # Advanced analytics
+    # ------------------------------------------------------------------
+
+    async def update_peak_pnl(self, trade_id: int, peak_pnl_pct: float) -> None:
+        """Update peak_pnl_pct for a trade (called each exit-check cycle)."""
+        async with self._conn() as db:
+            await db.execute(
+                "UPDATE trades SET peak_pnl_pct = ? WHERE id = ?",
+                (peak_pnl_pct, trade_id),
+            )
+            await db.commit()
+
+    async def get_win_rate_by_direction(self) -> dict:
+        """Return win rate separately for YES and NO trades (all-time)."""
+        async with self._conn() as db:
+            cur = await db.execute(
+                """
+                SELECT direction,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN pnl_dollars > 0 THEN 1 ELSE 0 END) AS wins
+                FROM   trades
+                WHERE  status IN ('closed', 'expired')
+                GROUP  BY direction
+                """
+            )
+            rows = await cur.fetchall()
+
+        result: dict = {
+            "YES": {"total": 0, "wins": 0, "win_rate": None},
+            "NO":  {"total": 0, "wins": 0, "win_rate": None},
+        }
+        for row in rows:
+            d     = row["direction"]
+            total = row["total"]
+            wins  = row["wins"]
+            if d in result:
+                result[d] = {
+                    "total":    total,
+                    "wins":     wins,
+                    "win_rate": wins / total if total else None,
+                }
+        return result
+
+    async def get_model_performance(self) -> dict:
+        """
+        Return accuracy per model based on whether the model's probability
+        aligned with the winning trade direction.
+        """
+        async with self._conn() as db:
+            cur = await db.execute(
+                """
+                SELECT claude_prob, gpt_prob, gemini_prob, deepseek_prob,
+                       direction, pnl_dollars
+                FROM   trades
+                WHERE  status IN ('closed', 'expired')
+                  AND  pnl_dollars IS NOT NULL
+                """
+            )
+            rows = await cur.fetchall()
+
+        model_cols = {
+            "claude":   "claude_prob",
+            "gpt":      "gpt_prob",
+            "gemini":   "gemini_prob",
+            "deepseek": "deepseek_prob",
+        }
+        stats: dict = {m: {"correct": 0, "total": 0} for m in model_cols}
+
+        for row in rows:
+            trade_was_yes = row["direction"] == "YES"
+            trade_won     = (row["pnl_dollars"] or 0) > 0
+            for model, col in model_cols.items():
+                prob = row[col]
+                if prob is None:
+                    continue
+                stats[model]["total"] += 1
+                model_said_yes = prob > 0.5
+                # Correct when model direction aligned with entry AND trade won,
+                # or misaligned AND trade lost.
+                if (model_said_yes == trade_was_yes) == trade_won:
+                    stats[model]["correct"] += 1
+
+        return {
+            m: {
+                "total":    v["total"],
+                "correct":  v["correct"],
+                "accuracy": v["correct"] / v["total"] if v["total"] else None,
+            }
+            for m, v in stats.items()
+        }
+
+    async def get_last_7_days_stats(self) -> list[dict]:
+        """Return daily P&L for the last 7 calendar days (chronological order)."""
+        async with self._conn() as db:
+            cur = await db.execute(
+                """
+                SELECT date, total_pnl, total_trades, win_rate
+                FROM   daily_stats
+                ORDER  BY date DESC
+                LIMIT  7
+                """
+            )
+            rows = await cur.fetchall()
+        return [
+            {
+                "date":         row["date"],
+                "total_pnl":    row["total_pnl"],
+                "total_trades": row["total_trades"],
+                "win_rate":     row["win_rate"],
+            }
+            for row in reversed(rows)
+        ]

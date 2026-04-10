@@ -180,43 +180,65 @@ class TelegramAlerter:
         )
 
     async def send_trade_exit(self, trade: TradeRow, reason: str) -> None:
-        pnl = trade.pnl_dollars or 0.0
+        pnl     = trade.pnl_dollars or 0.0
         pnl_pct = (pnl / trade.size_dollars * 100) if trade.size_dollars else 0.0
-        hold = _hold_time(trade.timestamp, trade.closed_at)
-        pnl_emoji = "✅" if pnl >= 0 else "❌"
-        sign = "+" if pnl >= 0 else ""
+        hold    = _hold_time(trade.timestamp, trade.closed_at)
+        sign    = "+" if pnl >= 0 else ""
 
-        await self._enqueue(
-            f"{pnl_emoji} <b>TRADE CLOSED</b>\n"
-            f"Market: <code>{trade.market_ticker}</code>\n"
-            f"Direction: {_direction_line(trade.direction)}\n"
-            f"P&amp;L: <b>{sign}${pnl:.2f}</b> ({sign}{pnl_pct:.1f}%)\n"
-            f"Exit Reason: <b>{reason}</b>\n"
-            f"Hold Time: {hold}"
-        )
+        _icons: dict[str, tuple[str, str]] = {
+            "take_profit":   ("💰", "TAKE PROFIT"),
+            "trailing_stop": ("📈", "TRAILING STOP"),
+            "stop_loss":     ("🛑", "STOP LOSS"),
+            "decay":         ("📉", "DECAY EXIT"),
+            "expired":       ("⏰", "EXPIRED"),
+            "manual":        ("🔧", "MANUAL CLOSE"),
+        }
+        icon, label = _icons.get(reason, ("❌", reason.upper()))
+
+        lines = [
+            f"{icon} <b>{label}</b>",
+            f"Market: <code>{trade.market_ticker}</code>",
+            f"Direction: {_direction_line(trade.direction)}",
+            f"P&amp;L: <b>{sign}${pnl:.2f}</b> ({sign}{pnl_pct:.1f}%)",
+            f"Hold Time: {hold}",
+        ]
+
+        if reason == "trailing_stop" and trade.peak_pnl_pct is not None:
+            lines.append(f"Peak P&amp;L reached: +{trade.peak_pnl_pct * 100:.1f}%")
+
+        if reason in ("stop_loss", "decay"):
+            entry = trade.entry_price
+            exit_ = trade.exit_price or entry
+            lines.append(
+                f"Entry → Exit: {int(entry)}¢ → {int(exit_)}¢"
+            )
+
+        await self._enqueue("\n".join(lines))
 
     async def send_daily_summary(
         self,
         stats: DailyStats,
-        best_trade: float | None = None,
-        worst_trade: float | None = None,
+        best_trade:   float | None = None,
+        worst_trade:  float | None = None,
+        win_rate_yes: float | None = None,
+        win_rate_no:  float | None = None,
     ) -> None:
-        wr = _pct(stats.win_rate, 100)
-        pnl_emoji = "💰" if stats.total_pnl >= 0 else "📉"
+        wr         = _pct(stats.win_rate, 100)
+        pnl_emoji  = "💰" if stats.total_pnl >= 0 else "📉"
         loss_limit = settings.DAILY_LOSS_LIMIT
 
-        best_str  = _usd(best_trade)
-        worst_str = _usd(worst_trade)
+        wr_yes = _pct(win_rate_yes, 100) if win_rate_yes is not None else "—"
+        wr_no  = _pct(win_rate_no,  100) if win_rate_no  is not None else "—"
 
         await self._enqueue(
             f"{pnl_emoji} <b>DAILY SUMMARY</b>\n"
             f"Date: {stats.date}\n"
-            f"Trades: {stats.total_trades}\n"
-            f"Win Rate: <b>{wr}</b>\n"
+            f"Trades: {stats.total_trades}  |  Win Rate: <b>{wr}</b>\n"
+            f"YES: {wr_yes}  ·  NO: {wr_no}\n"
             f"P&amp;L: <b>{_usd(stats.total_pnl)}</b>\n"
             f"Daily Loss Used: ${stats.daily_loss_used:.2f} / ${loss_limit:.0f}\n"
-            f"Best Trade: {best_str}\n"
-            f"Worst Trade: {worst_str}"
+            f"Best Trade: {_usd(best_trade)}\n"
+            f"Worst Trade: {_usd(worst_trade)}"
         )
 
     async def send_error(self, error_msg: str, context: str) -> None:

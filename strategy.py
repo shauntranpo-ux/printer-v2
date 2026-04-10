@@ -159,8 +159,12 @@ class Strategy:
             return None
 
         # Step 5 — log to database
-        spread   = ensemble_result.spread if ensemble_result.models else None
-        ts       = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        spread        = ensemble_result.spread if ensemble_result.models else None
+        ts            = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        claude_prob   = ensemble_result.claude.probability   if ensemble_result.claude   else None
+        gpt_prob      = ensemble_result.gpt.probability      if ensemble_result.gpt      else None
+        gemini_prob   = ensemble_result.gemini.probability   if ensemble_result.gemini   else None
+        deepseek_prob = ensemble_result.deepseek.probability if ensemble_result.deepseek else None
         trade_id = await self._db.log_trade(
             market_ticker       = ticker,
             direction           = direction.upper(),
@@ -172,6 +176,10 @@ class Strategy:
             model_spread        = spread,
             btc_price_at_entry  = btc_price,
             btc_momentum        = btc_momentum,
+            claude_prob         = claude_prob,
+            gpt_prob            = gpt_prob,
+            gemini_prob         = gemini_prob,
+            deepseek_prob       = deepseek_prob,
             timestamp           = ts,
         )
 
@@ -194,6 +202,10 @@ class Strategy:
             exit_reason         = None,
             pnl_dollars         = None,
             closed_at           = None,
+            claude_prob         = claude_prob,
+            gpt_prob            = gpt_prob,
+            gemini_prob         = gemini_prob,
+            deepseek_prob       = deepseek_prob,
         )
 
         # Step 6 — Telegram alert
@@ -258,6 +270,15 @@ class Strategy:
             bids        = ob.get("no_bids", [])
             current_bid = bids[0]["price"] if bids else int(trade.entry_price)
 
+        # --- Compute P&L fraction and update peak ---
+        entry   = trade.entry_price  # cents (stored as float)
+        pnl_pct = (current_bid - entry) / entry if entry else 0.0
+
+        peak = trade.peak_pnl_pct or 0.0
+        if pnl_pct > peak:
+            peak = pnl_pct
+            await self._db.update_peak_pnl(trade.id, peak)
+
         # --- Trigger 2: less than 2 minutes to close → let expire ---
         try:
             mkt = await self._kalshi.get_market(ticker)
@@ -275,9 +296,26 @@ class Strategy:
         except Exception:
             pass    # don't block other checks if market fetch fails
 
-        # --- Trigger 3: stop loss ---
-        entry = trade.entry_price  # cents (stored as float, cast when needed)
-        pnl_pct = (current_bid - entry) / entry if entry else 0.0
+        # --- Trigger 3: take profit ---
+        if pnl_pct >= settings.TAKE_PROFIT_PCT:
+            log.info(
+                "Trade %d: take profit — pnl_pct=%.1f%% (bid=%d¢ entry=%.0f¢)",
+                trade.id, pnl_pct * 100, current_bid, entry,
+            )
+            return await self._close_trade(trade, current_bid, "take_profit")
+
+        # --- Trigger 4: trailing stop ---
+        # Activates once peak reaches +TRAILING_STOP_LOCK_PCT;
+        # exits if current drops below +TRAILING_STOP_EXIT_PCT
+        if (peak >= settings.TRAILING_STOP_LOCK_PCT
+                and pnl_pct < settings.TRAILING_STOP_EXIT_PCT):
+            log.info(
+                "Trade %d: trailing stop — peak=%.1f%% current=%.1f%% (bid=%d¢ entry=%.0f¢)",
+                trade.id, peak * 100, pnl_pct * 100, current_bid, entry,
+            )
+            return await self._close_trade(trade, current_bid, "trailing_stop")
+
+        # --- Trigger 5: stop loss ---
         if pnl_pct <= -settings.STOP_LOSS_PCT:
             log.info(
                 "Trade %d: stop loss — pnl_pct=%.1f%% (bid=%d¢ entry=%.0f¢)",
@@ -285,7 +323,7 @@ class Strategy:
             )
             return await self._close_trade(trade, current_bid, "stop_loss")
 
-        # --- Trigger 4: confidence decay (market price collapsed) ---
+        # --- Trigger 6: confidence decay (market price collapsed) ---
         decay_threshold_cents = int(settings.CONFIDENCE_DECAY_EXIT * 100)
         if current_bid < decay_threshold_cents:
             log.info(

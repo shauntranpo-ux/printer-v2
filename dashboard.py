@@ -296,6 +296,33 @@ def api_balance():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.get("/api/direction_stats")
+def api_direction_stats():
+    _ensure_db()
+    try:
+        return jsonify(_run(_db.get_win_rate_by_direction()))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/model_performance")
+def api_model_performance():
+    _ensure_db()
+    try:
+        return jsonify(_run(_db.get_model_performance()))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/daily_pnl")
+def api_daily_pnl():
+    _ensure_db()
+    try:
+        return jsonify(_run(_db.get_last_7_days_stats()))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.post("/api/bot/start")
 def api_bot_start():
     _STOP_FILE.unlink(missing_ok=True)
@@ -430,10 +457,41 @@ _HTML = r"""<!DOCTYPE html>
   .btn-stop:hover{background:#da3633}
   .btn-start:disabled,.btn-stop:disabled{opacity:.5;cursor:not-allowed}
 
+  /* Model AI cards (per-model breakdown in cycle watch) */
+  .model-cards{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px}
+  .model-card{background:var(--dim);border-radius:6px;padding:10px 12px}
+  .model-card-name{font-size:10px;color:var(--muted);text-transform:uppercase;
+                   letter-spacing:.8px;margin-bottom:4px}
+  .model-card-prob{font-size:1.1rem;font-weight:700;margin-bottom:2px}
+  .model-card-dir{font-size:10px;font-weight:600;margin-bottom:4px}
+  .model-card-reasoning{font-size:10px;color:var(--muted);line-height:1.3;
+                        overflow:hidden;display:-webkit-box;
+                        -webkit-line-clamp:2;-webkit-box-orient:vertical}
+  .model-card-null{opacity:.4;font-size:11px;color:var(--muted);margin-top:8px}
+
+  /* Direction stats & model performance */
+  .dir-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .dir-cell{background:var(--dim);border-radius:6px;padding:12px 16px;text-align:center}
+  .dir-label{font-size:10px;color:var(--muted);text-transform:uppercase;
+             letter-spacing:1px;margin-bottom:6px}
+  .dir-pct{font-size:1.6rem;font-weight:700}
+  .dir-sub{font-size:11px;color:var(--muted);margin-top:4px}
+
+  /* 7-day bar chart */
+  .bar-chart{display:flex;align-items:flex-end;gap:6px;height:80px;margin-top:8px}
+  .bar-wrap{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px}
+  .bar{width:100%;border-radius:3px 3px 0 0;min-height:2px;transition:height .3s}
+  .bar-pos{background:var(--green)}
+  .bar-neg{background:var(--red)}
+  .bar-label{font-size:9px;color:var(--muted);white-space:nowrap}
+  .bar-val{font-size:9px;font-weight:600;white-space:nowrap}
+
   @media(max-width:600px){
     body{padding:12px}
     .card-value{font-size:1.2rem}
     .cards{grid-template-columns:1fr 1fr}
+    .model-cards{grid-template-columns:1fr 1fr}
+    .dir-grid{grid-template-columns:1fr 1fr}
   }
 </style>
 </head>
@@ -494,6 +552,24 @@ _HTML = r"""<!DOCTYPE html>
   <div id="ensemble-wrap"><div class="empty">No data yet</div></div>
 </div>
 
+<!-- Win Rate by Direction -->
+<div class="section">
+  <div class="section-title">Win Rate by Direction (All Time)</div>
+  <div id="direction-wrap"><div class="empty">No data yet</div></div>
+</div>
+
+<!-- Model Performance -->
+<div class="section">
+  <div class="section-title">Model Accuracy (All Time)</div>
+  <div id="model-perf-wrap"><div class="empty">No data yet</div></div>
+</div>
+
+<!-- 7-Day P&L Chart -->
+<div class="section">
+  <div class="section-title">7-Day P&amp;L</div>
+  <div id="daily-pnl-wrap"><div class="empty">No data yet</div></div>
+</div>
+
 <script>
 'use strict';
 
@@ -520,14 +596,17 @@ function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 /* ---- data fetch ---- */
 async function fetchAll() {
-  const [stats, positions, trades, botStatus, watch] = await Promise.all([
+  const [stats, positions, trades, botStatus, watch, dirStats, modelPerf, dailyPnl] = await Promise.all([
     fetch('/api/stats').then(r => r.json()).catch(()=>({})),
     fetch('/api/positions').then(r => r.json()).catch(()=>[]),
     fetch('/api/trades').then(r => r.json()).catch(()=>[]),
     fetch('/api/bot/status').then(r => r.json()).catch(()=>({})),
     fetch('/api/market_watch').then(r => r.json()).catch(()=>null),
+    fetch('/api/direction_stats').then(r => r.json()).catch(()=>({})),
+    fetch('/api/model_performance').then(r => r.json()).catch(()=>({})),
+    fetch('/api/daily_pnl').then(r => r.json()).catch(()=>[]),
   ]);
-  return { stats, positions, trades, botStatus, watch };
+  return { stats, positions, trades, botStatus, watch, dirStats, modelPerf, dailyPnl };
 }
 
 /* ---- bot control ---- */
@@ -667,6 +746,29 @@ function renderWatchSection(w) {
       : s.direction === 'NO'
       ? 'BTC will be <b style="color:var(--red)">BELOW</b> strike at expiry'
       : '—';
+
+    // Per-model breakdown cards
+    let modelCardsHtml = '';
+    if (s.models) {
+      const mdefs = [
+        {key:'claude',   label:'Claude'},
+        {key:'gpt',      label:'GPT-4o'},
+        {key:'gemini',   label:'Gemini'},
+        {key:'deepseek', label:'DeepSeek'},
+      ];
+      modelCardsHtml = '<div class="model-cards">' + mdefs.map(({key, label}) => {
+        const m = s.models[key];
+        if (!m) return `<div class="model-card"><div class="model-card-name">${label}</div><div class="model-card-null">FAILED</div></div>`;
+        const pCls = m.direction === 'YES' ? 'pos' : 'neg';
+        return `<div class="model-card">
+          <div class="model-card-name">${label}</div>
+          <div class="model-card-prob ${pCls}">${m.prob}%</div>
+          <div class="model-card-dir ${pCls}">${m.direction}</div>
+          <div class="model-card-reasoning">${m.reasoning || '—'}</div>
+        </div>`;
+      }).join('') + '</div>';
+    }
+
     signalHtml = `
       <div class="watch-signal">
         <span class="watch-label">Last signal</span>
@@ -677,7 +779,8 @@ function renderWatchSection(w) {
         <span class="${actCls}">${s.action}</span>
         <span style="font-size:11px;color:var(--muted)">${lookFor}</span>
         ${s.skip_reason ? '<span style="color:var(--yellow);font-size:10px">(' + s.skip_reason + ')</span>' : ''}
-      </div>`;
+      </div>
+      ${modelCardsHtml}`;
   }
 
   wrap.innerHTML = `
@@ -785,16 +888,88 @@ function renderEnsemble(ens) {
     </div>`;
 }
 
+/* ---- render direction stats ---- */
+function renderDirectionStats(d) {
+  const wrap = document.getElementById('direction-wrap');
+  if (!d || (!d.YES && !d.NO)) { wrap.innerHTML = '<div class="empty">No closed trades yet</div>'; return; }
+  const yes = d.YES || {}; const no = d.NO || {};
+  const yrPct = yes.win_rate != null ? (yes.win_rate * 100).toFixed(0) + '%' : '—';
+  const nrPct = no.win_rate  != null ? (no.win_rate  * 100).toFixed(0) + '%' : '—';
+  const yCls  = yes.win_rate != null ? (yes.win_rate >= 0.5 ? 'pos' : 'neg') : 'neu';
+  const nCls  = no.win_rate  != null ? (no.win_rate  >= 0.5 ? 'pos' : 'neg') : 'neu';
+  wrap.innerHTML = `<div class="dir-grid">
+    <div class="dir-cell">
+      <div class="dir-label">YES trades</div>
+      <div class="dir-pct ${yCls}">${yrPct}</div>
+      <div class="dir-sub">${yes.wins ?? 0} W / ${yes.total ?? 0} total</div>
+    </div>
+    <div class="dir-cell">
+      <div class="dir-label">NO trades</div>
+      <div class="dir-pct ${nCls}">${nrPct}</div>
+      <div class="dir-sub">${no.wins ?? 0} W / ${no.total ?? 0} total</div>
+    </div>
+  </div>`;
+}
+
+/* ---- render model performance ---- */
+function renderModelPerformance(d) {
+  const wrap = document.getElementById('model-perf-wrap');
+  if (!d || !Object.keys(d).length) { wrap.innerHTML = '<div class="empty">No closed trades yet</div>'; return; }
+  const models = [
+    {key:'claude',   label:'Claude'},
+    {key:'gpt',      label:'GPT-4o'},
+    {key:'gemini',   label:'Gemini'},
+    {key:'deepseek', label:'DeepSeek'},
+  ];
+  const rows = models.map(({key, label}) => {
+    const m = d[key] || {};
+    const acc = m.accuracy != null ? (m.accuracy * 100).toFixed(0) + '%' : '—';
+    const cls = m.accuracy != null ? (m.accuracy >= 0.5 ? 'pos' : 'neg') : 'neu';
+    return `<tr>
+      <td>${label}</td>
+      <td class="${cls}" style="font-weight:700">${acc}</td>
+      <td style="color:var(--muted)">${m.correct ?? 0} / ${m.total ?? 0}</td>
+    </tr>`;
+  }).join('');
+  wrap.innerHTML = `<table>
+    <thead><tr><th>Model</th><th>Accuracy</th><th>Correct / Total</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+/* ---- render 7-day P&L bar chart ---- */
+function renderDailyPnl(days) {
+  const wrap = document.getElementById('daily-pnl-wrap');
+  if (!days || days.length === 0) { wrap.innerHTML = '<div class="empty">No daily stats yet</div>'; return; }
+  const maxAbs = Math.max(...days.map(d => Math.abs(d.total_pnl || 0)), 0.01);
+  const bars = days.map(d => {
+    const v    = d.total_pnl || 0;
+    const hPct = Math.round(Math.abs(v) / maxAbs * 100);
+    const cls  = v >= 0 ? 'bar-pos' : 'bar-neg';
+    const sign = v >= 0 ? '+' : '';
+    const dt   = d.date ? d.date.slice(5) : ''; // MM-DD
+    return `<div class="bar-wrap">
+      <div class="bar-val ${v >= 0 ? 'pos' : 'neg'}">${sign}$${Math.abs(v).toFixed(0)}</div>
+      <div class="bar ${cls}" style="height:${hPct}%"></div>
+      <div class="bar-label">${dt}</div>
+    </div>`;
+  }).join('');
+  wrap.innerHTML = `<div class="bar-chart">${bars}</div>`;
+}
+
 /* ---- main refresh loop ---- */
 async function refresh() {
   try {
-    const { stats, positions, trades, botStatus, watch } = await fetchAll();
+    const { stats, positions, trades, botStatus, watch, dirStats, modelPerf, dailyPnl } = await fetchAll();
     renderHeader(stats, botStatus);
     renderCards(stats);
     renderWatchSection(watch);
     renderPositions(positions);
     renderTrades(trades);
     renderEnsemble(stats.last_ensemble);
+    renderDirectionStats(dirStats);
+    renderModelPerformance(modelPerf);
+    renderDailyPnl(dailyPnl);
   } catch(e) {
     document.getElementById('refresh-ts').textContent = 'Error: ' + e.message;
   }
