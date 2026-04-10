@@ -285,10 +285,10 @@ class EnsembleEngine:
     # Ordered list of Gemini models to try — first success wins.
     # Google frequently deprecates specific versions; this auto-advances.
     _GEMINI_FALLBACKS = [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
+        "gemini-2.0-flash-001",
         "gemini-2.0-flash",
         "gemini-2.0-flash-lite",
+        "gemini-2.5-flash",
         "gemini-1.5-flash",
     ]
 
@@ -317,6 +317,12 @@ class EnsembleEngine:
                 return self._parse_result(text, "gemini", (time.monotonic() - t0) * 1000)
             except Exception as exc:
                 msg = str(exc)
+                # 503 = service unavailable — no point trying fallbacks, fail fast
+                if "503" in msg or "UNAVAILABLE" in msg or "Service Unavailable" in msg:
+                    log.warning(
+                        "Gemini model unavailable (503) - switching to fallback immediately"
+                    )
+                    raise
                 if "404" in msg or "NOT_FOUND" in msg or "no longer available" in msg or "not found" in msg.lower():
                     log.debug("Gemini model '%s' unavailable — trying next", model)
                     last_exc = exc
