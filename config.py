@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     MIN_CONFIDENCE: float = Field(default=0.14, description="Minimum ensemble confidence score to trade")
     MAX_MODEL_SPREAD: float = Field(default=0.50, description="Max allowed disagreement between models (abort if exceeded)")
     MAX_OPEN_POSITIONS: int = Field(default=6, description="Maximum concurrent open positions")
-    STOP_LOSS_PCT: float = Field(default=0.67, description="Close position when it loses this fraction of cost (67% — e.g. entry 60¢ exits at ~20¢)")
+    STOP_LOSS_PCT: float = Field(default=0.80, description="Close position when it loses 80% of entry cost (e.g. entry 60¢ → SL triggers at 12¢)")
     CONFIDENCE_DECAY_EXIT: float = Field(default=0.20, description="Exit open position when market bid drops below this (20¢ — market is pricing <20% win probability)")
     TAKE_PROFIT_PCT: float = Field(default=0.55, description="Close position at +55% profit (or let expire if market bid ≥ 75¢)")
     TRAILING_STOP_LOCK_PCT: float = Field(default=0.30, description="Activate trailing stop once peak P&L reaches +30%")

@@ -307,8 +307,8 @@ class Strategy:
           2. Close time < now + 2min → let expire naturally (skip)
           3. pnl_pct >= TAKE_PROFIT_PCT (+55%) → take_profit
           4. Trailing stop activates at peak >= TRAILING_STOP_LOCK_PCT
-          5. pnl_pct <= -STOP_LOSS_PCT (67%) → stop_loss
-             e.g. entry 60¢ → triggers at ~20¢ (60 × 0.33 = 20)
+          5. pnl_pct <= -STOP_LOSS_PCT (80%) → stop_loss
+             e.g. entry 60¢ → triggers at 12¢ (60 × 0.20 = 12)
           6. current bid < CONFIDENCE_DECAY_EXIT × 100¢ (20¢) → decay
 
         Returns the list of trades closed this cycle.
