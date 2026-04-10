@@ -10,8 +10,9 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
-from config import cfg
+from config import settings
 from database import Database
 from coinbase_feed import CoinbaseFeed
 from ensemble import EnsembleEngine
@@ -55,34 +56,31 @@ async def sleep_until_next_tick(interval: int = TICK_INTERVAL_SEC) -> None:
 
 class BotRunner:
     def __init__(self):
-        self.db      = Database(cfg.database_path)
-        self.feed    = CoinbaseFeed(cfg.coinbase.api_key, cfg.coinbase.api_secret)
+        settings.validate()
+
+        self.db      = Database(Path(settings.DB_PATH))
+        self.feed    = CoinbaseFeed()
         self.ensemble = EnsembleEngine(
-            weights={
-                "trend":    cfg.ensemble.weight_trend,
-                "mean_rev": cfg.ensemble.weight_mean_rev,
-                "momentum": cfg.ensemble.weight_momentum,
-                "vol":      cfg.ensemble.weight_vol,
-            },
-            confidence_min=cfg.ensemble.confidence_min,
+            weights=settings.ensemble_weights,
+            confidence_min=settings.MIN_CONFIDENCE,
         )
         self.risk = RiskGates(
-            max_daily_drawdown_pct=cfg.risk.max_daily_drawdown_pct,
-            max_position_exposure=cfg.risk.max_position_exposure,
-            confidence_min=cfg.ensemble.confidence_min,
-            max_btc_vol_threshold=cfg.risk.max_btc_vol_threshold,
-            min_minutes_between_trades=cfg.risk.min_minutes_between_trades,
+            max_daily_drawdown_pct=settings.DAILY_LOSS_LIMIT / 10_000,  # rough pct; refined at runtime
+            max_position_exposure=settings.MAX_OPEN_POSITIONS / 10.0,
+            confidence_min=settings.MIN_CONFIDENCE,
+            max_btc_vol_threshold=0.04,
+            min_minutes_between_trades=15,
         )
         self.strategy = Strategy(
-            kelly_fraction_multiplier=cfg.kelly.fraction,
-            max_position_pct=cfg.kelly.max_position_pct,
+            kelly_fraction_multiplier=settings.KELLY_FRACTION,
+            max_position_pct=min(settings.MAX_BET_SIZE / 1000, 0.10),
         )
         self.kalshi  = KalshiClient(
-            cfg.kalshi.api_key_id,
-            cfg.kalshi.private_key_path,
-            cfg.kalshi.base_url,
+            settings.KALSHI_API_KEY,
+            settings.private_key_path,
+            settings.KALSHI_BASE_URL,
         )
-        self.telegram = TelegramAlerter(cfg.telegram.token, cfg.telegram.chat_id)
+        self.telegram = TelegramAlerter(settings.TELEGRAM_BOT_TOKEN, settings.TELEGRAM_CHAT_ID)
 
         self._last_trade_ts: float = 0.0
         self._starting_balance_cents: int = 0
@@ -93,7 +91,7 @@ class BotRunner:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        log.info("=== printer-v2 starting [%s] ===", cfg.env)
+        log.info("=== printer-v2 starting [%s] ===", settings.env)
         await self.db.connect()
         await self.feed.start()
         await self.telegram.start()
@@ -107,7 +105,7 @@ class BotRunner:
         self._starting_balance_cents = balance.available_balance
         log.info("Kalshi balance: $%.2f", balance.available_balance / 100)
 
-        await self.telegram.alert_startup(cfg.env, btc_price)
+        await self.telegram.alert_startup(settings.env, btc_price)
         self._running = True
 
     async def stop(self, reason: str = "clean exit") -> None:

@@ -12,11 +12,12 @@ from functools import wraps
 
 from flask import Flask, jsonify, request, Response, render_template_string
 
-from config import cfg
+from config import settings
 from database import Database
+from pathlib import Path
 
 app = Flask(__name__)
-_db = Database(cfg.database_path)
+_db = Database(Path(settings.DB_PATH))
 
 # ---------------------------------------------------------------------------
 # Bootstrap: open the database in a background thread with its own event loop
@@ -49,7 +50,7 @@ def _require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         auth = request.authorization
-        if not auth or auth.password != cfg.dashboard.password:
+        if not auth or auth.password != os.getenv("DASHBOARD_PASSWORD", "changeme"):
             return Response(
                 "Unauthorized", 401,
                 {"WWW-Authenticate": 'Basic realm="printer-v2"'},
@@ -76,7 +77,7 @@ def api_status():
         open_trades = _run(_db.get_open_trades())
         return jsonify({
             "status": "running",
-            "env": cfg.env,
+            "env": settings.env,
             "today": {
                 "date": today.day,
                 "trades": today.trades_count,
@@ -242,4 +243,4 @@ DASHBOARD_HTML = """
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=cfg.dashboard.port, debug=False)
+    app.run(host=settings.DASHBOARD_HOST, port=settings.DASHBOARD_PORT, debug=False)

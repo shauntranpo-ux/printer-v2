@@ -1,205 +1,277 @@
 """
-config.py — All settings loaded from .env
+config.py — All settings loaded from environment variables via pydantic-settings.
 """
 
-import os
+from __future__ import annotations
+
 import sys
-from dataclasses import dataclass, field
+import tempfile
 from pathlib import Path
-from dotenv import load_dotenv
+from typing import Optional
 
-load_dotenv()
-
-
-class ConfigError(Exception):
-    pass
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _require(key: str) -> str:
-    val = os.getenv(key, "").strip()
-    if not val:
-        raise ConfigError(f"Required env var missing or empty: {key}")
-    return val
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",
+    )
 
+    # ------------------------------------------------------------------
+    # Trading
+    # ------------------------------------------------------------------
+    MAX_BET_SIZE: float = Field(default=25.0, description="Max dollars per trade")
+    DAILY_LOSS_LIMIT: float = Field(default=100.0, description="Halt trading after losing this much today (dollars)")
+    KELLY_FRACTION: float = Field(default=0.5, description="Fractional Kelly multiplier (0.5 = half-Kelly)")
+    MIN_EDGE: float = Field(default=0.05, description="Minimum implied edge (5%) required to place a trade")
+    MIN_CONFIDENCE: float = Field(default=0.55, description="Minimum ensemble confidence score to trade")
+    MAX_MODEL_SPREAD: float = Field(default=0.35, description="Max allowed disagreement between models (abort if exceeded)")
+    MAX_OPEN_POSITIONS: int = Field(default=3, description="Maximum concurrent open positions")
+    STOP_LOSS_PCT: float = Field(default=0.15, description="Close position when it loses this fraction of cost (15%)")
+    CONFIDENCE_DECAY_EXIT: float = Field(default=0.40, description="Exit open position if confidence drops below this")
 
-def _optional(key: str, default: str) -> str:
-    return os.getenv(key, default).strip()
+    # ------------------------------------------------------------------
+    # Kalshi
+    # ------------------------------------------------------------------
+    KALSHI_API_KEY: str = Field(default="", description="Kalshi API key ID")
+    KALSHI_PRIVATE_KEY: str = Field(default="", description="RSA private key — file path or raw PEM string")
+    KALSHI_BASE_URL: str = Field(
+        default="https://trading-api.kalshi.com/trade-api/v2",
+        description="Kalshi REST API base URL",
+    )
+    KALSHI_DEMO: bool = Field(default=False, description="Use Kalshi demo environment")
 
+    # ------------------------------------------------------------------
+    # Coinbase
+    # ------------------------------------------------------------------
+    COINBASE_WS_URL: str = Field(
+        default="wss://advanced-trade-ws.coinbase.com",
+        description="Coinbase Advanced Trade WebSocket URL",
+    )
+    BTC_PRODUCT_ID: str = Field(default="BTC-USD", description="Coinbase product ID for BTC")
+    PRICE_STALENESS_SECONDS: int = Field(default=30, description="Max seconds before BTC price is considered stale")
 
-def _float(key: str, default: float) -> float:
-    raw = os.getenv(key, "")
-    if not raw.strip():
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        raise ConfigError(f"{key} must be a float, got: {raw!r}")
+    # ------------------------------------------------------------------
+    # AI Models
+    # ------------------------------------------------------------------
+    ANTHROPIC_API_KEY: str = Field(default="", description="Anthropic Claude API key")
+    OPENAI_API_KEY: str = Field(default="", description="OpenAI API key")
+    GEMINI_API_KEY: str = Field(default="", description="Google Gemini API key")
+    DEEPSEEK_API_KEY: str = Field(default="", description="DeepSeek API key")
 
+    CLAUDE_MODEL: str = Field(default="claude-sonnet-4-5", description="Claude model ID")
+    GPT_MODEL: str = Field(default="gpt-4o", description="OpenAI model ID")
+    GEMINI_MODEL: str = Field(default="gemini-2.0-flash", description="Gemini model ID")
+    DEEPSEEK_MODEL: str = Field(default="deepseek-reasoner", description="DeepSeek model ID")
 
-def _int(key: str, default: int) -> int:
-    raw = os.getenv(key, "")
-    if not raw.strip():
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        raise ConfigError(f"{key} must be an int, got: {raw!r}")
+    # ------------------------------------------------------------------
+    # Ensemble weights (auto-normalized if they don't sum to 1.0)
+    # ------------------------------------------------------------------
+    CLAUDE_WEIGHT: float = Field(default=0.30, description="Claude vote weight")
+    GPT_WEIGHT: float = Field(default=0.25, description="GPT vote weight")
+    GEMINI_WEIGHT: float = Field(default=0.25, description="Gemini vote weight")
+    DEEPSEEK_WEIGHT: float = Field(default=0.20, description="DeepSeek vote weight")
 
+    # ------------------------------------------------------------------
+    # Telegram
+    # ------------------------------------------------------------------
+    TELEGRAM_BOT_TOKEN: str = Field(default="", description="Telegram bot token from @BotFather")
+    TELEGRAM_CHAT_ID: str = Field(default="", description="Telegram chat/group ID for alerts")
 
-@dataclass
-class KalshiConfig:
-    api_key_id: str
-    private_key_path: Path
-    base_url: str
+    # ------------------------------------------------------------------
+    # Database
+    # ------------------------------------------------------------------
+    DB_PATH: str = Field(default="printer_v2.db", description="SQLite database file path")
 
+    # ------------------------------------------------------------------
+    # Dashboard
+    # ------------------------------------------------------------------
+    DASHBOARD_PORT: int = Field(default=8080, description="Flask dashboard port")
+    DASHBOARD_HOST: str = Field(default="0.0.0.0", description="Flask dashboard bind host")
 
-@dataclass
-class CoinbaseConfig:
-    api_key: str
-    api_secret: str
-    ws_url: str = "wss://advanced-trade-ws.coinbase.com"
+    # ------------------------------------------------------------------
+    # Field-level validators
+    # ------------------------------------------------------------------
 
+    @field_validator("KELLY_FRACTION")
+    @classmethod
+    def kelly_in_range(cls, v: float) -> float:
+        if not 0.0 < v <= 1.0:
+            raise ValueError(f"KELLY_FRACTION must be in (0.0, 1.0], got {v}")
+        return v
 
-@dataclass
-class EnsembleConfig:
-    confidence_min: float       # minimum confidence to trade
-    weight_trend: float
-    weight_mean_rev: float
-    weight_momentum: float
-    weight_vol: float
+    @field_validator("MIN_CONFIDENCE", "CONFIDENCE_DECAY_EXIT")
+    @classmethod
+    def confidence_in_range(cls, v: float) -> float:
+        if not 0.0 < v < 1.0:
+            raise ValueError(f"Confidence values must be in (0.0, 1.0), got {v}")
+        return v
 
-    def __post_init__(self):
-        total = self.weight_trend + self.weight_mean_rev + self.weight_momentum + self.weight_vol
-        if abs(total - 1.0) > 0.01:
-            raise ConfigError(
-                f"Model weights must sum to 1.0, got {total:.3f}. "
-                "Check MODEL_WEIGHT_* env vars."
-            )
+    @field_validator("STOP_LOSS_PCT", "MIN_EDGE", "MAX_MODEL_SPREAD")
+    @classmethod
+    def pct_in_range(cls, v: float) -> float:
+        if not 0.0 < v < 1.0:
+            raise ValueError(f"Percentage values must be in (0.0, 1.0), got {v}")
+        return v
 
+    @field_validator("MAX_BET_SIZE", "DAILY_LOSS_LIMIT")
+    @classmethod
+    def dollar_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"Dollar limits must be positive, got {v}")
+        return v
 
-@dataclass
-class RiskConfig:
-    max_daily_drawdown_pct: float   # e.g. 0.05 = 5%
-    max_position_exposure: float    # e.g. 0.20 = 20% of balance
-    min_minutes_between_trades: int
-    max_btc_vol_threshold: float    # e.g. 0.04 = 4% realized vol
+    @field_validator("MAX_OPEN_POSITIONS")
+    @classmethod
+    def positions_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"MAX_OPEN_POSITIONS must be ≥ 1, got {v}")
+        return v
 
+    # ------------------------------------------------------------------
+    # Model-level validator: normalize ensemble weights
+    # ------------------------------------------------------------------
 
-@dataclass
-class KellyConfig:
-    fraction: float         # 0.5 = half-Kelly
-    max_position_pct: float # hard cap per trade
+    @model_validator(mode="after")
+    def normalize_weights(self) -> "Settings":
+        total = self.CLAUDE_WEIGHT + self.GPT_WEIGHT + self.GEMINI_WEIGHT + self.DEEPSEEK_WEIGHT
+        if abs(total - 1.0) > 0.001:
+            self.CLAUDE_WEIGHT   /= total
+            self.GPT_WEIGHT      /= total
+            self.GEMINI_WEIGHT   /= total
+            self.DEEPSEEK_WEIGHT /= total
+        return self
 
+    # ------------------------------------------------------------------
+    # Computed properties
+    # ------------------------------------------------------------------
 
-@dataclass
-class TelegramConfig:
-    token: str      # empty string means disabled
-    chat_id: str
-
-
-@dataclass
-class DashboardConfig:
-    password: str
-    port: int
-
-
-@dataclass
-class Config:
-    kalshi: KalshiConfig
-    coinbase: CoinbaseConfig
-    ensemble: EnsembleConfig
-    risk: RiskConfig
-    kelly: KellyConfig
-    telegram: TelegramConfig
-    dashboard: DashboardConfig
-    database_path: Path
-    env: str  # "live" | "demo"
+    @property
+    def env(self) -> str:
+        return "demo" if self.KALSHI_DEMO else "live"
 
     @property
     def telegram_enabled(self) -> bool:
-        return bool(self.telegram.token and self.telegram.chat_id)
+        return bool(self.TELEGRAM_BOT_TOKEN and self.TELEGRAM_CHAT_ID)
 
+    @property
+    def ensemble_weights(self) -> dict[str, float]:
+        return {
+            "claude":   self.CLAUDE_WEIGHT,
+            "gpt":      self.GPT_WEIGHT,
+            "gemini":   self.GEMINI_WEIGHT,
+            "deepseek": self.DEEPSEEK_WEIGHT,
+        }
 
-def _load() -> Config:
-    try:
-        kalshi = KalshiConfig(
-            api_key_id=_require("KALSHI_API_KEY_ID"),
-            private_key_path=Path(_optional("KALSHI_PRIVATE_KEY_PATH", "./kalshi_private_key.pem")),
-            base_url=_optional(
-                "KALSHI_BASE_URL",
-                "https://trading-api.kalshi.com/trade-api/v2",
-            ),
-        )
-        if not kalshi.private_key_path.exists():
-            raise ConfigError(
-                f"Kalshi private key not found at: {kalshi.private_key_path}. "
-                "Set KALSHI_PRIVATE_KEY_PATH or place the file there."
+    @property
+    def private_key_path(self) -> Path:
+        """
+        Resolves KALSHI_PRIVATE_KEY to a file Path.
+        If the value looks like a raw PEM string, writes it to a temp file and
+        returns that path. The caller should not delete this file during the
+        process lifetime.
+        """
+        val = self.KALSHI_PRIVATE_KEY.strip()
+        if val.startswith("-----BEGIN"):
+            # Raw PEM — write to a named temp file (not deleted on close)
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".pem", delete=False, prefix="kalshi_key_"
+            )
+            tmp.write(val)
+            tmp.flush()
+            tmp.close()
+            return Path(tmp.name)
+        return Path(val)
+
+    # ------------------------------------------------------------------
+    # validate() — explicit startup check with aggregated errors
+    # ------------------------------------------------------------------
+
+    def validate(self) -> None:
+        """
+        Call once at startup. Raises RuntimeError listing ALL missing/invalid
+        settings so the operator can fix everything in one shot.
+        """
+        errors: list[str] = []
+
+        # Required API keys
+        required_keys = {
+            "KALSHI_API_KEY":    self.KALSHI_API_KEY,
+            "KALSHI_PRIVATE_KEY": self.KALSHI_PRIVATE_KEY,
+            "ANTHROPIC_API_KEY": self.ANTHROPIC_API_KEY,
+            "OPENAI_API_KEY":    self.OPENAI_API_KEY,
+            "GEMINI_API_KEY":    self.GEMINI_API_KEY,
+            "DEEPSEEK_API_KEY":  self.DEEPSEEK_API_KEY,
+        }
+        for name, val in required_keys.items():
+            if not val.strip():
+                errors.append(f"  • {name} is required but not set")
+
+        # Optional but warn if Telegram is half-configured
+        if bool(self.TELEGRAM_BOT_TOKEN) != bool(self.TELEGRAM_CHAT_ID):
+            errors.append(
+                "  • TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must both be set "
+                "(or both left empty)"
             )
 
-        coinbase = CoinbaseConfig(
-            api_key=_require("COINBASE_API_KEY"),
-            api_secret=_require("COINBASE_API_SECRET"),
-        )
+        # Kalshi private key — resolve and verify
+        if self.KALSHI_PRIVATE_KEY.strip():
+            val = self.KALSHI_PRIVATE_KEY.strip()
+            if not val.startswith("-----BEGIN"):
+                p = Path(val)
+                if not p.exists():
+                    errors.append(
+                        f"  • KALSHI_PRIVATE_KEY looks like a file path but '{p}' does not exist"
+                    )
 
-        # Normalize weights before building EnsembleConfig so they always sum to 1.0
-        raw_weights = [
-            _float("MODEL_WEIGHT_TREND", 0.30),
-            _float("MODEL_WEIGHT_MEAN_REV", 0.25),
-            _float("MODEL_WEIGHT_MOMENTUM", 0.25),
-            _float("MODEL_WEIGHT_VOL", 0.20),
-        ]
-        total_w = sum(raw_weights)
-        w_trend, w_mr, w_mom, w_vol = [w / total_w for w in raw_weights]
+        # Confidence ordering
+        if self.CONFIDENCE_DECAY_EXIT >= self.MIN_CONFIDENCE:
+            errors.append(
+                f"  • CONFIDENCE_DECAY_EXIT ({self.CONFIDENCE_DECAY_EXIT}) must be "
+                f"< MIN_CONFIDENCE ({self.MIN_CONFIDENCE})"
+            )
 
-        ensemble = EnsembleConfig(
-            confidence_min=_float("ENSEMBLE_CONFIDENCE_MIN", 0.60),
-            weight_trend=w_trend,
-            weight_mean_rev=w_mr,
-            weight_momentum=w_mom,
-            weight_vol=w_vol,
-        )
+        # Stop-loss vs bet size sanity
+        if self.STOP_LOSS_PCT >= 1.0:
+            errors.append(f"  • STOP_LOSS_PCT ({self.STOP_LOSS_PCT}) must be < 1.0")
 
-        risk = RiskConfig(
-            max_daily_drawdown_pct=_float("MAX_DAILY_DRAWDOWN_PCT", 0.05),
-            max_position_exposure=_float("MAX_POSITION_EXPOSURE", 0.20),
-            min_minutes_between_trades=_int("MIN_MINUTES_BETWEEN_TRADES", 15),
-            max_btc_vol_threshold=_float("MAX_BTC_VOL_THRESHOLD", 0.04),
-        )
+        if self.DAILY_LOSS_LIMIT < self.MAX_BET_SIZE:
+            errors.append(
+                f"  • DAILY_LOSS_LIMIT (${self.DAILY_LOSS_LIMIT}) is less than "
+                f"MAX_BET_SIZE (${self.MAX_BET_SIZE}) — you'd halt after one trade"
+            )
 
-        kelly = KellyConfig(
-            fraction=_float("KELLY_FRACTION", 0.5),
-            max_position_pct=_float("MAX_POSITION_PCT", 0.10),
-        )
+        if errors:
+            msg = "Configuration errors — fix these before starting the bot:\n" + "\n".join(errors)
+            raise RuntimeError(msg)
 
-        telegram = TelegramConfig(
-            token=_optional("TELEGRAM_TOKEN", ""),
-            chat_id=_optional("TELEGRAM_CHAT_ID", ""),
-        )
-
-        dashboard = DashboardConfig(
-            password=_optional("DASHBOARD_PASSWORD", "changeme"),
-            port=_int("PORT", 5000),
-        )
-
-        env = _optional("KALSHI_ENV", "live")
-        if env not in ("live", "demo"):
-            raise ConfigError(f"KALSHI_ENV must be 'live' or 'demo', got: {env!r}")
-
-        return Config(
-            kalshi=kalshi,
-            coinbase=coinbase,
-            ensemble=ensemble,
-            risk=risk,
-            kelly=kelly,
-            telegram=telegram,
-            dashboard=dashboard,
-            database_path=Path(_optional("DATABASE_PATH", "printer_v2.db")),
-            env=env,
-        )
-
-    except ConfigError as exc:
-        print(f"[config] ERROR: {exc}", file=sys.stderr)
-        sys.exit(1)
+        # All good
+        _print_summary(self)
 
 
-cfg = _load()
+def _print_summary(s: Settings) -> None:
+    """Log a concise config summary at startup (no secrets)."""
+    print(
+        f"[config] printer-v2  env={s.env}  "
+        f"bet=${s.MAX_BET_SIZE}  loss_limit=${s.DAILY_LOSS_LIMIT}  "
+        f"kelly={s.KELLY_FRACTION}  min_conf={s.MIN_CONFIDENCE}  "
+        f"max_positions={s.MAX_OPEN_POSITIONS}\n"
+        f"[config] weights  claude={s.CLAUDE_WEIGHT:.2f}  gpt={s.GPT_WEIGHT:.2f}  "
+        f"gemini={s.GEMINI_WEIGHT:.2f}  deepseek={s.DEEPSEEK_WEIGHT:.2f}\n"
+        f"[config] models   claude={s.CLAUDE_MODEL}  gpt={s.GPT_MODEL}  "
+        f"gemini={s.GEMINI_MODEL}  deepseek={s.DEEPSEEK_MODEL}\n"
+        f"[config] db={s.DB_PATH}  dashboard={s.DASHBOARD_HOST}:{s.DASHBOARD_PORT}  "
+        f"telegram={'enabled' if s.telegram_enabled else 'disabled'}"
+    )
+
+
+# Single instance — import this everywhere
+try:
+    settings = Settings()
+except Exception as exc:
+    print(f"[config] FATAL: failed to load settings — {exc}", file=sys.stderr)
+    sys.exit(1)
