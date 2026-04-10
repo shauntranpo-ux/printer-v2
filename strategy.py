@@ -108,6 +108,7 @@ class Strategy:
         *,
         btc_price:       float | None = None,
         btc_momentum:    float | None = None,
+        size_multiplier: float = 1.0,
     ) -> TradeRow | None:
         """
         Full entry flow:
@@ -129,6 +130,7 @@ class Strategy:
         edge         = ensemble_result.consensus_prob - market_price
 
         bet_size = await self.calculate_bet_size(edge, market_price, direction)
+        bet_size = math.floor(bet_size * size_multiplier / _ROUNDING) * _ROUNDING
         if bet_size < _MIN_BET_DOLLARS:
             log.info(
                 "Bet size $%.2f below minimum $%.2f — skipping entry",

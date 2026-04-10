@@ -36,16 +36,40 @@ DEFAULT_BANKROLL       = 500.0
 DEFAULT_MAX_BET        = 25.0
 DEFAULT_TP             = 0.50   # take profit at +50 %
 DEFAULT_SL             = 0.35   # stop loss at -35 %
-MIN_EDGE               = 0.03   # lower than live (rule-based proxy has smaller edge)
-MIN_CONF               = 0.18   # calibrated for rule-based proxy (max achievable ~0.60)
+MIN_EDGE               = 0.03
+MIN_EDGE_CHOPPY        = 0.08   # higher bar for mean reversion
+MIN_CONF               = 0.18   # calibrated for rule-based proxy
+MIN_CONF_CHOPPY        = 0.28   # mean reversion needs stronger conviction
 MAX_SPREAD             = 0.35
-MAX_POSITIONS          = 3      # max concurrent trades per candle
+MAX_POSITIONS          = 3
 DAILY_LOSS_LIMIT       = 100.0
 KELLY_FRACTION         = 0.5
 MIN_BET                = 1.0
-STRIKE_OFFSETS         = [+0.005, 0.0, -0.005]   # +0.5 %, flat, -0.5 %
+STRIKE_OFFSETS         = [+0.005, 0.0, -0.005]
 
-MODEL_WEIGHTS = {"claude": 0.30, "gpt": 0.25, "gemini": 0.25, "deepseek": 0.20}
+# Regime thresholds
+ADX_VOLATILE           = 25
+ADX_TRENDING           = 20
+ATR_VOLATILE           = 0.003
+ATR_TRENDING           = 0.002
+
+# Entry filters
+VOL_CONFIRM_RATIO      = 0.9    # volume at or above recent average
+BODY_RATIO_MIN         = 0.30   # body/range — removes true doji candles
+
+# Streak protection
+STREAK_SOFT            = 3      # 3 losses → 25% bet size, raise conf
+STREAK_HARD            = 5      # 5 losses → skip 2 candles
+
+# Time-based filters (UTC hours)
+HIGH_ACTIVITY_START    = 13
+HIGH_ACTIVITY_END      = 21
+MED_ACTIVITY_START     = 0
+MED_ACTIVITY_END       = 4
+
+# Model weights by regime (Upgrade 5)
+WEIGHTS_TREND = {"claude": 0.35, "gpt": 0.25, "gemini": 0.25, "deepseek": 0.15}
+WEIGHTS_CHOPPY = {"claude": 0.15, "gpt": 0.20, "gemini": 0.20, "deepseek": 0.45}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Data classes
@@ -70,6 +94,7 @@ class Trade:
     btc_price_at_entry:  float
     hold_candles:        int
     peak_pnl_pct:        float
+    regime:              str   # "VOLATILE" | "TRENDING" | "CHOPPY"
 
 
 @dataclass
@@ -182,90 +207,137 @@ def compute_indicators(df: pd.DataFrame) -> dict[str, np.ndarray]:
     bb_pct  = bb_pct.clip(0.0, 1.0).values
 
     # ── Momentum — exact coinbase_feed.py formula ─────────────────────────────
-    # Direction: recency-weighted (0.1/0.2/0.3/0.4) tanh of body %
     body_pct  = np.tanh((c - o) / o.replace(0.0, np.nan) * 100.0).fillna(0.0)
     dir_score = (
         body_pct.shift(3).fillna(0.0) * 0.1
         + body_pct.shift(2).fillna(0.0) * 0.2
         + body_pct.shift(1).fillna(0.0) * 0.3
         + body_pct                       * 0.4
-    ).values  # weights already sum to 1.0
+    ).values
 
-    # Velocity: tanh of 4-candle price change
     c4     = c.shift(4).replace(0.0, np.nan)
     vel    = np.tanh((c - c4) / c4 * 100.0).fillna(0.0).values
-
-    # Volume confirmation
     mean_v4   = v.rolling(4, min_periods=1).mean().replace(0.0, np.nan)
     vol_ratio = (v / mean_v4 - 1.0).fillna(0.0)
     dir_sign  = np.where(dir_score >= 0, 1.0, -1.0)
     vol_fac   = (np.tanh(vol_ratio.values) * dir_sign)
-
     momentum = np.clip(0.40 * dir_score + 0.40 * vel + 0.20 * vol_fac, -1.0, 1.0)
+
+    # ── ATR-14 (Wilder smoothing — com = period − 1 = 13) ────────────────────
+    h        = df["high"]
+    lo       = df["low"]
+    prev_c   = c.shift(1).fillna(c)
+    tr       = pd.concat([(h - lo), (h - prev_c).abs(), (lo - prev_c).abs()],
+                         axis=1).max(axis=1)
+    atr14    = tr.ewm(com=13, adjust=False).mean()
+    atr_pct  = (atr14 / c.replace(0, np.nan)).fillna(0.0).values
+
+    # ── ADX-14 ───────────────────────────────────────────────────────────────
+    h_diff   = h.diff().fillna(0.0)
+    l_diff   = (-lo.diff()).fillna(0.0)
+    dm_plus  = np.where((h_diff > l_diff) & (h_diff > 0), h_diff, 0.0)
+    dm_minus = np.where((l_diff > h_diff) & (l_diff > 0), l_diff, 0.0)
+    sm_tr    = tr.ewm(com=13, adjust=False).mean().replace(0, np.nan)
+    di_plus  = 100.0 * pd.Series(dm_plus).ewm(com=13, adjust=False).mean() / sm_tr
+    di_minus = 100.0 * pd.Series(dm_minus).ewm(com=13, adjust=False).mean() / sm_tr
+    di_sum   = (di_plus + di_minus).replace(0, np.nan)
+    dx       = 100.0 * (di_plus - di_minus).abs() / di_sum
+    adx14    = dx.ewm(com=13, adjust=False).mean().fillna(0.0).values
+
+    # ── EMA9 and EMA21 ────────────────────────────────────────────────────────
+    ema9  = c.ewm(span=9,  adjust=False).mean().values
+    ema21 = c.ewm(span=21, adjust=False).mean().values
+
+    # ── 10-candle average volume (for volume confirmation filter) ─────────────
+    vol_ma10 = v.rolling(10, min_periods=1).mean().replace(0, np.nan).values
 
     return {
         "log_ret":   log_ret,
-        "vol":       roll_vol,       # rolling 20-candle std of returns
+        "vol":       roll_vol,
         "rsi":       rsi,
         "macd_abv":  macd_above,
         "bb_pct":    bb_pct,
         "momentum":  momentum,
+        "atr_pct":   atr_pct,
+        "adx":       adx14,
+        "ema9":      ema9,
+        "ema21":     ema21,
+        "vol_ma10":  vol_ma10,
     }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3 · Rule-based ensemble (proxy for 4-model AI debate)
+# 3 · Regime classification
 # ─────────────────────────────────────────────────────────────────────────────
 
-def ensemble_at(i: int, ind: dict[str, np.ndarray]) -> dict:
+def classify_regime(adx: float, atr_pct: float) -> str:
     """
-    Return ensemble signal dict for candle index i.
-    Mirrors the real ensemble's output structure used by runner.py.
+    Classify current market into VOLATILE / TRENDING / CHOPPY.
+      VOLATILE  — high ADX + wide ATR (best for momentum trades)
+      TRENDING  — moderate trend, lower volatility
+      CHOPPY    — low directionality (use mean-reversion instead)
     """
-    momentum  = float(ind["momentum"][i])
-    rsi       = float(ind["rsi"][i])
-    macd_abv  = float(ind["macd_abv"][i])   # 1 = bullish, 0 = bearish
-    bb_pct    = float(ind["bb_pct"][i])      # 0=lower, 1=upper band
+    if adx > ADX_VOLATILE and atr_pct > ATR_VOLATILE:
+        return "VOLATILE"
+    if adx > ADX_TRENDING and atr_pct > ATR_TRENDING:
+        return "TRENDING"
+    return "CHOPPY"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4 · Rule-based ensemble (proxy for 4-model AI debate)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ensemble_at(i: int, ind: dict[str, np.ndarray], regime: str = "VOLATILE") -> dict:
+    """
+    Rule-based ensemble proxy.  Model weights and confidence thresholds
+    adapt to the current market regime (Upgrades 1 & 5).
+    """
+    momentum = float(ind["momentum"][i])
+    rsi      = float(ind["rsi"][i])
+    macd_abv = float(ind["macd_abv"][i])
+    bb_pct   = float(ind["bb_pct"][i])
 
     # ── Claude: momentum-based ───────────────────────────────────────────────
-    # Probabilities calibrated to real AI output range (0.15–0.85)
-    if   momentum >  0.3:  claude = 0.82
-    elif momentum >  0.1:  claude = 0.64
-    elif momentum < -0.3:  claude = 0.18
-    elif momentum < -0.1:  claude = 0.36
-    else:                  claude = 0.50
+    if   momentum >  0.3: claude = 0.82
+    elif momentum >  0.1: claude = 0.64
+    elif momentum < -0.3: claude = 0.18
+    elif momentum < -0.1: claude = 0.36
+    else:                 claude = 0.50
 
     # ── GPT: RSI-based (bullish lens) ────────────────────────────────────────
-    if   rsi > 70:  gpt = 0.82
-    elif rsi > 60:  gpt = 0.66
-    elif rsi < 30:  gpt = 0.18
-    elif rsi < 40:  gpt = 0.34
-    else:           gpt = 0.50
+    if   rsi > 70: gpt = 0.82
+    elif rsi > 60: gpt = 0.66
+    elif rsi < 30: gpt = 0.18
+    elif rsi < 40: gpt = 0.34
+    else:          gpt = 0.50
 
     # ── Gemini: MACD-based ───────────────────────────────────────────────────
-    gemini = (0.72 if macd_abv else 0.26)
+    gemini = 0.72 if macd_abv else 0.26
 
-    # ── DeepSeek: Bollinger-based (risk manager) ─────────────────────────────
-    if   bb_pct < 0.20:  deepseek = 0.80
-    elif bb_pct < 0.40:  deepseek = 0.64
-    elif bb_pct > 0.80:  deepseek = 0.20
-    elif bb_pct > 0.60:  deepseek = 0.36
-    else:                deepseek = 0.50
+    # ── DeepSeek: Bollinger mean-reversion lens ───────────────────────────────
+    if   bb_pct < 0.20: deepseek = 0.80
+    elif bb_pct < 0.40: deepseek = 0.64
+    elif bb_pct > 0.80: deepseek = 0.20
+    elif bb_pct > 0.60: deepseek = 0.36
+    else:               deepseek = 0.50
 
     probs = {"claude": claude, "gpt": gpt, "gemini": gemini, "deepseek": deepseek}
 
-    # Weighted consensus (renormalised to sum of weights)
-    total_w   = sum(MODEL_WEIGHTS.values())
-    consensus = sum(p * MODEL_WEIGHTS[m] for m, p in probs.items()) / total_w
+    # ── Regime-adaptive weights (Upgrade 5) ──────────────────────────────────
+    w = WEIGHTS_CHOPPY if regime == "CHOPPY" else WEIGHTS_TREND
+    total_w   = sum(w.values())
+    consensus = sum(probs[m] * w[m] for m in probs) / total_w
     spread    = max(probs.values()) - min(probs.values())
 
-    # Confidence = avg absolute distance from 0.5, penalised if spread > 0.20
     avg_conf   = sum(abs(p - 0.5) * 2.0 for p in probs.values()) / len(probs)
     confidence = avg_conf * 0.8 if spread > 0.20 else avg_conf
 
-    if   spread    > MAX_SPREAD:  action = "WAIT"
-    elif confidence < MIN_CONF:   action = "SKIP"
-    else:                         action = "TRADE"
+    min_conf_use = MIN_CONF_CHOPPY if regime == "CHOPPY" else MIN_CONF
+
+    if   spread     > MAX_SPREAD:    action = "WAIT"
+    elif confidence < min_conf_use:  action = "SKIP"
+    else:                            action = "TRADE"
 
     return {
         "consensus":  consensus,
@@ -325,33 +397,41 @@ def run_backtest(
     args: argparse.Namespace,
 ) -> tuple[list[Trade], pd.Series]:
     """
-    Accurate Kalshi single-candle simulation.
+    Accurate Kalshi single-candle simulation with all 7 upgrades:
+      1. Market regime detection (VOLATILE / TRENDING / CHOPPY)
+      2. Mean reversion for CHOPPY markets
+      3. Stronger entry filters (RSI range, volume, candle body, EMA trend)
+      4. Dynamic ATR-based TP/SL per regime
+      5. Regime-adaptive ensemble weights
+      6. Streak protection (3-loss and 5-loss triggers)
+      7. Time-based activity filters (UTC hours)
 
-    Each 15-min candle is one contract period.  Entry is at candle open;
-    the contract resolves at candle close (binary: $1 win / $0 loss) unless
-    TP or SL is hit intra-candle using candle high/low.
-
-    P&L model (binary):
-      WIN  → pnl = contracts × (1.00 − entry_price)          [+ve]
-      LOSS → pnl = −contracts × entry_price                   [−ve]
+    P&L model (binary Kalshi):
+      WIN  → pnl = contracts × (1.00 − entry_price)
+      LOSS → pnl = −contracts × entry_price
       TP   → pnl = (tp_exit_cents − entry_cents) × contracts / 100
       SL   → pnl = (sl_exit_cents − entry_cents) × contracts / 100
     """
     bankroll  = args.bankroll
     max_bet   = args.max_bet
-    tp        = args.tp
-    sl        = args.sl
+    tp_base   = args.tp
+    sl_base   = args.sl
 
     opens     = df["open"].values
     highs     = df["high"].values
     lows      = df["low"].values
     closes    = df["close"].values
     times     = df["dt"].values
+    volumes   = df["volume"].values
     n         = len(df)
 
     trades:      list[Trade] = []
     equity_vals: list[float] = []
     daily_loss:  dict        = {}
+
+    # Streak protection state
+    recent_results: list[bool] = []   # True=win, False=loss (last 5)
+    pause_candles = 0                 # candles to skip after 5-loss streak
 
     WARMUP = 30
 
@@ -366,24 +446,127 @@ def run_backtest(
         btc_high  = highs[i]
         btc_low   = lows[i]
         btc_close = closes[i]
-        vol = max(float(ind["vol"][i]), 0.001)
-        day = ts.date().isoformat()
+        vol_stat  = max(float(ind["vol"][i]), 0.001)   # rolling-std volatility
+        day       = ts.date().isoformat()
 
         if daily_loss.get(day, 0.0) >= DAILY_LOSS_LIMIT:
             continue
 
-        ens = ensemble_at(i, ind)
-        if ens["action"] != "TRADE":
+        # ── Upgrade 6: streak protection (hard pause) ────────────────────────
+        if pause_candles > 0:
+            pause_candles -= 1
             continue
 
-        direction = ens["direction"]
-        momentum  = ens["momentum"]
+        # ── Upgrade 1: regime classification ─────────────────────────────────
+        adx     = float(ind["adx"][i])
+        atr_pct = float(ind["atr_pct"][i])
+        regime  = classify_regime(adx, atr_pct)
 
-        # Skip only on strong counter-momentum
-        if direction == "YES" and momentum < -0.3:
-            continue
-        if direction == "NO"  and momentum >  0.3:
-            continue
+        # ── Upgrade 7: time-based sizing multiplier ───────────────────────────
+        hour = ts.hour
+        if HIGH_ACTIVITY_START <= hour < HIGH_ACTIVITY_END:
+            time_mult     = 1.0
+            time_min_conf = MIN_CONF
+        elif MED_ACTIVITY_START <= hour < MED_ACTIVITY_END:
+            time_mult     = 0.75
+            time_min_conf = MIN_CONF
+        else:  # dead zone 06-12 UTC
+            time_mult     = 0.50
+            time_min_conf = 0.35
+
+        # ── Upgrade 6: streak soft trigger ───────────────────────────────────
+        recent_losses = sum(1 for w in recent_results[-3:] if not w)
+        if recent_losses >= STREAK_SOFT:
+            # Reduce size to 25%; slightly raise confidence but stay achievable
+            streak_mult     = 0.25
+            streak_min_conf = MIN_CONF + 0.05   # e.g. 0.23 — still reachable
+        else:
+            streak_mult     = 1.0
+            streak_min_conf = 0.0
+
+        effective_min_conf = max(time_min_conf, streak_min_conf)
+
+        # ── Regime branch: CHOPPY mean reversion vs TRENDING/VOLATILE ────────
+        if regime == "CHOPPY":
+            # Upgrade 2: mean reversion entry
+            bb    = float(ind["bb_pct"][i])
+            rsi   = float(ind["rsi"][i])
+            if bb < 0.15 and rsi < 40:
+                mr_direction = "YES"
+            elif bb > 0.85 and rsi > 60:
+                mr_direction = "NO"
+            else:
+                continue   # no mean reversion trigger
+
+            ens = ensemble_at(i, ind, "CHOPPY")
+            if ens["action"] == "WAIT":
+                continue
+            if ens["confidence"] < max(MIN_CONF_CHOPPY, effective_min_conf):
+                continue
+
+            direction  = mr_direction
+            tp_trade   = 0.25
+            sl_trade   = 0.20
+            size_mult  = 0.50 * time_mult * streak_mult
+            min_edge_use = MIN_EDGE_CHOPPY
+
+        else:
+            # TRENDING or VOLATILE
+            ens = ensemble_at(i, ind, regime)
+            if ens["action"] != "TRADE":
+                continue
+            if ens["confidence"] < effective_min_conf:
+                continue
+
+            direction = ens["direction"]
+            momentum  = ens["momentum"]
+
+            # Skip on strong counter-momentum
+            if direction == "YES" and momentum < -0.3:
+                continue
+            if direction == "NO"  and momentum >  0.3:
+                continue
+
+            # ── Upgrade 3a: RSI range filter ──────────────────────────────────
+            rsi = float(ind["rsi"][i])
+            if direction == "YES" and not (35 <= rsi <= 80):
+                continue
+            if direction == "NO"  and not (20 <= rsi <= 65):
+                continue
+
+            # ── Upgrade 3b: volume confirmation ───────────────────────────────
+            vol_ma10 = float(ind["vol_ma10"][i])
+            if vol_ma10 > 0 and volumes[i] < VOL_CONFIRM_RATIO * vol_ma10:
+                continue
+
+            # ── Upgrade 3c: candle body filter (remove doji) ─────────────────
+            candle_range = btc_high - btc_low
+            candle_body  = abs(btc_close - btc_open)
+            if candle_range > 0 and candle_body / candle_range < BODY_RATIO_MIN:
+                continue
+
+            # ── Upgrade 3d: price vs short-term EMA alignment ─────────────────
+            # For YES: current close must be above EMA9 (price above recent avg)
+            # For NO:  current close must be below EMA9 (price below recent avg)
+            # Uses EMA9 (9×15min = 2.25h) rather than EMA9/EMA21 crossover
+            # since 15m EMA crossovers change too slowly for single-candle trades
+            ema9 = float(ind["ema9"][i])
+            if direction == "YES" and btc_close <= ema9:
+                continue
+            if direction == "NO"  and btc_close >= ema9:
+                continue
+
+            # ── Upgrade 4: dynamic TP/SL ──────────────────────────────────────
+            if regime == "VOLATILE":
+                tp_trade  = max(tp_base, atr_pct * 15)
+                sl_trade  = max(sl_base, atr_pct * 10)
+                size_mult = 1.0 * time_mult * streak_mult
+            else:   # TRENDING
+                tp_trade  = 0.45
+                sl_trade  = 0.30
+                size_mult = 0.75 * time_mult * streak_mult
+
+            min_edge_use = MIN_EDGE
 
         candle_trades = 0
 
@@ -391,11 +574,8 @@ def run_backtest(
             if candle_trades >= MAX_POSITIONS:
                 break
 
-            # Strike is based on open price (entry BTC)
-            strike = btc_open * (1.0 + offset)
-
-            # Entry price from Black-Scholes at candle open
-            yes_entry_frac = yes_price_cents(btc_open, strike, vol) / 100.0
+            strike         = btc_open * (1.0 + offset)
+            yes_entry_frac = yes_price_cents(btc_open, strike, vol_stat) / 100.0
 
             if direction == "YES":
                 entry_frac = yes_entry_frac
@@ -404,10 +584,10 @@ def run_backtest(
                 entry_frac = 1.0 - yes_entry_frac
                 edge       = (1.0 - ens["consensus"]) - entry_frac
 
-            if edge < MIN_EDGE:
+            if edge < min_edge_use:
                 continue
 
-            bet = kelly_size(edge, entry_frac, bankroll, max_bet)
+            bet = kelly_size(edge, entry_frac, bankroll, max_bet) * size_mult
             if bet < MIN_BET:
                 continue
 
@@ -416,66 +596,58 @@ def run_backtest(
                 continue
 
             entry_cents = entry_frac * 100.0
-            cost        = contracts * entry_cents / 100.0   # actual dollars at risk
+            cost        = contracts * entry_cents / 100.0
 
-            # ── Intra-candle TP / SL using candle high / low ─────────────────
-            # YES contract rises with BTC → check TP against HIGH, SL against LOW
-            # NO  contract rises with BTC falling → check TP against LOW, SL against HIGH
-
+            # ── Intra-candle TP / SL ──────────────────────────────────────────
             if direction == "YES":
-                yes_at_best  = yes_price_cents(btc_high, strike, vol)
-                yes_at_worst = yes_price_cents(btc_low,  strike, vol)
-                contract_at_best  = yes_at_best
-                contract_at_worst = yes_at_worst
+                yes_at_best  = yes_price_cents(btc_high, strike, vol_stat)
+                yes_at_worst = yes_price_cents(btc_low,  strike, vol_stat)
+                contract_at_best, contract_at_worst = yes_at_best, yes_at_worst
             else:
-                yes_at_best  = yes_price_cents(btc_low,  strike, vol)
-                yes_at_worst = yes_price_cents(btc_high, strike, vol)
+                yes_at_best  = yes_price_cents(btc_low,  strike, vol_stat)
+                yes_at_worst = yes_price_cents(btc_high, strike, vol_stat)
                 contract_at_best  = 100.0 - yes_at_best
                 contract_at_worst = 100.0 - yes_at_worst
 
-            tp_threshold = entry_cents * (1.0 + tp)
-            sl_threshold = entry_cents * (1.0 - sl)
+            tp_threshold = entry_cents * (1.0 + tp_trade)
+            sl_threshold = entry_cents * (1.0 - sl_trade)
 
             if contract_at_best >= tp_threshold:
-                # TP hit intra-candle — sell at TP price
-                reason      = "take_profit"
-                exit_cents  = tp_threshold
-                pnl         = (exit_cents - entry_cents) * contracts / 100.0
-                pnl_pct     = pnl / cost
-
+                reason     = "take_profit"
+                exit_cents = tp_threshold
+                pnl        = (exit_cents - entry_cents) * contracts / 100.0
+                pnl_pct    = pnl / cost
             elif contract_at_worst <= sl_threshold:
-                # SL hit intra-candle — sell at SL price
-                reason      = "stop_loss"
-                exit_cents  = sl_threshold
-                pnl         = (exit_cents - entry_cents) * contracts / 100.0
-                pnl_pct     = pnl / cost
-
+                reason     = "stop_loss"
+                exit_cents = sl_threshold
+                pnl        = (exit_cents - entry_cents) * contracts / 100.0
+                pnl_pct    = pnl / cost
             else:
-                # Contract expires at candle close — binary resolution
-                if direction == "YES":
-                    won = btc_close >= strike
-                else:
-                    won = btc_close < strike
-
+                won = (btc_close >= strike) if direction == "YES" else (btc_close < strike)
                 reason     = "expired"
                 exit_cents = 100.0 if won else 0.0
-
-                if won:
-                    # Receive $1 per contract, subtract cost
-                    pnl     = contracts * (100.0 - entry_cents) / 100.0
-                else:
-                    # Lose entire stake
-                    pnl     = -cost
-                pnl_pct = pnl / cost
+                pnl        = contracts * (100.0 - entry_cents) / 100.0 if won else -cost
+                pnl_pct    = pnl / cost
 
             if pnl < 0:
                 daily_loss[day] = daily_loss.get(day, 0.0) + abs(pnl)
-            bankroll        += pnl
-            equity_vals[-1]  = bankroll
+            bankroll       += pnl
+            equity_vals[-1] = bankroll
+
+            # ── Streak tracking ───────────────────────────────────────────────
+            recent_results.append(pnl > 0)
+            if len(recent_results) > 5:
+                recent_results.pop(0)
+
+            # Hard pause after 5 consecutive losses; clear streak so it doesn't
+            # re-trigger immediately on the next trade after the pause ends
+            if len(recent_results) == 5 and not any(recent_results):
+                pause_candles = 2
+                recent_results.clear()
 
             trades.append(Trade(
                 entry_time          = ts,
-                exit_time           = ts,   # same 15-min candle
+                exit_time           = ts,
                 direction           = direction,
                 strike_price        = round(strike, 2),
                 entry_price         = round(entry_cents, 2),
@@ -485,12 +657,13 @@ def run_backtest(
                 pnl_dollars         = round(pnl, 4),
                 pnl_pct             = round(pnl_pct * 100.0, 2),
                 exit_reason         = reason,
-                momentum_at_entry   = round(momentum, 4),
+                momentum_at_entry   = round(ens["momentum"], 4),
                 confidence_at_entry = round(ens["confidence"], 4),
                 edge_at_entry       = round(edge, 4),
                 btc_price_at_entry  = round(btc_open, 2),
                 hold_candles        = 1,
                 peak_pnl_pct        = round(max(pnl_pct * 100.0, 0.0), 2),
+                regime              = regime,
             ))
 
             candle_trades += 1
@@ -564,6 +737,17 @@ def compute_metrics(
     for v in monthly.values():
         v["win_rate"] = v["wins"] / v["trades"] * 100 if v["trades"] else 0.0
 
+    # Regime breakdown
+    regime_stats: dict[str, dict] = {}
+    for r in ("VOLATILE", "TRENDING", "CHOPPY"):
+        rt = [t for t in trades if t.regime == r]
+        regime_stats[r] = {
+            "count":    len(rt),
+            "pct":      round(len(rt) / n * 100, 1) if n else 0.0,
+            "win_rate": round(sum(1 for t in rt if t.pnl_dollars > 0) / len(rt) * 100, 1) if rt else 0.0,
+            "pnl":      round(sum(t.pnl_dollars for t in rt), 2),
+        }
+
     return {
         "total_trades":    n,
         "win_rate":        round(win_rate,    2),
@@ -571,20 +755,21 @@ def compute_metrics(
         "return_pct":      round(total_pnl / starting_bankroll * 100, 2),
         "max_drawdown":    round(max_dd, 2),
         "sharpe_ratio":    round(sharpe, 4),
-        "profit_factor":   round(profit_factor, 4) if profit_factor != float("inf") else "∞",
+        "profit_factor":   round(profit_factor, 4) if profit_factor != float("inf") else "inf",
         "avg_win":         round(avg_win,  4),
         "avg_loss":        round(avg_loss, 4),
         "avg_win_pct":     round(np.mean(win_pcts)  if win_pcts  else 0.0, 2),
         "avg_loss_pct":    round(np.mean(loss_pcts) if loss_pcts else 0.0, 2),
         "best_trade":      round(best,  4),
         "worst_trade":     round(worst, 4),
-        "avg_hold_min":    round(float(avg_hold), 1),
+        "avg_hold_min":    15.0,
         "exit_reasons":    reasons,
         "yes_count":       len(yes_t),
         "no_count":        len(no_t),
         "yes_win_rate":    round(yes_wr, 2),
         "no_win_rate":     round(no_wr,  2),
         "monthly":         monthly,
+        "regime_stats":    regime_stats,
     }
 
 
@@ -645,6 +830,11 @@ def print_report(
 {rl('take_profit', 'Take profit:')}
 {rl('stop_loss',   'Stop loss:')}
 {rl('expired',     'Expired (binary):')}
+{SEP}
+  REGIME BREAKDOWN
+  VOLATILE:  {m['regime_stats']['VOLATILE']['count']:>5} trades  {m['regime_stats']['VOLATILE']['pct']:>5.1f}%  WR:{m['regime_stats']['VOLATILE']['win_rate']:>5.1f}%  P&L:${m['regime_stats']['VOLATILE']['pnl']:>+9.2f}
+  TRENDING:  {m['regime_stats']['TRENDING']['count']:>5} trades  {m['regime_stats']['TRENDING']['pct']:>5.1f}%  WR:{m['regime_stats']['TRENDING']['win_rate']:>5.1f}%  P&L:${m['regime_stats']['TRENDING']['pnl']:>+9.2f}
+  CHOPPY:    {m['regime_stats']['CHOPPY']['count']:>5} trades  {m['regime_stats']['CHOPPY']['pct']:>5.1f}%  WR:{m['regime_stats']['CHOPPY']['win_rate']:>5.1f}%  P&L:${m['regime_stats']['CHOPPY']['pnl']:>+9.2f}
 {SEP}
   DIRECTION BREAKDOWN
   YES trades:      {m['yes_count']}  |  WR: {m['yes_win_rate']:.1f}%

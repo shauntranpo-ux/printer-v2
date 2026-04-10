@@ -72,10 +72,12 @@ class TradingBot:
         )
 
         # Tickers the ensemble returned WAIT on — re-evaluate next cycle
-        # Maps ticker → Unix timestamp of when it was added to the wait list
         self._wait_list: dict[str, float] = {}
         # Current UTC date string — used to detect midnight for daily summary
         self._last_day: str = ""
+        # Streak protection: track last 5 trade outcomes (True=win)
+        self._recent_results: list[bool] = []
+        self._pause_cycles: int = 0        # cycles to skip after 5-loss streak
 
     # ------------------------------------------------------------------
     # Startup sequence
@@ -227,11 +229,29 @@ class TradingBot:
         print(f"=== CYCLE START === {cycle_start.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         log.info("--- Cycle %s ---", cycle_start.strftime("%Y-%m-%d %H:%M:%S UTC"))
 
-        # Step 1 — exits
+        # Step 1 — exits (update streak from closed trades)
         open_trades = await self.db.get_open_trades()
         if open_trades:
-            await self.strategy.check_exits(open_trades)
-            open_trades = await self.db.get_open_trades()   # refresh post-close
+            closed = await self.strategy.check_exits(open_trades)
+            for t in closed:
+                if t.pnl_dollars is not None:
+                    self._recent_results.append(t.pnl_dollars > 0)
+                    if len(self._recent_results) > 5:
+                        self._recent_results.pop(0)
+                    if len(self._recent_results) == 5 and not any(self._recent_results):
+                        self._pause_cycles = 2
+                        log.warning("5 loss streak — pausing 2 cycles")
+                        await self.telegram.send_error(
+                            "5 consecutive losses detected — pausing trading for 2 cycles",
+                            "Loss streak protection",
+                        )
+            open_trades = await self.db.get_open_trades()
+
+        # Streak hard pause
+        if self._pause_cycles > 0:
+            self._pause_cycles -= 1
+            log.info("Loss streak pause: %d cycles remaining", self._pause_cycles + 1)
+            return
 
         # Step 2 — position limit
         if not await self.strategy.can_open_position():
@@ -313,6 +333,28 @@ class TradingBot:
             log.info("Waited market %s no longer available — clearing", ticker)
             self._wait_list.pop(ticker, None)
 
+        # ── Time-based size multiplier (Upgrade 7) ───────────────────────────
+        hour = cycle_start.hour
+        if settings.RESPECT_TIME_FILTERS:
+            if 13 <= hour < 21:          # US hours — full size
+                time_mult = 1.0
+            elif 0 <= hour < 4:          # Asia hours — 75%
+                time_mult = 0.75
+            else:                        # dead zone — 50%
+                time_mult = 0.50
+        else:
+            time_mult = 1.0
+
+        # ── Streak soft multiplier (Upgrade 6) ────────────────────────────────
+        recent_losses = sum(1 for w in self._recent_results[-3:] if not w)
+        if recent_losses >= 3:
+            streak_mult = 0.25
+            log.warning("Loss streak protection: bet size at 25%%")
+        else:
+            streak_mult = 1.0
+
+        size_mult = time_mult * streak_mult
+
         # Re-evaluate waited markets
         for ticker in list(waited_tickers & market_by_ticker.keys()):
             self._wait_list.pop(ticker, None)
@@ -320,7 +362,8 @@ class TradingBot:
                 continue
             log.info("Re-evaluating waited market %s", ticker)
             await self._evaluate_market(
-                market_by_ticker[ticker], btc_price, momentum, ohlcv, open_tickers
+                market_by_ticker[ticker], btc_price, momentum, ohlcv,
+                open_tickers, size_mult,
             )
 
         # Evaluate remaining new markets
@@ -329,7 +372,7 @@ class TradingBot:
             if ticker in open_tickers or ticker in waited_tickers:
                 continue
             await self._evaluate_market(
-                market, btc_price, momentum, ohlcv, open_tickers
+                market, btc_price, momentum, ohlcv, open_tickers, size_mult,
             )
 
     # ------------------------------------------------------------------
@@ -343,6 +386,7 @@ class TradingBot:
         momentum:     float,
         ohlcv:        list,
         open_tickers: set[str],
+        size_mult:    float = 1.0,
     ) -> None:
         ticker = market["ticker"]
 
@@ -487,8 +531,9 @@ class TradingBot:
             market,
             result,
             gate_result,
-            btc_price    = btc_price,
-            btc_momentum = momentum,
+            btc_price        = btc_price,
+            btc_momentum     = momentum,
+            size_multiplier  = size_mult,
         )
         if trade:
             log.info(

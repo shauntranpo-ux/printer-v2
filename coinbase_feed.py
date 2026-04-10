@@ -68,7 +68,7 @@ class CoinbaseFeed:
         # ---- Public state (per spec) ----
         self.current_price: float = 0.0
         self.last_update:   datetime | None = None
-        self.candles:       deque[Candle] = deque(maxlen=20)
+        self.candles:       deque[Candle] = deque(maxlen=25)
         self.current_candle: dict = {}       # open/high/low/close/volume/timestamp
 
         # ---- Private bookkeeping ----

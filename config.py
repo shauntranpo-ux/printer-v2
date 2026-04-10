@@ -96,6 +96,14 @@ class Settings(BaseSettings):
     DASHBOARD_HOST: str = Field(default="0.0.0.0", description="Flask dashboard bind host")
 
     # ------------------------------------------------------------------
+    # Market filters
+    # ------------------------------------------------------------------
+    RESPECT_TIME_FILTERS: bool = Field(
+        default=True,
+        description="Apply UTC time-based bet sizing (high/medium/low activity windows)",
+    )
+
+    # ------------------------------------------------------------------
     # Field-level validators
     # ------------------------------------------------------------------
 
