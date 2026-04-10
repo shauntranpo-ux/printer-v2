@@ -1,0 +1,991 @@
+"""
+backtest.py — Backtest printer-v2 strategy on historical BTC 1m data.
+
+Usage:
+    python backtest.py --file btc_1m_data.xlsx
+    python backtest.py --file data.csv --start 2020-01-01 --end 2023-12-31
+    python backtest.py --file data.csv --bankroll 500 --max-bet 25 --tp 0.30 --sl 0.15
+
+Dependencies (pip install if missing):
+    pandas openpyxl scipy matplotlib numpy
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import matplotlib
+matplotlib.use("Agg")          # non-interactive — safe on headless servers
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from scipy.stats import norm
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Strategy constants  (mirrors printer-v2 defaults)
+# ─────────────────────────────────────────────────────────────────────────────
+
+DEFAULT_BANKROLL       = 500.0
+DEFAULT_MAX_BET        = 25.0
+DEFAULT_TP             = 0.30   # take profit at +30 %
+DEFAULT_SL             = 0.15   # stop loss at -15 %
+TRAILING_LOCK          = 0.15   # activate trailing stop after +15 % peak
+TRAILING_EXIT          = 0.08   # exit trailing stop below +8 %
+MIN_EDGE               = 0.05
+MIN_CONF               = 0.55
+MAX_SPREAD             = 0.35
+CONF_DECAY_THRESH      = 0.40
+MAX_POSITIONS          = 3
+DAILY_LOSS_LIMIT       = 100.0
+KELLY_FRACTION         = 0.5
+MIN_BET                = 1.0
+MAX_HOLD_CANDLES       = 4      # 4 × 15 min = 60 min max hold
+STRIKE_OFFSETS         = [+0.005, 0.0, -0.005]   # +0.5 %, flat, -0.5 %
+
+MODEL_WEIGHTS = {"claude": 0.30, "gpt": 0.25, "gemini": 0.25, "deepseek": 0.20}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data classes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class Trade:
+    entry_time:          datetime
+    exit_time:           datetime
+    direction:           str       # "YES" | "NO"
+    strike_price:        float
+    entry_price:         float     # cents
+    exit_price:          float     # cents
+    bet_size:            float
+    contracts:           int
+    pnl_dollars:         float
+    pnl_pct:             float
+    exit_reason:         str
+    momentum_at_entry:   float
+    confidence_at_entry: float
+    edge_at_entry:       float
+    btc_price_at_entry:  float
+    hold_candles:        int
+    peak_pnl_pct:        float
+
+
+@dataclass
+class Position:
+    entry_idx:           int
+    entry_time:          datetime
+    direction:           str
+    strike_price:        float
+    entry_price_cents:   float
+    bet_size:            float
+    contracts:           int
+    peak_pnl_pct:        float
+    momentum_at_entry:   float
+    confidence_at_entry: float
+    edge_at_entry:       float
+    btc_price_at_entry:  float
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1 · Data loading + resampling
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_and_resample(
+    file_path: str,
+    start: Optional[str] = None,
+    end:   Optional[str] = None,
+) -> pd.DataFrame:
+    path = Path(file_path)
+    print(f"Loading {path.name} …")
+
+    if path.suffix.lower() in (".xlsx", ".xls"):
+        df = pd.read_excel(path)
+    else:
+        df = pd.read_csv(path)
+
+    df.columns = [c.lower().strip() for c in df.columns]
+
+    # Convert unix timestamp → UTC datetime
+    if pd.api.types.is_numeric_dtype(df["time"]):
+        df["dt"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    else:
+        df["dt"] = pd.to_datetime(df["time"], utc=True)
+
+    df = df.set_index("dt")[["open", "high", "low", "close", "volume"]].astype(float)
+
+    print(f"  1m rows: {len(df):,}  ({df.index[0].date()} → {df.index[-1].date()})")
+
+    # Resample 1m → 15m
+    df15 = df.resample("15min").agg(
+        open   = ("open",   "first"),
+        high   = ("high",   "max"),
+        low    = ("low",    "min"),
+        close  = ("close",  "last"),
+        volume = ("volume", "sum"),
+    ).dropna()
+
+    # Drop zero/missing volume candles
+    df15 = df15[df15["volume"] > 0]
+
+    if start:
+        df15 = df15[df15.index >= pd.Timestamp(start, tz="UTC")]
+    if end:
+        df15 = df15[df15.index <= pd.Timestamp(end, tz="UTC")]
+
+    print(f"  15m candles: {len(df15):,}  ({df15.index[0].date()} → {df15.index[-1].date()})")
+    return df15.reset_index()   # 'dt' becomes a regular column
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2 · Precompute all indicators (vectorised — runs once before the main loop)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_indicators(df: pd.DataFrame) -> dict[str, np.ndarray]:
+    """
+    Return arrays of equal length to df for every indicator used by the
+    ensemble and by the market-pricing formula.
+    """
+    c = df["close"]
+    o = df["open"]
+    v = df["volume"]
+    n = len(df)
+
+    # ── Log returns ──────────────────────────────────────────────────────────
+    log_ret = np.log(c / c.shift(1)).fillna(0.0).values
+
+    # ── Rolling volatility (20-candle std of log returns) ────────────────────
+    roll_vol = (
+        pd.Series(log_ret).rolling(20, min_periods=2).std().fillna(0.01).values
+    )
+
+    # ── RSI-14 ───────────────────────────────────────────────────────────────
+    delta = c.diff().fillna(0.0)
+    gain  = delta.clip(lower=0.0).rolling(14, min_periods=1).mean()
+    loss  = (-delta.clip(upper=0.0)).rolling(14, min_periods=1).mean()
+    rs    = gain / loss.replace(0.0, np.nan)
+    rsi   = (100.0 - 100.0 / (1.0 + rs)).fillna(50.0).values
+
+    # ── MACD (12/26/9) ────────────────────────────────────────────────────────
+    ema12        = c.ewm(span=12, adjust=False).mean()
+    ema26        = c.ewm(span=26, adjust=False).mean()
+    macd_line    = (ema12 - ema26).values
+    signal_line  = pd.Series(macd_line).ewm(span=9, adjust=False).mean().values
+    macd_above   = (macd_line > signal_line).astype(float)  # 1=bullish
+
+    # ── Bollinger band %B (20-period, 2σ) ────────────────────────────────────
+    sma20   = c.rolling(20, min_periods=2).mean()
+    std20   = c.rolling(20, min_periods=2).std().fillna(0.0)
+    bb_up   = sma20 + 2.0 * std20
+    bb_lo   = sma20 - 2.0 * std20
+    bb_pct  = ((c - bb_lo) / (bb_up - bb_lo).replace(0.0, np.nan)).fillna(0.5)
+    bb_pct  = bb_pct.clip(0.0, 1.0).values
+
+    # ── Momentum — exact coinbase_feed.py formula ─────────────────────────────
+    # Direction: recency-weighted (0.1/0.2/0.3/0.4) tanh of body %
+    body_pct  = np.tanh((c - o) / o.replace(0.0, np.nan) * 100.0).fillna(0.0)
+    dir_score = (
+        body_pct.shift(3).fillna(0.0) * 0.1
+        + body_pct.shift(2).fillna(0.0) * 0.2
+        + body_pct.shift(1).fillna(0.0) * 0.3
+        + body_pct                       * 0.4
+    ).values  # weights already sum to 1.0
+
+    # Velocity: tanh of 4-candle price change
+    c4     = c.shift(4).replace(0.0, np.nan)
+    vel    = np.tanh((c - c4) / c4 * 100.0).fillna(0.0).values
+
+    # Volume confirmation
+    mean_v4   = v.rolling(4, min_periods=1).mean().replace(0.0, np.nan)
+    vol_ratio = (v / mean_v4 - 1.0).fillna(0.0)
+    dir_sign  = np.where(dir_score >= 0, 1.0, -1.0)
+    vol_fac   = (np.tanh(vol_ratio.values) * dir_sign)
+
+    momentum = np.clip(0.40 * dir_score + 0.40 * vel + 0.20 * vol_fac, -1.0, 1.0)
+
+    return {
+        "log_ret":   log_ret,
+        "vol":       roll_vol,       # rolling 20-candle std of returns
+        "rsi":       rsi,
+        "macd_abv":  macd_above,
+        "bb_pct":    bb_pct,
+        "momentum":  momentum,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3 · Rule-based ensemble (proxy for 4-model AI debate)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def ensemble_at(i: int, ind: dict[str, np.ndarray]) -> dict:
+    """
+    Return ensemble signal dict for candle index i.
+    Mirrors the real ensemble's output structure used by runner.py.
+    """
+    momentum  = float(ind["momentum"][i])
+    rsi       = float(ind["rsi"][i])
+    macd_abv  = float(ind["macd_abv"][i])   # 1 = bullish, 0 = bearish
+    bb_pct    = float(ind["bb_pct"][i])      # 0=lower, 1=upper band
+
+    # ── Claude: momentum-based (neutral) ─────────────────────────────────────
+    if   momentum >  0.3:  claude = 0.68
+    elif momentum >  0.1:  claude = 0.57
+    elif momentum < -0.3:  claude = 0.32
+    elif momentum < -0.1:  claude = 0.43
+    else:                  claude = 0.50
+
+    # ── GPT: RSI-based (bullish lens) ────────────────────────────────────────
+    if   rsi > 70:  gpt = 0.72
+    elif rsi > 60:  gpt = 0.65
+    elif rsi < 30:  gpt = 0.38
+    elif rsi < 40:  gpt = 0.35
+    else:           gpt = 0.50
+
+    # ── Gemini: MACD-based (bearish lens) ────────────────────────────────────
+    gemini = (0.60 if macd_abv else 0.34)   # slight bearish lean built in
+
+    # ── DeepSeek: Bollinger-based (risk manager) ─────────────────────────────
+    if   bb_pct < 0.20:  deepseek = 0.67
+    elif bb_pct < 0.40:  deepseek = 0.57
+    elif bb_pct > 0.80:  deepseek = 0.33
+    elif bb_pct > 0.60:  deepseek = 0.43
+    else:                deepseek = 0.50
+
+    probs = {"claude": claude, "gpt": gpt, "gemini": gemini, "deepseek": deepseek}
+
+    # Weighted consensus (renormalised to sum of weights)
+    total_w   = sum(MODEL_WEIGHTS.values())
+    consensus = sum(p * MODEL_WEIGHTS[m] for m, p in probs.items()) / total_w
+    spread    = max(probs.values()) - min(probs.values())
+
+    # Confidence = avg absolute distance from 0.5, penalised if spread > 0.20
+    avg_conf   = sum(abs(p - 0.5) * 2.0 for p in probs.values()) / len(probs)
+    confidence = avg_conf * 0.8 if spread > 0.20 else avg_conf
+
+    if   spread    > MAX_SPREAD:  action = "WAIT"
+    elif confidence < MIN_CONF:   action = "SKIP"
+    else:                         action = "TRADE"
+
+    return {
+        "consensus":  consensus,
+        "confidence": confidence,
+        "spread":     spread,
+        "action":     action,
+        "direction":  "YES" if consensus > 0.5 else "NO",
+        "momentum":   momentum,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4 · Market pricing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def yes_price_cents(btc: float, strike: float, vol: float,
+                    time_fraction: float = 1.0) -> float:
+    """
+    Black-Scholes-inspired probability for 'BTC above strike'.
+    time_fraction: 1.0 = full period remaining, 0.0 = at expiry.
+    Returns a price in cents [5, 95].
+    """
+    if vol <= 0.0:
+        vol = 0.001
+    adj_vol = vol * max(time_fraction, 0.001) ** 0.5
+    distance = (strike - btc) / btc
+    prob = float(norm.cdf(-distance / adj_vol))
+    return max(5.0, min(95.0, prob * 100.0))
+
+
+def current_price_cents(
+    btc: float, strike: float, vol: float,
+    direction: str, candles_remaining: int,
+) -> float:
+    """Mid-life re-pricing accounting for time decay."""
+    if candles_remaining <= 0:
+        raw = 100.0 if btc >= strike else 0.0
+        if direction == "NO":
+            raw = 100.0 - raw
+        return raw
+    tf  = candles_remaining / MAX_HOLD_CANDLES
+    yp  = yes_price_cents(btc, strike, vol, tf)
+    return yp if direction == "YES" else (100.0 - yp)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5 · Kelly sizing
+# ─────────────────────────────────────────────────────────────────────────────
+
+def kelly_size(edge: float, mkt_p: float, bankroll: float, max_bet: float) -> float:
+    """Return bet size in dollars (rounded to nearest $0.50)."""
+    if mkt_p <= 0.0 or mkt_p >= 1.0 or edge <= 0.0:
+        return 0.0
+    odds      = (1.0 - mkt_p) / mkt_p
+    kelly_pct = (edge / odds) * KELLY_FRACTION
+    if kelly_pct <= 0.0:
+        return 0.0
+    raw  = kelly_pct * bankroll
+    size = min(raw, max_bet)
+    size = math.floor(size / 0.5) * 0.5
+    return size if size >= MIN_BET else 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6 · Main backtest loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_backtest(
+    df:  pd.DataFrame,
+    ind: dict[str, np.ndarray],
+    args: argparse.Namespace,
+) -> tuple[list[Trade], pd.Series]:
+    bankroll  = args.bankroll
+    max_bet   = args.max_bet
+    tp        = args.tp
+    sl        = args.sl
+
+    closes    = df["close"].values
+    times     = df["dt"].values          # numpy datetime64
+    n         = len(df)
+
+    trades:      list[Trade]    = []
+    positions:   list[Position] = []
+    equity_vals: list[float]    = []     # one per candle
+    daily_loss:  dict           = {}     # date-str → cumulative loss $
+
+    WARMUP = 30   # candles needed before indicators are reliable
+
+    for i in range(n):
+        ts = pd.Timestamp(times[i]).to_pydatetime()
+        equity_vals.append(bankroll)
+
+        if i < WARMUP:
+            continue
+
+        btc = closes[i]
+        vol = max(float(ind["vol"][i]), 0.001)
+        day = ts.date().isoformat()
+
+        # ── A. Check exits ───────────────────────────────────────────────────
+        keep: list[Position] = []
+        for pos in positions:
+            candles_held      = i - pos.entry_idx
+            candles_remaining = MAX_HOLD_CANDLES - candles_held
+
+            # Re-price the contract at current BTC and time
+            cur_cents = current_price_cents(
+                btc, pos.strike_price, vol, pos.direction, candles_remaining
+            )
+            cur_cents = max(1.0, min(99.0, cur_cents))
+
+            pnl_pct = (cur_cents - pos.entry_price_cents) / pos.entry_price_cents
+
+            # Update peak
+            if pnl_pct > pos.peak_pnl_pct:
+                pos.peak_pnl_pct = pnl_pct
+
+            reason: Optional[str] = None
+
+            # 1. Max hold → binary expiry
+            if candles_remaining <= 0:
+                if pos.direction == "YES":
+                    cur_cents = 100.0 if btc >= pos.strike_price else 0.0
+                else:
+                    cur_cents = 100.0 if btc <  pos.strike_price else 0.0
+                pnl_pct = (cur_cents - pos.entry_price_cents) / pos.entry_price_cents
+                reason = "expired"
+
+            # 2. Take profit
+            elif pnl_pct >= tp:
+                reason = "take_profit"
+
+            # 3. Trailing stop
+            elif pos.peak_pnl_pct >= TRAILING_LOCK and pnl_pct < TRAILING_EXIT:
+                reason = "trailing_stop"
+
+            # 4. Stop loss
+            elif pnl_pct <= -sl:
+                reason = "stop_loss"
+
+            # 5. Confidence decay (re-evaluate ensemble)
+            elif candles_held >= 1:
+                re_ens = ensemble_at(i, ind)
+                if re_ens["confidence"] < CONF_DECAY_THRESH:
+                    reason = "conf_decay"
+
+            if reason:
+                pnl = (cur_cents - pos.entry_price_cents) * pos.contracts / 100.0
+                if pnl < 0:
+                    daily_loss[day] = daily_loss.get(day, 0.0) + abs(pnl)
+                bankroll += pnl
+                equity_vals[-1] = bankroll  # update the already-appended value
+
+                trades.append(Trade(
+                    entry_time          = pos.entry_time,
+                    exit_time           = ts,
+                    direction           = pos.direction,
+                    strike_price        = round(pos.strike_price, 2),
+                    entry_price         = round(pos.entry_price_cents, 2),
+                    exit_price          = round(cur_cents, 2),
+                    bet_size            = round(pos.bet_size, 2),
+                    contracts           = pos.contracts,
+                    pnl_dollars         = round(pnl, 4),
+                    pnl_pct             = round(pnl_pct * 100.0, 2),
+                    exit_reason         = reason,
+                    momentum_at_entry   = round(pos.momentum_at_entry, 4),
+                    confidence_at_entry = round(pos.confidence_at_entry, 4),
+                    edge_at_entry       = round(pos.edge_at_entry, 4),
+                    btc_price_at_entry  = round(pos.btc_price_at_entry, 2),
+                    hold_candles        = candles_held,
+                    peak_pnl_pct        = round(pos.peak_pnl_pct * 100.0, 2),
+                ))
+            else:
+                keep.append(pos)
+
+        positions = keep
+
+        # ── B. Entry checks ──────────────────────────────────────────────────
+        if len(positions) >= MAX_POSITIONS:
+            continue
+        if daily_loss.get(day, 0.0) >= DAILY_LOSS_LIMIT:
+            continue
+
+        ens = ensemble_at(i, ind)
+        if ens["action"] != "TRADE":
+            continue
+
+        direction = ens["direction"]       # "YES" | "NO"
+        momentum  = ens["momentum"]
+
+        # Momentum confirmation (matches runner.py)
+        if direction == "YES" and momentum < -0.1:
+            continue
+        if direction == "NO"  and momentum >  0.1:
+            continue
+
+        # Evaluate 3 strike prices; stop when we hit MAX_POSITIONS
+        for offset in STRIKE_OFFSETS:
+            if len(positions) >= MAX_POSITIONS:
+                break
+
+            strike  = btc * (1.0 + offset)
+            yes_p   = yes_price_cents(btc, strike, vol) / 100.0   # fraction
+
+            if direction == "YES":
+                mkt_p_frac = yes_p
+                edge       = ens["consensus"] - mkt_p_frac
+            else:
+                mkt_p_frac = 1.0 - yes_p
+                edge       = (1.0 - ens["consensus"]) - mkt_p_frac
+
+            if edge < MIN_EDGE:
+                continue
+
+            bet = kelly_size(edge, mkt_p_frac, bankroll, max_bet)
+            if bet < MIN_BET:
+                continue
+
+            contracts = int(bet / mkt_p_frac)
+            if contracts < 1:
+                continue
+
+            positions.append(Position(
+                entry_idx           = i,
+                entry_time          = ts,
+                direction           = direction,
+                strike_price        = strike,
+                entry_price_cents   = mkt_p_frac * 100.0,
+                bet_size            = bet,
+                contracts           = contracts,
+                peak_pnl_pct        = 0.0,
+                momentum_at_entry   = momentum,
+                confidence_at_entry = ens["confidence"],
+                edge_at_entry       = edge,
+                btc_price_at_entry  = btc,
+            ))
+
+    # ── Force-close any remaining positions at end of data ──────────────────
+    last_btc = closes[-1]
+    last_ts  = pd.Timestamp(times[-1]).to_pydatetime()
+    for pos in positions:
+        if pos.direction == "YES":
+            fin = 100.0 if last_btc >= pos.strike_price else 0.0
+        else:
+            fin = 100.0 if last_btc <  pos.strike_price else 0.0
+        pnl = (fin - pos.entry_price_cents) * pos.contracts / 100.0
+        bankroll += pnl
+        candles_held = n - 1 - pos.entry_idx
+        pnl_pct = (fin - pos.entry_price_cents) / pos.entry_price_cents
+        trades.append(Trade(
+            entry_time          = pos.entry_time,
+            exit_time           = last_ts,
+            direction           = pos.direction,
+            strike_price        = round(pos.strike_price, 2),
+            entry_price         = round(pos.entry_price_cents, 2),
+            exit_price          = round(fin, 2),
+            bet_size            = round(pos.bet_size, 2),
+            contracts           = pos.contracts,
+            pnl_dollars         = round(pnl, 4),
+            pnl_pct             = round(pnl_pct * 100.0, 2),
+            exit_reason         = "expired",
+            momentum_at_entry   = round(pos.momentum_at_entry, 4),
+            confidence_at_entry = round(pos.confidence_at_entry, 4),
+            edge_at_entry       = round(pos.edge_at_entry, 4),
+            btc_price_at_entry  = round(pos.btc_price_at_entry, 2),
+            hold_candles        = candles_held,
+            peak_pnl_pct        = round(pos.peak_pnl_pct * 100.0, 2),
+        ))
+
+    equity_series = pd.Series(equity_vals, index=df["dt"])
+    return trades, equity_series
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7 · Metrics
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_metrics(
+    trades: list[Trade],
+    equity: pd.Series,
+    starting_bankroll: float,
+) -> dict:
+    if not trades:
+        return {}
+
+    pnls   = [t.pnl_dollars for t in trades]
+    wins   = [p for p in pnls if p > 0]
+    losses = [p for p in pnls if p <= 0]
+    n      = len(trades)
+
+    win_rate     = len(wins) / n * 100
+    total_pnl    = sum(pnls)
+    avg_win      = sum(wins)   / len(wins)   if wins   else 0.0
+    avg_loss     = sum(losses) / len(losses) if losses else 0.0
+    best         = max(pnls)
+    worst        = min(pnls)
+    gross_profit = sum(wins)
+    gross_loss   = abs(sum(losses))
+    profit_factor = gross_profit / gross_loss if gross_loss else float("inf")
+
+    arr = np.array(pnls)
+    sharpe = float(arr.mean() / arr.std(ddof=1)) if arr.std(ddof=1) > 0 else 0.0
+
+    # Max drawdown from equity curve
+    eq    = equity.values
+    peak  = np.maximum.accumulate(eq)
+    dd    = (peak - eq) / np.where(peak > 0, peak, 1.0) * 100.0
+    max_dd = float(dd.max())
+
+    avg_hold = np.mean([t.hold_candles * 15 for t in trades])
+
+    win_pcts  = [t.pnl_pct for t in trades if t.pnl_dollars > 0]
+    loss_pcts = [t.pnl_pct for t in trades if t.pnl_dollars <= 0]
+
+    # Exit breakdown
+    reasons: dict[str, int] = {}
+    for t in trades:
+        reasons[t.exit_reason] = reasons.get(t.exit_reason, 0) + 1
+
+    # Direction breakdown
+    yes_t  = [t for t in trades if t.direction == "YES"]
+    no_t   = [t for t in trades if t.direction == "NO"]
+    yes_wr = sum(1 for t in yes_t if t.pnl_dollars > 0) / len(yes_t) * 100 if yes_t else 0.0
+    no_wr  = sum(1 for t in no_t  if t.pnl_dollars > 0) / len(no_t)  * 100 if no_t  else 0.0
+
+    # Monthly breakdown
+    monthly: dict[str, dict] = {}
+    for t in trades:
+        key = t.entry_time.strftime("%Y-%m")
+        if key not in monthly:
+            monthly[key] = {"trades": 0, "wins": 0, "pnl": 0.0}
+        monthly[key]["trades"] += 1
+        if t.pnl_dollars > 0:
+            monthly[key]["wins"] += 1
+        monthly[key]["pnl"] += t.pnl_dollars
+    for v in monthly.values():
+        v["win_rate"] = v["wins"] / v["trades"] * 100 if v["trades"] else 0.0
+
+    return {
+        "total_trades":    n,
+        "win_rate":        round(win_rate,    2),
+        "total_pnl":       round(total_pnl,   4),
+        "return_pct":      round(total_pnl / starting_bankroll * 100, 2),
+        "max_drawdown":    round(max_dd, 2),
+        "sharpe_ratio":    round(sharpe, 4),
+        "profit_factor":   round(profit_factor, 4) if profit_factor != float("inf") else "∞",
+        "avg_win":         round(avg_win,  4),
+        "avg_loss":        round(avg_loss, 4),
+        "avg_win_pct":     round(np.mean(win_pcts)  if win_pcts  else 0.0, 2),
+        "avg_loss_pct":    round(np.mean(loss_pcts) if loss_pcts else 0.0, 2),
+        "best_trade":      round(best,  4),
+        "worst_trade":     round(worst, 4),
+        "avg_hold_min":    round(float(avg_hold), 1),
+        "exit_reasons":    reasons,
+        "yes_count":       len(yes_t),
+        "no_count":        len(no_t),
+        "yes_win_rate":    round(yes_wr, 2),
+        "no_win_rate":     round(no_wr,  2),
+        "monthly":         monthly,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8 · Console report
+# ─────────────────────────────────────────────────────────────────────────────
+
+def print_report(
+    m:                 dict,
+    df:                pd.DataFrame,
+    starting_bankroll: float,
+) -> None:
+    n  = m["total_trades"]
+    rs = m["exit_reasons"]
+
+    def rl(key, label):
+        cnt = rs.get(key, 0)
+        pct = cnt / n * 100 if n else 0.0
+        return f"  {label:<16} {cnt:>5}  ({pct:>5.1f}%)"
+
+    monthly  = m["monthly"]
+    m_lines  = "\n".join(
+        f"  {k}:  {v['trades']:>4} trades | {v['win_rate']:>5.1f}% WR | "
+        f"${v['pnl']:>+9.2f}"
+        for k, v in sorted(monthly.items())
+    )
+    best_m  = max(monthly, key=lambda k: monthly[k]["pnl"]) if monthly else "—"
+    worst_m = min(monthly, key=lambda k: monthly[k]["pnl"]) if monthly else "—"
+    best_p  = monthly[best_m]["pnl"]  if best_m  != "—" else 0.0
+    worst_p = monthly[worst_m]["pnl"] if worst_m != "—" else 0.0
+
+    SEP = "═" * 47
+
+    print(f"""
+{SEP}
+        PRINTER V2 BACKTEST RESULTS
+{SEP}
+  Period:          {df['dt'].iloc[0].date()} to {df['dt'].iloc[-1].date()}
+  Total candles:   {len(df):,}
+  Total trades:    {n}
+{SEP}
+  PERFORMANCE
+  Win rate:        {m['win_rate']:.1f}%
+  Total P&L:       ${m['total_pnl']:+.2f}
+  Return:          {m['return_pct']:+.2f}% on starting ${starting_bankroll:.0f}
+  Max drawdown:    {m['max_drawdown']:.2f}%
+  Sharpe ratio:    {m['sharpe_ratio']:.3f}
+  Profit factor:   {m['profit_factor']}
+{SEP}
+  TRADE BREAKDOWN
+  Avg win:         ${m['avg_win']:+.2f}  ({m['avg_win_pct']:+.1f}%)
+  Avg loss:        ${m['avg_loss']:+.2f}  ({m['avg_loss_pct']:+.1f}%)
+  Best trade:      ${m['best_trade']:+.2f}
+  Worst trade:     ${m['worst_trade']:+.2f}
+  Avg hold time:   {m['avg_hold_min']:.0f} minutes
+{SEP}
+  EXIT REASONS
+{rl('take_profit',   'Take profit:')}
+{rl('trailing_stop', 'Trailing stop:')}
+{rl('stop_loss',     'Stop loss:')}
+{rl('expired',       'Expired:')}
+{rl('conf_decay',    'Conf decay:')}
+{SEP}
+  DIRECTION BREAKDOWN
+  YES trades:      {m['yes_count']}  |  WR: {m['yes_win_rate']:.1f}%
+  NO trades:       {m['no_count']}  |  WR: {m['no_win_rate']:.1f}%
+{SEP}
+  MONTHLY BREAKDOWN
+{m_lines}
+{SEP}
+  BEST MONTH:      {best_m}  ${best_p:+.2f}
+  WORST MONTH:     {worst_m}  ${worst_p:+.2f}
+{SEP}""")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9 · Charts
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BG      = "#0d1117"
+_SURFACE = "#161b22"
+_GREEN   = "#3fb950"
+_RED     = "#f85149"
+_BLUE    = "#58a6ff"
+_YELLOW  = "#d29922"
+_MUTED   = "#8b949e"
+
+
+def _ax_style(ax):
+    ax.set_facecolor(_SURFACE)
+    ax.tick_params(colors=_MUTED, labelsize=8)
+    for spine in ax.spines.values():
+        spine.set_edgecolor(_SURFACE)
+
+
+def chart_equity(trades: list[Trade], equity: pd.Series, starting_bankroll: float) -> None:
+    eq  = equity.values
+    idx = np.arange(len(eq))
+
+    peak = np.maximum.accumulate(eq)
+    dd   = (peak - eq) / np.where(peak > 0, peak, 1.0) * 100.0
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(14, 8),
+        gridspec_kw={"height_ratios": [3, 1]},
+        facecolor=_BG,
+    )
+    fig.suptitle("Equity Curve", color="white", fontsize=14, fontweight="bold")
+
+    _ax_style(ax1)
+    ax1.plot(idx, eq, color=_BLUE, linewidth=1.1, label="Bankroll")
+    ax1.fill_between(idx, eq, starting_bankroll,
+                     where=(eq < starting_bankroll), color=_RED, alpha=0.12)
+    ax1.axhline(starting_bankroll, color=_MUTED, linewidth=0.7, linestyle="--", alpha=0.5)
+    ax1.set_ylabel("Bankroll ($)", color="white")
+
+    # Mark trade entries and exits on the equity curve
+    ts_index = equity.index
+    for t in trades:
+        try:
+            ei = ts_index.get_indexer([t.entry_time], method="nearest")[0]
+            xi = ts_index.get_indexer([t.exit_time],  method="nearest")[0]
+            ax1.scatter(ei, eq[min(ei, len(eq)-1)], color=_BLUE,  s=6, zorder=4, alpha=0.45)
+            ax1.scatter(xi, eq[min(xi, len(eq)-1)],
+                        color=_GREEN if t.pnl_dollars > 0 else _RED,
+                        s=9, zorder=5, alpha=0.6)
+        except Exception:
+            pass
+    ax1.legend(facecolor=_SURFACE, labelcolor="white", fontsize=9)
+
+    _ax_style(ax2)
+    ax2.fill_between(idx, dd, color=_RED, alpha=0.45)
+    ax2.plot(idx, dd, color=_RED, linewidth=0.7)
+    ax2.set_ylabel("Drawdown %", color="white")
+    ax2.invert_yaxis()
+
+    plt.tight_layout()
+    plt.savefig("equity_curve.png", dpi=150, bbox_inches="tight", facecolor=_BG)
+    plt.close()
+    print("Saved equity_curve.png")
+
+
+def chart_monthly_pnl(trades: list[Trade]) -> None:
+    monthly: dict[str, float] = {}
+    for t in trades:
+        k = t.entry_time.strftime("%Y-%m")
+        monthly[k] = monthly.get(k, 0.0) + t.pnl_dollars
+
+    months = sorted(monthly)
+    pnls   = [monthly[m] for m in months]
+    colors = [_GREEN if p >= 0 else _RED for p in pnls]
+
+    fig, ax = plt.subplots(figsize=(14, 5), facecolor=_BG)
+    _ax_style(ax)
+    ax.bar(range(len(months)), pnls, color=colors, alpha=0.82, width=0.72)
+    ax.axhline(0, color=_MUTED, linewidth=0.8)
+    ax.set_xticks(range(len(months)))
+    ax.set_xticklabels(months, rotation=45, ha="right", fontsize=7)
+    ax.set_ylabel("P&L ($)", color="white")
+    ax.set_title("Monthly P&L", color="white", fontsize=13, fontweight="bold")
+
+    plt.tight_layout()
+    plt.savefig("monthly_pnl.png", dpi=150, bbox_inches="tight", facecolor=_BG)
+    plt.close()
+    print("Saved monthly_pnl.png")
+
+
+def chart_win_rate(trades: list[Trade]) -> None:
+    monthly_wins:   dict[str, int] = {}
+    monthly_total:  dict[str, int] = {}
+    for t in trades:
+        k = t.entry_time.strftime("%Y-%m")
+        monthly_total[k] = monthly_total.get(k, 0) + 1
+        if t.pnl_dollars > 0:
+            monthly_wins[k] = monthly_wins.get(k, 0) + 1
+
+    months = sorted(monthly_total)
+    rates  = [monthly_wins.get(m, 0) / monthly_total[m] * 100 for m in months]
+    x      = range(len(months))
+
+    fig, ax = plt.subplots(figsize=(14, 5), facecolor=_BG)
+    _ax_style(ax)
+    ax.plot(x, rates, color=_BLUE, linewidth=1.5, marker="o", markersize=4)
+    ax.fill_between(x, rates, 50,
+                    where=[r >= 50 for r in rates], color=_GREEN, alpha=0.10)
+    ax.fill_between(x, rates, 50,
+                    where=[r <  50 for r in rates], color=_RED,   alpha=0.10)
+    ax.axhline(55, color=_YELLOW, linewidth=1.0, linestyle="--", label="55% target")
+    ax.axhline(50, color=_MUTED,  linewidth=0.7, linestyle="--", alpha=0.5, label="50% breakeven")
+    ax.set_xticks(x)
+    ax.set_xticklabels(months, rotation=45, ha="right", fontsize=7)
+    ax.set_ylabel("Win Rate %", color="white")
+    ax.set_title("Win Rate by Month", color="white", fontsize=13, fontweight="bold")
+    ax.legend(facecolor=_SURFACE, labelcolor="white", fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig("win_rate_by_month.png", dpi=150, bbox_inches="tight", facecolor=_BG)
+    plt.close()
+    print("Saved win_rate_by_month.png")
+
+
+def chart_distribution(trades: list[Trade]) -> None:
+    pnls     = [t.pnl_dollars for t in trades]
+    pos_pnl  = [p for p in pnls if p >= 0]
+    neg_pnl  = [p for p in pnls if p < 0]
+    mean_p   = float(np.mean(pnls))
+    std_p    = float(np.std(pnls))
+
+    bins = min(60, max(10, len(pnls) // 8))
+
+    fig, ax = plt.subplots(figsize=(10, 5), facecolor=_BG)
+    _ax_style(ax)
+    if pos_pnl:
+        ax.hist(pos_pnl, bins=bins // 2 or 5, color=_GREEN, alpha=0.75, label=f"Wins ({len(pos_pnl)})")
+    if neg_pnl:
+        ax.hist(neg_pnl, bins=bins // 2 or 5, color=_RED,   alpha=0.75, label=f"Losses ({len(neg_pnl)})")
+    ax.axvline(mean_p, color=_YELLOW, linewidth=1.5, linestyle="--",
+               label=f"Mean ${mean_p:+.2f}")
+    ax.axvline(mean_p + std_p, color=_MUTED, linewidth=1.0, linestyle=":",
+               label=f"±1σ ${std_p:.2f}")
+    ax.axvline(mean_p - std_p, color=_MUTED, linewidth=1.0, linestyle=":")
+    ax.axvline(0, color="white", linewidth=0.7, alpha=0.4)
+    ax.set_xlabel("P&L ($)", color="white")
+    ax.set_ylabel("Frequency", color="white")
+    ax.set_title("Trade P&L Distribution", color="white", fontsize=13, fontweight="bold")
+    ax.legend(facecolor=_SURFACE, labelcolor="white", fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig("trade_distribution.png", dpi=150, bbox_inches="tight", facecolor=_BG)
+    plt.close()
+    print("Saved trade_distribution.png")
+
+
+def generate_charts(
+    trades: list[Trade],
+    equity: pd.Series,
+    df:     pd.DataFrame,
+    starting_bankroll: float,
+) -> None:
+    plt.style.use("dark_background")
+    chart_equity(trades, equity, starting_bankroll)
+    chart_monthly_pnl(trades)
+    chart_win_rate(trades)
+    chart_distribution(trades)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 10 · Save outputs
+# ─────────────────────────────────────────────────────────────────────────────
+
+def save_csv(trades: list[Trade]) -> None:
+    rows = [
+        {
+            "entry_time":          t.entry_time.isoformat(),
+            "exit_time":           t.exit_time.isoformat(),
+            "direction":           t.direction,
+            "strike_price":        t.strike_price,
+            "entry_price_cents":   t.entry_price,
+            "exit_price_cents":    t.exit_price,
+            "bet_size":            t.bet_size,
+            "contracts":           t.contracts,
+            "pnl_dollars":         t.pnl_dollars,
+            "pnl_pct":             t.pnl_pct,
+            "exit_reason":         t.exit_reason,
+            "momentum_at_entry":   t.momentum_at_entry,
+            "confidence_at_entry": t.confidence_at_entry,
+            "edge_at_entry":       t.edge_at_entry,
+            "btc_price_at_entry":  t.btc_price_at_entry,
+            "hold_candles":        t.hold_candles,
+            "peak_pnl_pct":        t.peak_pnl_pct,
+        }
+        for t in trades
+    ]
+    pd.DataFrame(rows).to_csv("backtest_results.csv", index=False)
+    print("Saved backtest_results.csv")
+
+
+def save_json(metrics: dict, args: argparse.Namespace) -> None:
+    def _ser(obj):
+        if isinstance(obj, float) and not math.isfinite(obj):
+            return str(obj)
+        if isinstance(obj, dict):
+            return {k: _ser(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_ser(v) for v in obj]
+        return obj
+
+    payload = {
+        "config": {
+            "file":     args.file,
+            "start":    args.start,
+            "end":      args.end,
+            "bankroll": args.bankroll,
+            "max_bet":  args.max_bet,
+            "tp":       args.tp,
+            "sl":       args.sl,
+        },
+        "summary": {k: v for k, v in metrics.items() if k != "monthly"},
+        "monthly":  metrics.get("monthly", {}),
+    }
+    with open("backtest_summary.json", "w") as fh:
+        json.dump(_ser(payload), fh, indent=2, default=str)
+    print("Saved backtest_summary.json")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11 · CLI
+# ─────────────────────────────────────────────────────────────────────────────
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Backtest printer-v2 strategy on historical BTC OHLCV data."
+    )
+    p.add_argument("--file",     default="btc_1m_data.xlsx",
+                   help="Path to 1m CSV or Excel file (default: btc_1m_data.xlsx)")
+    p.add_argument("--start",    default=None, metavar="YYYY-MM-DD",
+                   help="Filter start date (inclusive)")
+    p.add_argument("--end",      default=None, metavar="YYYY-MM-DD",
+                   help="Filter end date (inclusive)")
+    p.add_argument("--bankroll", type=float, default=DEFAULT_BANKROLL,
+                   help=f"Starting bankroll $ (default: {DEFAULT_BANKROLL})")
+    p.add_argument("--max-bet",  type=float, default=DEFAULT_MAX_BET,
+                   help=f"Max bet size $ (default: {DEFAULT_MAX_BET})")
+    p.add_argument("--tp",       type=float, default=DEFAULT_TP,
+                   help=f"Take profit fraction (default: {DEFAULT_TP})")
+    p.add_argument("--sl",       type=float, default=DEFAULT_SL,
+                   help=f"Stop loss fraction (default: {DEFAULT_SL})")
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
+    df = load_and_resample(args.file, args.start, args.end)
+    if len(df) < 50:
+        print("ERROR: fewer than 50 candles after filtering — nothing to backtest.")
+        sys.exit(1)
+
+    print("Computing indicators …")
+    ind = compute_indicators(df)
+
+    print(f"Running backtest on {len(df):,} 15m candles …")
+    trades, equity = run_backtest(df, ind, args)
+
+    if not trades:
+        print("No trades generated. Try relaxing filters or using more data.")
+        sys.exit(0)
+
+    metrics = compute_metrics(trades, equity, args.bankroll)
+    print_report(metrics, df, args.bankroll)
+    save_csv(trades)
+    save_json(metrics, args)
+    generate_charts(trades, equity, df, args.bankroll)
+
+    print(f"\nFinished. {len(trades)} trades | Final bankroll: "
+          f"${equity.iloc[-1]:.2f} | P&L: ${metrics['total_pnl']:+.2f}")
+
+
+if __name__ == "__main__":
+    main()
