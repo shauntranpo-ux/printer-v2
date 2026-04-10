@@ -107,20 +107,30 @@ class TradingBot:
         log.info("BTC price: $%.2f", btc_price)
 
         # 4. Kalshi
-        balance = await self.kalshi.get_balance()
-        await self.db.set_balance(balance)
-        print(f"Balance: ${balance:.2f}")
-        log.info("Kalshi balance: $%.2f  mode: %s", balance, settings.env.upper())
+        balance: float | None = None
+        try:
+            balance = await self.kalshi.get_balance()
+            await self.db.set_balance(balance)
+            print(f"Balance: ${balance:.2f}")
+            log.info("Kalshi balance: $%.2f  mode: %s", balance, settings.env.upper())
+        except KalshiAuthError as exc:
+            print(f"[AUTH ERROR] {exc}")
+            print(">>> ACTION REQUIRED: Kalshi credentials are invalid.")
+            print(">>> 1. Log in to https://app.kalshi.com")
+            print(">>> 2. Account → API → delete old key → Create new RSA key")
+            print(">>> 3. Update KALSHI_API_KEY and KALSHI_PRIVATE_KEY in Railway Variables")
+            log.error("Kalshi auth failed at startup (bot will still try to run): %s", exc)
 
         # 5. Telegram
         await self.telegram.start()
         await self.telegram.send_startup()
 
         # 6. Database event
+        balance_str = f"${balance:.2f}" if balance is not None else "auth_failed"
         await self.db.log_event(
             "startup",
             f"printer-v2 started [{settings.env}] "
-            f"BTC=${btc_price:,.2f}  balance=${balance:.2f}",
+            f"BTC=${btc_price:,.2f}  balance={balance_str}",
         )
 
         # 7. STOP file guard

@@ -85,6 +85,9 @@ def _load_key() -> RSAPrivateKey:
     private_key_str = settings.KALSHI_PRIVATE_KEY.strip()
     if not private_key_str:
         raise KalshiAuthError("KALSHI_PRIVATE_KEY is not set")
+    # Railway (and many env-var stores) serialize newlines as the two-character
+    # sequence backslash-n.  Expand them so PEM parsing succeeds.
+    private_key_str = private_key_str.replace("\\n", "\n")
     key = serialization.load_pem_private_key(
         private_key_str.encode(), password=None
     )
@@ -107,14 +110,17 @@ def _raise_for_response(resp: httpx.Response) -> None:
     if resp.is_success:
         return
 
-    # Try to parse the Kalshi error envelope
+    # Try to parse the Kalshi error envelope.
+    # New API wraps errors: {"error": {"code": ..., "message": ..., "details": ...}}
+    # Old API used flat:    {"code": ..., "message": ...}
     try:
         body: dict = resp.json()
     except Exception:
         body = {}
 
-    code    = body.get("code", "")
-    message = body.get("message", resp.text[:200])
+    err_obj = body.get("error", body)   # unwrap nested envelope if present
+    code    = err_obj.get("code", "") or err_obj.get("details", "")
+    message = err_obj.get("message", "") or resp.text[:200]
     status  = resp.status_code
 
     if status in (401, 403):
