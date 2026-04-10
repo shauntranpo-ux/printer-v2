@@ -1,2 +1,1 @@
-web: python dashboard.py
-worker: python runner.py
+web: python main.py
