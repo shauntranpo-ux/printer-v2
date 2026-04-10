@@ -299,12 +299,23 @@ class Strategy:
             pass    # don't block other checks if market fetch fails
 
         # --- Trigger 3: take profit ---
+        # When TP is hit, prefer expiry over selling if the market is pricing
+        # a strong win (bid ≥ 75¢ = 75%+ implied win probability).
+        # Expected expiry payout = bid¢ by market pricing, but at 75¢+ the
+        # contract is likely to expire at 100¢ — a better outcome than exiting now.
         if pnl_pct >= settings.TAKE_PROFIT_PCT:
-            log.info(
-                "Trade %d: take profit — pnl_pct=%.1f%% (bid=%d¢ entry=%.0f¢)",
-                trade.id, pnl_pct * 100, current_bid, entry,
-            )
-            return await self._close_trade(trade, current_bid, "take_profit")
+            if current_bid >= 75:
+                log.info(
+                    "Trade %d: TP hit but bid=%d¢ (≥75¢ — likely to expire ITM) "
+                    "— holding to expiry  pnl=%.1f%%",
+                    trade.id, current_bid, pnl_pct * 100,
+                )
+            else:
+                log.info(
+                    "Trade %d: take profit — pnl_pct=%.1f%% (bid=%d¢ entry=%.0f¢)",
+                    trade.id, pnl_pct * 100, current_bid, entry,
+                )
+                return await self._close_trade(trade, current_bid, "take_profit")
 
         # --- Trigger 4: trailing stop ---
         # Activates once peak reaches +TRAILING_STOP_LOCK_PCT;
