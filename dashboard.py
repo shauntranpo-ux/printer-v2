@@ -756,18 +756,46 @@ function renderWatchSection(w) {
     ? '$' + w.btc_price.toLocaleString('en-US', {maximumFractionDigits: 0})
     : '—';
 
+  // Parse ticker into a readable name: KXBTC15M-26APR101700-00 → "BTC · 17:00 UTC"
+  function tickerLabel(ticker, asset) {
+    const MONTHS = {JAN:'Jan',FEB:'Feb',MAR:'Mar',APR:'Apr',MAY:'May',JUN:'Jun',
+                    JUL:'Jul',AUG:'Aug',SEP:'Sep',OCT:'Oct',NOV:'Nov',DEC:'Dec'};
+    const NAMES  = {BTC:'Bitcoin',ETH:'Ethereum',SOL:'Solana',XRP:'XRP',
+                    DOGE:'Dogecoin',BNB:'BNB',HYPE:'HYPE'};
+    const parts = (ticker || '').split('-');
+    if (parts.length >= 2) {
+      const dp = parts[1]; // e.g. 26APR101700
+      const re = /^(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})(\d{4})$/;
+      const m2 = dp.match(re);
+      if (m2) {
+        const mon  = MONTHS[m2[2]] || m2[2];
+        const day  = parseInt(m2[3]);
+        const hhmm = m2[4].substring(0,2) + ':' + m2[4].substring(2,4);
+        const full = NAMES[asset] || asset || ticker;
+        return { name: full, sub: mon + ' ' + day + ' · ' + hhmm + ' UTC' };
+      }
+    }
+    return { name: asset || ticker, sub: ticker };
+  }
+
   const rows = w.markets.map(m => {
     const closeDate = m.close_time ? new Date(m.close_time) : null;
     const minsLeft  = closeDate
       ? Math.max(0, Math.round((closeDate - Date.now()) / 60000))
       : null;
     const expiry = minsLeft !== null ? minsLeft + 'm left' : '—';
-    const strike = m.strike ? '$' + m.strike.toLocaleString('en-US') : '—';
+    const strike = m.strike ? '$' + m.strike.toLocaleString('en-US', {maximumFractionDigits:4}) : '—';
     const yesAsk = m.yes_ask > 0 ? m.yes_ask + '¢' : '—';
     const noAsk  = m.no_ask  > 0 ? m.no_ask  + '¢' : (m.yes_ask > 0 ? (100 - m.yes_ask) + '¢' : '—');
-    return `<tr>
-      <td style="color:var(--blue);font-weight:600">${m.ticker}</td>
-      <td>${m.asset ? '<span style="color:var(--muted);font-size:10px">' + m.asset + '</span> ' : ''}${strike}</td>
+    const lbl    = tickerLabel(m.ticker, m.asset);
+    const titleTip = m.title ? ` title="${m.title.replace(/"/g,'&quot;')}"` : '';
+    return `<tr${titleTip}>
+      <td>
+        <div style="color:var(--text);font-weight:600">${lbl.name}</div>
+        <div style="font-size:10px;color:var(--muted)">${lbl.sub}</div>
+        <div style="font-size:9px;color:var(--border)">${m.ticker}</div>
+      </td>
+      <td>${strike}</td>
       <td style="color:var(--muted)">${expiry}</td>
       <td class="dir-yes">${yesAsk}</td>
       <td class="dir-no">${noAsk}</td>
@@ -891,7 +919,7 @@ function renderWatchSection(w) {
     </div>
     <table>
       <thead><tr>
-        <th>Ticker</th><th>Strike</th><th>Expiry</th>
+        <th>Market</th><th>Strike</th><th>Expiry</th>
         <th>YES ask</th><th>NO ask</th><th>Volume</th>
       </tr></thead>
       <tbody>${rows}</tbody>

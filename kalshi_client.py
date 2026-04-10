@@ -272,6 +272,7 @@ class KalshiClient:
         for m in markets:
             result.append({
                 "ticker":        m.get("ticker", ""),
+                "title":         m.get("title", ""),
                 "yes_ask":       m.get("yes_ask", 0),
                 "yes_bid":       m.get("yes_bid", 0),
                 "no_ask":        m.get("no_ask", 0),

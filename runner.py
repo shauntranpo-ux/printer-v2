@@ -385,6 +385,7 @@ class TradingBot:
                         "yes_ask":    m.get("yes_ask", 0),
                         "no_ask":     m.get("no_ask", 0),
                         "volume":     m.get("volume", 0),
+                        "title":      m.get("title", ""),
                     }
                     for m in all_markets_found
                 ],
