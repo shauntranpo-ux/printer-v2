@@ -282,18 +282,48 @@ class EnsembleEngine:
         text = resp.choices[0].message.content or ""
         return self._parse_result(text, "gpt", (time.monotonic() - t0) * 1000)
 
+    # Ordered list of Gemini models to try — first success wins.
+    # Google frequently deprecates specific versions; this auto-advances.
+    _GEMINI_FALLBACKS = [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-flash",
+    ]
+
     async def _call_gemini(self, context: str) -> ModelResult:
         t0 = time.monotonic()
-        response = await self._gemini_client.aio.models.generate_content(  # type: ignore[union-attr]
-            model=settings.GEMINI_MODEL,
-            contents=context,
-            config=types.GenerateContentConfig(
-                system_instruction=_GEMINI_SYSTEM,
-                temperature=0.1,
-            ),
-        )
-        text = response.text
-        return self._parse_result(text, "gemini", (time.monotonic() - t0) * 1000)
+
+        # Build candidate list: configured model first, then the fallbacks
+        candidates = [settings.GEMINI_MODEL] + [
+            m for m in self._GEMINI_FALLBACKS if m != settings.GEMINI_MODEL
+        ]
+
+        last_exc: Exception = RuntimeError("No Gemini models available")
+        for model in candidates:
+            try:
+                response = await self._gemini_client.aio.models.generate_content(  # type: ignore[union-attr]
+                    model=model,
+                    contents=context,
+                    config=types.GenerateContentConfig(
+                        system_instruction=_GEMINI_SYSTEM,
+                        temperature=0.1,
+                    ),
+                )
+                if model != settings.GEMINI_MODEL:
+                    log.info("Gemini: fell back to model '%s'", model)
+                text = response.text
+                return self._parse_result(text, "gemini", (time.monotonic() - t0) * 1000)
+            except Exception as exc:
+                msg = str(exc)
+                if "404" in msg or "NOT_FOUND" in msg or "no longer available" in msg or "not found" in msg.lower():
+                    log.debug("Gemini model '%s' unavailable — trying next", model)
+                    last_exc = exc
+                    continue
+                raise   # unexpected error — don't swallow it
+
+        raise last_exc
 
     async def _call_deepseek(self, context: str) -> ModelResult:
         t0 = time.monotonic()
