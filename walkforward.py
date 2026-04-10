@@ -9,6 +9,15 @@ Usage:
     py walkforward.py --file "C:\\path\\to\\binance_api_BTCUSDT_1m.csv"
     py walkforward.py --file data.csv --bankroll 500 --max-bet 25
 
+    # More trades: scan 9 Kalshi strike markets instead of 3
+    py walkforward.py --file data.csv --n-strikes 9
+
+    # Compound growth: max-bet scales as 5% of current bankroll
+    py walkforward.py --file data.csv --compound
+
+    # Both — the path to $50k/year:
+    py walkforward.py --file data.csv --n-strikes 9 --compound
+
 Outputs (written to ./wfa_output/):
     wfa_results.csv    — one row per window (params, IS/OOS metrics)
     wfa_equity.csv     — chained OOS equity curve
@@ -48,8 +57,10 @@ IS_MONTHS   = 18    # in-sample window length
 OOS_MONTHS  =  3    # out-of-sample window length
 STEP_MONTHS =  3    # slide step (equals OOS so windows don't overlap on OOS)
 
-DEFAULT_BANKROLL = 500.0
-DEFAULT_MAX_BET  =  25.0
+DEFAULT_BANKROLL    = 500.0
+DEFAULT_MAX_BET     =  25.0
+DEFAULT_N_STRIKES   =   3   # mirrors STRIKE_OFFSETS in backtest.py
+DEFAULT_COMPOUND_PCT = 5.0  # max_bet = this % of bankroll when --compound is used
 
 # Parameter grid  (4 × 3 × 3 = 36 combos per IS window)
 PARAM_GRID = {
@@ -57,6 +68,22 @@ PARAM_GRID = {
     "tp":       [0.45, 0.55, 0.65],
     "sl":       [0.70, 0.80, 0.90],
 }
+
+
+def _build_strike_offsets(n: int) -> list[float]:
+    """
+    Build n evenly-spaced strike offsets centred on 0.
+    Step is fixed at 0.5% so adjacent strikes are always 0.5% apart.
+
+    n=3  → [-0.005,  0.000, +0.005]  (current default)
+    n=5  → [-0.010, -0.005, 0.000, +0.005, +0.010]
+    n=7  → [-0.015, ..., +0.015]
+    n=9  → [-0.020, ..., +0.020]
+    n=11 → [-0.025, ..., +0.025]
+    """
+    half = n // 2
+    step = 0.005
+    return [round(i * step, 4) for i in range(-half, half + 1)]
 
 MIN_IS_TRADES  = 20   # ignore IS run if fewer trades (params likely degenerate)
 MIN_OOS_TRADES =  3   # flag (but keep) OOS windows with very few trades
@@ -94,17 +121,22 @@ def _slice_data(
 
 
 def _run(
-    df_s:     pd.DataFrame,
-    ind_s:    dict,
-    bankroll: float,
-    tp:       float,
-    sl:       float,
-    min_conf: float,
+    df_s:        pd.DataFrame,
+    ind_s:       dict,
+    bankroll:    float,
+    tp:          float,
+    sl:          float,
+    min_conf:    float,
+    max_bet:     float = DEFAULT_MAX_BET,
+    n_strikes:   int   = DEFAULT_N_STRIKES,
 ) -> tuple[list, dict]:
     """Patch backtest globals, run, return (trades, metrics)."""
     bt.MIN_CONF        = min_conf
     bt.MIN_CONF_CHOPPY = min(min_conf + 0.10, 0.50)
+    bt.STRIKE_OFFSETS  = _build_strike_offsets(n_strikes)
+    bt.MAX_POSITIONS   = n_strikes   # allow one trade per strike per candle
     args = _make_args(bankroll, tp, sl)
+    args.max_bet = max_bet
     try:
         trades, equity = bt.run_backtest(df_s, ind_s, args)
     except Exception as exc:
@@ -166,8 +198,9 @@ def generate_windows(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def grid_search_is(
-    df_is:  pd.DataFrame,
-    ind_is: dict,
+    df_is:     pd.DataFrame,
+    ind_is:    dict,
+    n_strikes: int = DEFAULT_N_STRIKES,
 ) -> tuple[dict | None, dict]:
     """
     Try all 36 parameter combos on the IS slice.
@@ -177,7 +210,6 @@ def grid_search_is(
     best_sharpe  = -999.0
     best_params  = None
     best_metrics = {}
-    results      = []
 
     combos = list(product(
         PARAM_GRID["min_conf"],
@@ -186,10 +218,12 @@ def grid_search_is(
     ))
 
     for min_conf, tp, sl in combos:
-        _, m = _run(df_is, ind_is, DEFAULT_BANKROLL, tp, sl, min_conf)
-        s    = _sharpe(m)
-        n    = m.get("total_trades", 0)
-        results.append((s, n, min_conf, tp, sl, m))
+        _, m = _run(
+            df_is, ind_is, DEFAULT_BANKROLL, tp, sl, min_conf,
+            n_strikes=n_strikes,
+        )
+        s = _sharpe(m)
+        n = m.get("total_trades", 0)
         if n >= MIN_IS_TRADES and s > best_sharpe:
             best_sharpe  = s
             best_params  = {"min_conf": min_conf, "tp": tp, "sl": sl}
@@ -204,11 +238,25 @@ def grid_search_is(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Walk-Forward Analysis — printer-v2")
-    parser.add_argument("--file",       required=True,  help="Path to BTC 1m CSV")
-    parser.add_argument("--bankroll",   type=float, default=DEFAULT_BANKROLL)
-    parser.add_argument("--max-bet",    type=float, default=DEFAULT_MAX_BET)
-    parser.add_argument("--out",        default="wfa_output", help="Output directory")
+    parser.add_argument("--file",         required=True,  help="Path to BTC 1m CSV")
+    parser.add_argument("--bankroll",     type=float, default=DEFAULT_BANKROLL)
+    parser.add_argument("--max-bet",      type=float, default=DEFAULT_MAX_BET,
+                        help="Hard cap on bet size (overridden by --compound)")
+    parser.add_argument("--n-strikes",    type=int,   default=DEFAULT_N_STRIKES,
+                        help="Number of Kalshi strike offsets per candle (3/5/7/9/11). "
+                             "Higher = more trades. Use 9 to target $50k/yr.")
+    parser.add_argument("--compound",     action="store_true",
+                        help="Scale max-bet as a %% of current bankroll each OOS window "
+                             "(compound growth mode). Targets $50k+/yr in later years.")
+    parser.add_argument("--compound-pct", type=float, default=DEFAULT_COMPOUND_PCT,
+                        help="Max-bet as %% of bankroll when --compound is active (default 5)")
+    parser.add_argument("--out",          default="wfa_output", help="Output directory")
     args = parser.parse_args()
+
+    # Validate n-strikes: must be odd (so there's a centre strike at 0)
+    if args.n_strikes % 2 == 0:
+        args.n_strikes += 1
+        print(f"[info] --n-strikes rounded up to {args.n_strikes} (must be odd)")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -224,7 +272,12 @@ def main() -> None:
     # ── 2. Generate rolling windows ──────────────────────────────────────────
     windows = generate_windows(df)
     n_win   = len(windows)
+    strikes_list = _build_strike_offsets(args.n_strikes)
+    compound_mode = args.compound
+
     print(f"\nWindows: {n_win}  ({IS_MONTHS}mo IS + {OOS_MONTHS}mo OOS, step={STEP_MONTHS}mo)")
+    print(f"Strike offsets ({args.n_strikes}): {strikes_list}")
+    print(f"Compound mode: {'ON (' + str(args.compound_pct) + '% of bankroll per window)' if compound_mode else 'OFF (fixed $' + str(args.max_bet) + ')'}")
     print(f"Parameter combos per IS window: "
           f"{len(PARAM_GRID['min_conf'])} x {len(PARAM_GRID['tp'])} x "
           f"{len(PARAM_GRID['sl'])} = "
@@ -269,7 +322,7 @@ def main() -> None:
 
         # ── Grid search on IS ────────────────────────────────────────────────
         print("  Grid-searching IS (36 combos)...", end="", flush=True)
-        best_params, is_metrics = grid_search_is(df_is, ind_is)
+        best_params, is_metrics = grid_search_is(df_is, ind_is, n_strikes=args.n_strikes)
         print(f"  done — IS trades: {is_metrics.get('total_trades', 0)}")
 
         if best_params is None:
@@ -285,6 +338,12 @@ def main() -> None:
             f"WR={is_metrics.get('win_rate', 0):.1f}%"
         )
 
+        # ── Determine max-bet for this OOS window ────────────────────────────
+        if compound_mode:
+            window_max_bet = max(args.max_bet, oos_bankroll * args.compound_pct / 100.0)
+        else:
+            window_max_bet = args.max_bet
+
         # ── Evaluate OOS with best params ────────────────────────────────────
         oos_trades, oos_metrics = _run(
             df_oos, ind_oos,
@@ -292,6 +351,8 @@ def main() -> None:
             best_params["tp"],
             best_params["sl"],
             best_params["min_conf"],
+            max_bet   = window_max_bet,
+            n_strikes = args.n_strikes,
         )
 
         oos_n = oos_metrics.get("total_trades", 0)
@@ -325,6 +386,7 @@ def main() -> None:
             "min_conf":      best_params["min_conf"],
             "tp":            best_params["tp"],
             "sl":            best_params["sl"],
+            "max_bet_used":  round(window_max_bet, 2),
             # IS metrics
             "is_trades":     is_metrics.get("total_trades", 0),
             "is_wr":         is_metrics.get("win_rate", 0),
@@ -378,17 +440,27 @@ def main() -> None:
         final_bankroll   = args.bankroll
         param_freq       = {}
 
+    # Annualised stats (OOS spans 28 windows × 3mo = 84 months = 7 years from window 1)
+    data_years = len(wfa_rows) * OOS_MONTHS / 12.0
+    annual_trades = total_oos_trades / data_years if data_years > 0 else 0
+    annual_pnl    = total_oos_pnl    / data_years if data_years > 0 else 0
+
     summary = {
         "windows_total":     len(windows),
         "windows_completed": len(wfa_rows),
         "is_months":         IS_MONTHS,
         "oos_months":        OOS_MONTHS,
         "step_months":       STEP_MONTHS,
+        "n_strikes":         args.n_strikes,
+        "compound_mode":     compound_mode,
+        "compound_pct":      args.compound_pct if compound_mode else None,
         "starting_bankroll": args.bankroll,
         "final_bankroll":    round(final_bankroll, 2),
         "total_oos_trades":  total_oos_trades,
         "avg_oos_win_rate":  round(avg_oos_wr, 2),
         "total_oos_pnl":     round(total_oos_pnl, 2),
+        "annual_trades_avg": round(annual_trades, 0),
+        "annual_pnl_avg":    round(annual_pnl, 2),
         "avg_is_pf":         round(avg_is_pf, 4),
         "avg_oos_pf":        round(avg_oos_pf, 4),
         "wfa_efficiency":    round(wfa_eff, 4),
@@ -397,17 +469,24 @@ def main() -> None:
     }
 
     # ── 6. Print summary ─────────────────────────────────────────────────────
-    sep = "─" * 55
+    sep = "─" * 60
     print(f"\n\n{sep}")
     print("  WALK-FORWARD ANALYSIS — SUMMARY")
     print(sep)
     print(f"  Windows completed       : {len(wfa_rows)} / {len(windows)}")
     print(f"  IS / OOS / Step         : {IS_MONTHS}mo / {OOS_MONTHS}mo / {STEP_MONTHS}mo")
+    print(f"  Strike markets / candle : {args.n_strikes}  "
+          f"(offsets: {_build_strike_offsets(args.n_strikes)})")
+    print(f"  Compound mode           : {'ON (' + str(args.compound_pct) + '% of bankroll)' if compound_mode else 'OFF (fixed $' + str(args.max_bet) + ')'}")
+    print(sep)
     print(f"  Total OOS trades        : {total_oos_trades:,}")
     print(f"  Avg OOS win rate        : {avg_oos_wr:.1f}%")
     print(f"  Total OOS P&L           : ${total_oos_pnl:+.2f}")
+    print(f"  Avg trades / year       : {annual_trades:,.0f}")
+    print(f"  Avg P&L / year          : ${annual_pnl:+,.2f}")
+    print(sep)
     print(f"  Starting bankroll       : ${args.bankroll:.2f}")
-    print(f"  Final bankroll (chained): ${final_bankroll:.2f}")
+    print(f"  Final bankroll (chained): ${final_bankroll:,.2f}")
     print(f"  Return on capital       : {(final_bankroll/args.bankroll - 1)*100:+.1f}%")
     print(sep)
     print(f"  Avg IS  profit factor   : {avg_is_pf:.3f}")
@@ -424,6 +503,20 @@ def main() -> None:
         print(f"    MIN_CONFIDENCE = {most_conf}")
         print(f"    TAKE_PROFIT    = {most_tp}")
         print(f"    STOP_LOSS      = {most_sl}")
+
+    # ── Annual projection ────────────────────────────────────────────────────
+    if not compound_mode and avg_oos_wr > 55:
+        avg_profit_per_trade = (total_oos_pnl / total_oos_trades) if total_oos_trades else 0
+        needed_trades = 50_000 / avg_profit_per_trade if avg_profit_per_trade > 0 else 0
+        print(f"\n  --- $50k/year projection (fixed ${args.max_bet} max bet) ---")
+        print(f"  Avg profit/trade        : ${avg_profit_per_trade:.2f}")
+        print(f"  Trades needed/year      : {needed_trades:,.0f}")
+        print(f"  Current trades/year     : {annual_trades:,.0f}")
+        if args.n_strikes < 9:
+            print(f"  --> Re-run with --n-strikes 9 --compound to project $50k+/yr")
+        else:
+            print(f"  --> Re-run with --compound to model compound growth to $50k+/yr")
+
     print(sep)
 
     # ── 7. Write output files ────────────────────────────────────────────────
