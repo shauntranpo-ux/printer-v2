@@ -16,7 +16,7 @@ from config import settings
 from database import Database, TradeRow
 from coinbase_feed import CoinbaseFeed, StaleDataError
 from ensemble import EnsembleEngine, BtcData, Market
-from risk_gates import RiskGates, BotState
+from risk_gates import RiskGates
 from strategy import Strategy
 from kalshi_client import (
     KalshiClient,
@@ -63,21 +63,19 @@ class BotRunner:
     def __init__(self):
         settings.validate()
 
-        self.db      = Database(Path(settings.DB_PATH))
-        self.feed    = CoinbaseFeed()
+        self.db       = Database(Path(settings.DB_PATH))
+        self.feed     = CoinbaseFeed()
+        self.kalshi   = KalshiClient()
         self.ensemble = EnsembleEngine()
         self.risk = RiskGates(
-            max_daily_drawdown_pct=settings.DAILY_LOSS_LIMIT / 10_000,  # rough pct; refined at runtime
-            max_position_exposure=settings.MAX_OPEN_POSITIONS / 10.0,
-            confidence_min=settings.MIN_CONFIDENCE,
-            max_btc_vol_threshold=0.04,
-            min_minutes_between_trades=15,
+            kalshi_client = self.kalshi,
+            coinbase_feed = self.feed,
+            database      = self.db,
         )
         self.strategy = Strategy(
             kelly_fraction_multiplier=settings.KELLY_FRACTION,
             max_position_pct=min(settings.MAX_BET_SIZE / 1000, 0.10),
         )
-        self.kalshi  = KalshiClient()
         self.telegram = TelegramAlerter()
 
         self._last_trade_ts: float = 0.0
@@ -231,47 +229,28 @@ class BotRunner:
             skip_reason    = signal.skip_reason,
         )
 
-        # 6b. Build bot state for risk gates
-        try:
-            balance_dollars = await self.kalshi.get_balance()
-            balance_cents   = int(balance_dollars * 100)
-        except Exception as exc:
-            log.error("Failed to fetch account state: %s", exc)
-            await self.telegram.send_error(str(exc), "account_fetch")
-            return
-
-        open_trades = await self.db.get_open_trades()
-        open_exposure_cents = sum(
-            int(t.entry_price * t.contracts) for t in open_trades
-        )
-        today_stats = await self.db.get_daily_stats()
-
-        state = BotState(
-            balance_cents=balance_cents,
-            starting_balance_cents=self._starting_balance_cents,
-            daily_pnl_cents=int(today_stats.total_pnl * 100),
-            open_exposure_cents=open_exposure_cents,
-            last_trade_ts=self._last_trade_ts,
-            candles_1h=self.feed.get_candles_1h(),
-        )
-
         # 7. Risk gates
-        gate_result = self.risk.check_all(signal, state)
+        gate_result = await self.risk.check_all(market, signal, settings.MAX_BET_SIZE)
         if not gate_result.passed:
             await self.db.log_event(
                 "error",
-                f"Gate {gate_result.failed_gate} [{gate_result.gate_name}] blocked: {gate_result.reason}",
+                f"Gate [{gate_result.failed_gate}] blocked: {gate_result.reason}",
             )
-
-        if not gate_result.passed:
-            if gate_result.failed_gate in (1, 2):
+            # Alert on critical gates (edge/liquidity/drawdown); not on conf/staleness noise
+            if gate_result.failed_gate in ("edge", "liquidity", "drawdown"):
                 await self.telegram.send_error(
                     gate_result.reason,
-                    f"Gate {gate_result.failed_gate} [{gate_result.gate_name}]",
+                    f"Gate [{gate_result.failed_gate}]",
                 )
             return
 
         # 8b. Build order
+        try:
+            balance_cents = int((await self.kalshi.get_balance()) * 100)
+        except Exception as exc:
+            log.error("Failed to fetch balance before order sizing: %s", exc)
+            return
+
         order_params = self.strategy.build_order(
             signal, ticker, orderbook, balance_cents
         )

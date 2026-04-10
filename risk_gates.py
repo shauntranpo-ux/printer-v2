@@ -1,173 +1,282 @@
 """
-risk_gates.py — 5-gate pre-trade risk checks
+risk_gates.py — 5-gate pre-trade risk filter
+
+All 5 gates must pass for a trade to execute.
+Each gate logs its result independently.
 """
 
 from __future__ import annotations
 
 import logging
-import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
-from coinbase_feed import Candle
-from ensemble import EnsembleSignal
+from config import settings
+
+if TYPE_CHECKING:
+    pass
 
 log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Result type
+# Result dataclass
 # ---------------------------------------------------------------------------
 
 @dataclass
 class GateResult:
-    passed: bool
-    failed_gate: int | None     # 1-5, or None if all passed
-    gate_name: str | None
-    reason: str
-
-    @classmethod
-    def ok(cls) -> "GateResult":
-        return cls(passed=True, failed_gate=None, gate_name=None, reason="all gates passed")
-
-    @classmethod
-    def fail(cls, gate: int, name: str, reason: str) -> "GateResult":
-        return cls(passed=False, failed_gate=gate, gate_name=name, reason=reason)
+    passed:       bool
+    failed_gate:  str | None        # name of first failed gate, or None
+    reason:       str
+    gate_details: dict              # {gate_name: {"passed": bool, "reason": str}}
+    checked_at:   datetime
 
 
 # ---------------------------------------------------------------------------
-# State that the gates inspect
-# ---------------------------------------------------------------------------
-
-@dataclass
-class BotState:
-    """Snapshot of runtime state passed to gate checks each tick."""
-    balance_cents: int              # current available balance
-    starting_balance_cents: int     # balance at start of today
-    daily_pnl_cents: int            # realised P&L today (can be negative)
-    open_exposure_cents: int        # sum of all open position cost basis
-    last_trade_ts: float            # unix timestamp of last trade (0 = never)
-    candles_1h: list[Candle]        # recent 1h candles for vol calculation
-
-
-# ---------------------------------------------------------------------------
-# Individual gate implementations
-# ---------------------------------------------------------------------------
-
-def _gate1_drawdown(state: BotState, max_drawdown_pct: float) -> GateResult:
-    """Daily P&L must not have fallen below -X% of starting balance."""
-    if state.starting_balance_cents <= 0:
-        return GateResult.fail(1, "drawdown", "starting balance is zero — cannot compute drawdown")
-
-    drawdown_pct = -state.daily_pnl_cents / state.starting_balance_cents
-    if drawdown_pct >= max_drawdown_pct:
-        return GateResult.fail(
-            1, "drawdown",
-            f"daily drawdown {drawdown_pct:.1%} ≥ limit {max_drawdown_pct:.1%} — "
-            f"halting for the day (P&L: ${state.daily_pnl_cents/100:.2f})",
-        )
-    return GateResult.ok()
-
-
-def _gate2_exposure(state: BotState, max_exposure: float) -> GateResult:
-    """Total open position cost must not exceed X% of balance."""
-    if state.balance_cents <= 0:
-        return GateResult.fail(2, "exposure", "zero balance")
-
-    exposure_pct = state.open_exposure_cents / state.balance_cents
-    if exposure_pct >= max_exposure:
-        return GateResult.fail(
-            2, "exposure",
-            f"open exposure {exposure_pct:.1%} ≥ limit {max_exposure:.1%} "
-            f"(${state.open_exposure_cents/100:.2f} of ${state.balance_cents/100:.2f})",
-        )
-    return GateResult.ok()
-
-
-def _gate3_confidence(signal: EnsembleSignal, confidence_min: float) -> GateResult:
-    """Ensemble confidence must exceed the minimum threshold."""
-    if signal.direction == "flat":
-        return GateResult.fail(3, "confidence", "ensemble returned flat signal")
-
-    if signal.confidence < confidence_min:
-        return GateResult.fail(
-            3, "confidence",
-            f"confidence {signal.confidence:.3f} < minimum {confidence_min:.3f}",
-        )
-    return GateResult.ok()
-
-
-def _gate4_volatility(state: BotState, max_vol: float) -> GateResult:
-    """BTC 1h realized volatility must be below the ceiling."""
-    candles = state.candles_1h
-    if len(candles) < 8:
-        # Not enough data — allow trading but log a warning
-        log.warning("Gate 4: fewer than 8 hourly candles available, skipping vol check")
-        return GateResult.ok()
-
-    import numpy as np
-    closes = [c.close for c in candles[-8:]]
-    returns = np.diff(np.log(closes))
-    realized_vol = float(np.std(returns))   # 1-bar log return std
-
-    if realized_vol >= max_vol:
-        return GateResult.fail(
-            4, "volatility",
-            f"realized vol {realized_vol:.4f} ≥ ceiling {max_vol:.4f} — "
-            "BTC too choppy to trade",
-        )
-    return GateResult.ok()
-
-
-def _gate5_frequency(state: BotState, min_minutes: int) -> GateResult:
-    """Minimum time between trades must have elapsed."""
-    if state.last_trade_ts == 0:
-        return GateResult.ok()
-
-    elapsed_min = (time.time() - state.last_trade_ts) / 60.0
-    if elapsed_min < min_minutes:
-        return GateResult.fail(
-            5, "frequency",
-            f"only {elapsed_min:.1f}m since last trade — minimum is {min_minutes}m",
-        )
-    return GateResult.ok()
-
-
-# ---------------------------------------------------------------------------
-# Gate runner
+# RiskGates
 # ---------------------------------------------------------------------------
 
 class RiskGates:
-    def __init__(
+    def __init__(self, kalshi_client, coinbase_feed, database) -> None:
+        self._kalshi = kalshi_client
+        self._feed   = coinbase_feed
+        self._db     = database
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+
+    async def check_all(
         self,
-        max_daily_drawdown_pct: float = 0.05,
-        max_position_exposure: float = 0.20,
-        confidence_min: float = 0.60,
-        max_btc_vol_threshold: float = 0.04,
-        min_minutes_between_trades: int = 15,
-    ):
-        self.max_daily_drawdown_pct = max_daily_drawdown_pct
-        self.max_position_exposure = max_position_exposure
-        self.confidence_min = confidence_min
-        self.max_btc_vol_threshold = max_btc_vol_threshold
-        self.min_minutes_between_trades = min_minutes_between_trades
-
-    def check_all(self, signal: EnsembleSignal, state: BotState) -> GateResult:
-        """Run all 5 gates in order. Returns on first failure."""
+        market:          dict,
+        ensemble_result,
+        bet_size:        float,    # dollars
+    ) -> GateResult:
+        """
+        Run all 5 gates in order. Short-circuits on the first failure.
+        Returns GateResult with passed=True only when ALL gates pass.
+        """
         gates = [
-            lambda: _gate1_drawdown(state, self.max_daily_drawdown_pct),
-            lambda: _gate2_exposure(state, self.max_position_exposure),
-            lambda: _gate3_confidence(signal, self.confidence_min),
-            lambda: _gate4_volatility(state, self.max_btc_vol_threshold),
-            lambda: _gate5_frequency(state, self.min_minutes_between_trades),
+            ("edge",       self._gate_edge(market, ensemble_result)),
+            ("liquidity",  self._gate_liquidity(market, ensemble_result, bet_size)),
+            ("drawdown",   self._gate_drawdown()),
+            ("confidence", self._gate_confidence(ensemble_result)),
+            ("staleness",  self._gate_staleness()),
         ]
-        for gate_fn in gates:
-            result = gate_fn()
-            if not result.passed:
-                log.warning(
-                    "Gate %d [%s] BLOCKED: %s",
-                    result.failed_gate, result.gate_name, result.reason,
-                )
-                return result
 
-        log.info("All risk gates passed")
-        return GateResult.ok()
+        details: dict = {}
+        for name, coro in gates:
+            passed, reason = await coro
+            details[name] = {"passed": passed, "reason": reason}
+            if not passed:
+                return GateResult(
+                    passed       = False,
+                    failed_gate  = name,
+                    reason       = reason,
+                    gate_details = details,
+                    checked_at   = datetime.now(timezone.utc),
+                )
+
+        log.info("All 5 risk gates passed")
+        return GateResult(
+            passed       = True,
+            failed_gate  = None,
+            reason       = "all gates passed",
+            gate_details = details,
+            checked_at   = datetime.now(timezone.utc),
+        )
+
+    # ------------------------------------------------------------------
+    # Gate 1 — Edge
+    # ------------------------------------------------------------------
+
+    async def _gate_edge(
+        self, market: dict, ensemble_result
+    ) -> tuple[bool, str]:
+        """
+        Ensemble edge must clear MIN_EDGE above the market ask price.
+
+        edge = consensus_prob - market_ask_price
+        pass if edge >= MIN_EDGE (0.05)
+        """
+        direction      = ensemble_result.direction     # "yes" | "no" | "flat"
+        consensus_prob = ensemble_result.consensus_prob
+        min_edge       = settings.MIN_EDGE
+
+        if direction not in ("yes", "no"):
+            reason = f"direction is '{direction}' — no trade signal"
+            log.info("Gate [edge]: FAIL — %s", reason)
+            return False, reason
+
+        if direction == "yes":
+            market_price = market.get("yes_ask", 50) / 100.0
+        else:
+            market_price = market.get("no_ask", 50) / 100.0
+
+        edge   = consensus_prob - market_price
+        passed = edge >= min_edge
+        reason = f"Edge: {edge:.1%} vs min {min_edge:.1%}"
+        log.info("Gate [edge]: %s — %s", "PASS" if passed else "FAIL", reason)
+        return passed, reason
+
+    # ------------------------------------------------------------------
+    # Gate 2 — Liquidity
+    # ------------------------------------------------------------------
+
+    async def _gate_liquidity(
+        self, market: dict, ensemble_result, bet_size: float
+    ) -> tuple[bool, str]:
+        """
+        Enough ask-side depth must exist within 3 cents of the best ask
+        to fill our intended bet at market.
+
+        available_liquidity = sum of ask sizes within 3¢ of best ask
+        contracts_needed    = bet_size / ask_price_per_contract
+        pass if available_liquidity >= contracts_needed
+        """
+        ticker    = market.get("ticker", "")
+        direction = ensemble_result.direction
+
+        try:
+            ob = await self._kalshi.get_order_book(ticker)
+        except Exception as exc:
+            reason = f"Order book fetch failed: {exc}"
+            log.warning("Gate [liquidity]: FAIL — %s", reason)
+            return False, reason
+
+        if direction == "yes":
+            asks            = ob.get("yes_asks", [])
+            ask_price_cents = market.get("yes_ask", 50)
+        else:
+            asks            = ob.get("no_asks", [])
+            ask_price_cents = market.get("no_ask", 50)
+
+        if not asks:
+            reason = f"No {direction.upper()} asks in order book"
+            log.info("Gate [liquidity]: FAIL — %s", reason)
+            return False, reason
+
+        best_ask      = asks[0]["price"]
+        price_ceiling = best_ask + 3    # accept fills up to 3¢ worse than best
+
+        available_liquidity = sum(
+            lv["size"] for lv in asks if lv["price"] <= price_ceiling
+        )
+
+        ask_price_dollars = ask_price_cents / 100.0
+        if ask_price_dollars <= 0:
+            reason = "Ask price is zero — market not tradeable"
+            log.warning("Gate [liquidity]: FAIL — %s", reason)
+            return False, reason
+
+        contracts_needed = bet_size / ask_price_dollars
+        passed = available_liquidity >= contracts_needed
+        reason = (
+            f"Liquidity: {available_liquidity:.0f} contracts available, "
+            f"need {contracts_needed:.1f}"
+        )
+        log.info("Gate [liquidity]: %s — %s", "PASS" if passed else "FAIL", reason)
+        return passed, reason
+
+    # ------------------------------------------------------------------
+    # Gate 3 — Drawdown
+    # ------------------------------------------------------------------
+
+    async def _gate_drawdown(self) -> tuple[bool, str]:
+        """
+        Two sub-checks:
+          1. Daily loss used must be below DAILY_LOSS_LIMIT.
+          2. Open position exposure must be < 40% of current bankroll.
+        """
+        daily_stats     = await self._db.get_daily_stats()
+        daily_loss_used = daily_stats.daily_loss_used
+        loss_limit      = settings.DAILY_LOSS_LIMIT
+
+        if daily_loss_used >= loss_limit:
+            reason = (
+                f"Daily loss: ${daily_loss_used:.2f} / ${loss_limit:.0f} — "
+                "limit reached, halting for the day"
+            )
+            log.info("Gate [drawdown]: FAIL — %s", reason)
+            return False, reason
+
+        # Bankroll exposure sub-check
+        try:
+            balance_dollars = await self._kalshi.get_balance()
+        except Exception as exc:
+            reason = f"Balance fetch failed: {exc}"
+            log.warning("Gate [drawdown]: FAIL — %s", reason)
+            return False, reason
+
+        open_trades = await self._db.get_open_trades()
+        open_exposure_dollars = sum(
+            t.entry_price * t.contracts / 100 for t in open_trades
+        )
+
+        if balance_dollars > 0:
+            max_exposure = balance_dollars * 0.40
+            if open_exposure_dollars >= max_exposure:
+                reason = (
+                    f"Exposure: ${open_exposure_dollars:.2f} >= 40% of "
+                    f"bankroll ${balance_dollars:.2f}"
+                )
+                log.info("Gate [drawdown]: FAIL — %s", reason)
+                return False, reason
+
+        reason = f"Daily loss: ${daily_loss_used:.2f} / ${loss_limit:.0f}"
+        log.info("Gate [drawdown]: PASS — %s", reason)
+        return True, reason
+
+    # ------------------------------------------------------------------
+    # Gate 4 — Confidence
+    # ------------------------------------------------------------------
+
+    async def _gate_confidence(self, ensemble_result) -> tuple[bool, str]:
+        """
+        Ensemble must have both sufficient confidence AND action == "TRADE".
+        Ensemble sets action to WAIT/SKIP when spread or confidence fails
+        its own internal thresholds — this gate catches those cases.
+        """
+        confidence = ensemble_result.confidence
+        action     = ensemble_result.action
+        min_conf   = settings.MIN_CONFIDENCE
+
+        if action != "TRADE":
+            reason = f"Ensemble action is '{action}' — not TRADE"
+            log.info("Gate [confidence]: FAIL — %s", reason)
+            return False, reason
+
+        passed = confidence >= min_conf
+        reason = f"Confidence: {confidence:.1%} vs min {min_conf:.1%}"
+        log.info("Gate [confidence]: %s — %s", "PASS" if passed else "FAIL", reason)
+        return passed, reason
+
+    # ------------------------------------------------------------------
+    # Gate 5 — Staleness
+    # ------------------------------------------------------------------
+
+    async def _gate_staleness(self) -> tuple[bool, str]:
+        """
+        BTC price data must be fresh (< PRICE_STALENESS_SECONDS old).
+        Delegates to CoinbaseFeed.is_stale() which already checks the threshold.
+        """
+        stale = self._feed.is_stale()
+
+        last = self._feed.last_update
+        if last is not None:
+            age = (datetime.now(timezone.utc) - last).total_seconds()
+            age_str = f"{age:.0f}s"
+        else:
+            age_str = "never"
+
+        max_age = settings.PRICE_STALENESS_SECONDS
+
+        if stale:
+            reason = f"Data age: {age_str} vs max {max_age}s — price feed stale"
+            log.info("Gate [staleness]: FAIL — %s", reason)
+            return False, reason
+
+        reason = f"Data age: {age_str} vs max {max_age}s"
+        log.info("Gate [staleness]: PASS — %s", reason)
+        return True, reason
