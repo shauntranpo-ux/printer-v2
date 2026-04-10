@@ -423,32 +423,41 @@ class KalshiClient:
 
     async def place_order(
         self,
-        ticker: str,
-        side:   str,    # "yes" | "no"
-        price:  int,    # cents (1–99)
-        count:  int,    # number of contracts
-        action: str = "buy",   # "buy" | "sell"
+        ticker:     str,
+        side:       str,               # "yes" | "no"
+        count:      int,               # number of contracts
+        action:     str = "buy",       # "buy" | "sell"
+        price:      int | None = None, # cents (1–99) — required for limit, omit for market
+        order_type: str = "limit",     # "limit" | "market"
     ) -> dict:
         """
-        Place a limit order.
+        Place a limit or market order.
+
+        Market orders: omit price, pass order_type="market". Fills immediately
+        at best available price; returns status="resting" if no counter-party.
+        Limit  orders: provide price in cents (1–99).
 
         Returns:
           {"order_id": str, "status": str, "filled_price": int | None}
         """
         side_lc   = side.lower()
         action_lc = action.lower()
-        yes_price = price if side_lc == "yes" else (100 - price)
-        no_price  = price if side_lc == "no"  else (100 - price)
 
         body: dict[str, Any] = {
-            "ticker":    ticker,
-            "action":    action_lc,
-            "side":      side_lc,
-            "type":      "limit",
-            "count":     count,
-            "yes_price": yes_price,
-            "no_price":  no_price,
+            "ticker": ticker,
+            "action": action_lc,
+            "side":   side_lc,
+            "type":   order_type,
+            "count":  count,
         }
+
+        if order_type == "limit":
+            if price is None:
+                raise ValueError("price is required for limit orders")
+            yes_price = price if side_lc == "yes" else (100 - price)
+            no_price  = price if side_lc == "no"  else (100 - price)
+            body["yes_price"] = yes_price
+            body["no_price"]  = no_price
 
         try:
             data = await self._post("/portfolio/orders", body)
@@ -458,16 +467,25 @@ class KalshiClient:
             _raise_for_response(exc.response)
             raise
 
-        order = data.get("order", data)
+        order     = data.get("order", data)
+        status    = order.get("status", "?")
+        price_str = f" @ {price}¢" if price is not None else " (market)"
         log.info(
-            "Order placed: %s  %s %s %s x%d @ %dc  status=%s",
-            order.get("order_id", "?"), action_lc.upper(), side_lc.upper(), ticker,
-            count, price, order.get("status", "?"),
+            "Order placed: %s  %s %s %s x%d%s  status=%s",
+            order.get("order_id", "?"), action_lc.upper(), side_lc.upper(),
+            ticker, count, price_str, status,
         )
+
+        qty_filled = order.get("quantity_filled", 0)
+        if qty_filled:
+            fp = order.get("yes_price") if side_lc == "yes" else order.get("no_price")
+        else:
+            fp = None
+
         return {
-            "order_id":    order.get("order_id", ""),
-            "status":      order.get("status", "unknown"),
-            "filled_price": order.get("yes_price") if order.get("quantity_filled") else None,
+            "order_id":     order.get("order_id", ""),
+            "status":       status,
+            "filled_price": fp,
         }
 
     async def cancel_order(self, order_id: str) -> bool:

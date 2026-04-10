@@ -8,6 +8,7 @@ only needs to call enter_trade() and check_exits().
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from datetime import datetime, timedelta, timezone
@@ -164,42 +165,71 @@ class Strategy:
             log.info("Contract count rounds to 0 — skipping entry")
             return None
 
-        actual_cost = contracts * market_price      # dollars
+        # Step 4 — place market order, retry up to 4 times (1 s between attempts)
+        _MAX_ATTEMPTS = 5   # 1 initial + 4 retries
+        order_result: dict | None = None
+        final_status  = "unknown"
 
-        # Step 4 — place order
-        try:
-            order_result = await self._kalshi.place_order(
-                ticker=ticker,
-                side=direction,
-                price=ask_cents,
-                count=contracts,
-            )
-        except Exception as exc:
-            log.error("Order placement failed for %s: %s", ticker, exc)
-            await self._telegram.send_error(str(exc), "enter_trade")
-            return None
+        for attempt in range(_MAX_ATTEMPTS):
+            if attempt > 0:
+                await asyncio.sleep(1.0)
+                log.info(
+                    "Market order retry %d/%d for %s",
+                    attempt, _MAX_ATTEMPTS - 1, ticker,
+                )
 
-        # Check fill status — Kalshi statuses: filled, partially_filled, resting, canceled
-        order_status = order_result.get("status", "unknown")
-        order_id     = order_result.get("order_id", "")
-        if order_status not in ("filled", "partially_filled", "unknown"):
-            # Order is sitting unfilled (resting/pending) — cancel it and notify
-            log.warning(
-                "Order for %s is %s (unfilled) — cancelling resting order %s",
-                ticker, order_status, order_id,
-            )
+            try:
+                order_result = await self._kalshi.place_order(
+                    ticker=ticker,
+                    side=direction,
+                    count=contracts,
+                    order_type="market",
+                )
+            except Exception as exc:
+                log.error(
+                    "Market order attempt %d/%d failed for %s: %s",
+                    attempt + 1, _MAX_ATTEMPTS, ticker, exc,
+                )
+                if attempt == _MAX_ATTEMPTS - 1:
+                    await self._telegram.send_error(str(exc), "enter_trade")
+                    return None
+                continue
+
+            final_status = order_result.get("status", "unknown")
+            if final_status in ("filled", "partially_filled"):
+                log.info(
+                    "Market order confirmed filled — %s  attempt %d/%d  status=%s",
+                    ticker, attempt + 1, _MAX_ATTEMPTS, final_status,
+                )
+                break
+
+            # Cancel the resting/unfilled order before retrying
+            order_id = order_result.get("order_id", "")
             if order_id:
                 try:
                     await self._kalshi.cancel_order(order_id)
                 except Exception as cancel_exc:
-                    log.warning("Failed to cancel resting order %s: %s", order_id, cancel_exc)
-            await self._telegram.send_error(
-                f"Order for {ticker} ({direction.upper()} ×{contracts} @ {ask_cents}¢) "
-                f"could not fill — no counter-party at that price (status: {order_status}). "
-                f"Order cancelled.",
-                "Order unfilled",
-            )
+                    log.warning("Failed to cancel order %s: %s", order_id, cancel_exc)
+
+            if attempt == _MAX_ATTEMPTS - 1:
+                log.warning(
+                    "Market order for %s unfilled after %d attempts (last status: %s)",
+                    ticker, _MAX_ATTEMPTS, final_status,
+                )
+                await self._telegram.send_error(
+                    f"Market order for {ticker} ({direction.upper()} ×{contracts}) "
+                    f"could not fill after {_MAX_ATTEMPTS} attempts "
+                    f"(last status: {final_status}) — no counter-party. Order cancelled.",
+                    "Order unfilled",
+                )
+                return None
+
+        if order_result is None:
             return None
+
+        # Use the actual fill price when reported; fall back to our ask estimate
+        filled_cents = order_result.get("filled_price") or ask_cents
+        actual_cost  = contracts * (filled_cents / 100.0)
 
         # Step 5 — log to database
         spread        = ensemble_result.spread if ensemble_result.models else None
@@ -211,7 +241,7 @@ class Strategy:
         trade_id = await self._db.log_trade(
             market_ticker       = ticker,
             direction           = direction.upper(),
-            entry_price         = float(ask_cents),
+            entry_price         = float(filled_cents),
             size_dollars        = actual_cost,
             contracts           = contracts,
             edge                = edge,
@@ -232,7 +262,7 @@ class Strategy:
             timestamp           = ts,
             market_ticker       = ticker,
             direction           = direction.upper(),
-            entry_price         = float(ask_cents),
+            entry_price         = float(filled_cents),
             size_dollars        = actual_cost,
             contracts           = contracts,
             kelly_fraction      = None,
@@ -257,10 +287,10 @@ class Strategy:
         await self._telegram.send_trade_entry(trade)
 
         log.info(
-            "Trade entered: id=%d [%s] %s %s ×%d @ %d¢ | "
+            "Trade entered: id=%d [%s] %s %s ×%d @ %d¢ (market) | "
             "p_win=%.3f edge=%.3f conf=%.3f cost=$%.2f",
             trade_id, asset_symbol, direction.upper(), ticker, contracts,
-            ask_cents, p_win, edge, ensemble_result.confidence, actual_cost,
+            filled_cents, p_win, edge, ensemble_result.confidence, actual_cost,
         )
         return trade
 
