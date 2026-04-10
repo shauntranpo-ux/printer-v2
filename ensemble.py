@@ -62,7 +62,11 @@ def _deepseek_system(symbol: str) -> str:
 _JSON_SCHEMA_HINT = (
     '\n\nRespond with exactly this JSON structure and nothing else:\n'
     '{"direction": "YES" or "NO", "probability": 0.0-1.0, '
-    '"confidence": 0.0-1.0, "reasoning": "one sentence"}'
+    '"confidence": 0.0-1.0, "reasoning": "one sentence"}\n'
+    'IMPORTANT: "probability" is ALWAYS P(YES) — the probability that price ends ABOVE the strike. '
+    'If you predict DOWN, set direction "NO" and probability BELOW 0.50 '
+    '(e.g. 0.35 means 35% chance YES / 65% chance NO). '
+    'If you predict UP, set direction "YES" and probability ABOVE 0.50.'
 )
 
 
@@ -247,6 +251,16 @@ class EnsembleEngine:
             raise ValueError(f"{model_name}: probability {probability} out of [0,1]")
         if not 0.0 <= confidence <= 1.0:
             raise ValueError(f"{model_name}: confidence {confidence} out of [0,1]")
+
+        # Normalize: probability must always represent P(YES).
+        # If a model returned P(direction) instead — e.g. NO with 0.70 — flip it.
+        # Inconsistency: NO + prob > 0.5 means model meant "70% chance NO" = P(YES)=0.30
+        #                YES + prob < 0.5 means model meant "40% chance YES" — already correct
+        # We detect the cross-direction case (NO+high or YES+low) and flip.
+        if (direction == "NO" and probability > 0.5) or (direction == "YES" and probability < 0.5):
+            probability = 1.0 - probability
+        # Re-derive direction from the now-correct P(YES)
+        direction = "YES" if probability >= 0.5 else "NO"
 
         return ModelResult(
             model_name  = model_name,
@@ -456,12 +470,19 @@ class EnsembleEngine:
         confidence = avg_confidence * 0.8 if spread > 0.20 else avg_confidence
 
         # Step 6 — action gate
+        # Count how many models agree on direction (YES vs NO by P(YES) > 0.5)
+        yes_votes = sum(1 for r in valid if r.probability > 0.5)
+        no_votes  = len(valid) - yes_votes
+        majority  = max(yes_votes, no_votes) / len(valid)
+
         skip_reason: str | None = None
-        if spread > settings.MAX_MODEL_SPREAD:
+        if spread > settings.MAX_MODEL_SPREAD and majority < 0.75:
+            # Only WAIT when spread is high AND models are genuinely split.
+            # If ≥3/4 models agree on direction (majority ≥ 0.75), proceed despite spread.
             action = "WAIT"
             skip_reason = (
-                f"model spread {spread:.3f} exceeds MAX_MODEL_SPREAD "
-                f"{settings.MAX_MODEL_SPREAD:.2f}"
+                f"model spread {spread:.3f} > {settings.MAX_MODEL_SPREAD:.2f} "
+                f"with only {int(majority * len(valid))}/{len(valid)} models agreeing on direction"
             )
         elif confidence < settings.MIN_CONFIDENCE:
             action = "SKIP"
@@ -476,8 +497,10 @@ class EnsembleEngine:
         latencies = {r.model_name: f"{r.latency_ms:.0f}ms" for r in valid}
         log.info(
             "Ensemble result: prob=%.3f spread=%.3f conf=%.3f action=%s  "
+            "votes=YES:%d/NO:%d  "
             "| claude=%s gpt=%s gemini=%s deepseek=%s  latencies=%s",
             consensus_prob, spread, confidence, action,
+            yes_votes, no_votes,
             f"{claude_r.probability:.2f}"   if claude_r   else "FAIL",
             f"{gpt_r.probability:.2f}"      if gpt_r      else "FAIL",
             f"{gemini_r.probability:.2f}"   if gemini_r   else "FAIL",
