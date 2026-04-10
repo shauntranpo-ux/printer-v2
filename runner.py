@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from config import settings
-from database import Database
+from database import Database, TradeRow
 from coinbase_feed import CoinbaseFeed
 from ensemble import EnsembleEngine
 from risk_gates import RiskGates, BotState
@@ -80,7 +80,7 @@ class BotRunner:
             settings.private_key_path,
             settings.KALSHI_BASE_URL,
         )
-        self.telegram = TelegramAlerter(settings.TELEGRAM_BOT_TOKEN, settings.TELEGRAM_CHAT_ID)
+        self.telegram = TelegramAlerter()
 
         self._last_trade_ts: float = 0.0
         self._starting_balance_cents: int = 0
@@ -106,14 +106,14 @@ class BotRunner:
         log.info("Kalshi balance: $%.2f", balance.available_balance / 100)
 
         await self.db.log_event("startup", f"printer-v2 started [{settings.env}] BTC=${btc_price:,.2f}")
-        await self.telegram.alert_startup(settings.env, btc_price)
+        await self.telegram.send_startup()
         self._running = True
 
     async def stop(self, reason: str = "clean exit") -> None:
         log.info("Shutting down: %s", reason)
         self._running = False
         await self.db.log_event("shutdown", reason)
-        await self.telegram.alert_shutdown(reason)
+        await self.telegram.send_kill_switch()
         await self.feed.stop()
         await self.telegram.stop()
         await self.kalshi.close()
@@ -150,7 +150,7 @@ class BotRunner:
 
         if self.feed.is_stale(max_age_sec=30):
             log.warning("BTC feed is stale — skipping tick")
-            await self.telegram.alert_error("tick", "BTC feed stale — skipped tick")
+            await self.telegram.send_error("BTC feed stale — skipped tick", "tick")
             return
 
         # 1. Find the active BTC market on Kalshi
@@ -162,7 +162,7 @@ class BotRunner:
             ticker = market["ticker"]
         except Exception as exc:
             log.error("Failed to fetch Kalshi market: %s", exc)
-            await self.telegram.alert_error("find_market", str(exc))
+            await self.telegram.send_error(str(exc), "find_market")
             return
 
         # 2. Run ensemble
@@ -188,7 +188,7 @@ class BotRunner:
             positions = await self.kalshi.get_positions()
         except Exception as exc:
             log.error("Failed to fetch account state: %s", exc)
-            await self.telegram.alert_error("account_fetch", str(exc))
+            await self.telegram.send_error(str(exc), "account_fetch")
             return
 
         open_trades = await self.db.get_open_trades()
@@ -216,8 +216,9 @@ class BotRunner:
 
         if not gate_result.passed:
             if gate_result.failed_gate in (1, 2):
-                await self.telegram.alert_gate_blocked(
-                    gate_result.failed_gate, gate_result.gate_name, gate_result.reason
+                await self.telegram.send_error(
+                    gate_result.reason,
+                    f"Gate {gate_result.failed_gate} [{gate_result.gate_name}]",
                 )
             return
 
@@ -246,10 +247,16 @@ class BotRunner:
             log.info("Order placed: %s", order.order_id)
         except Exception as exc:
             log.error("Order placement failed: %s", exc)
-            await self.telegram.alert_error("place_order", str(exc))
+            await self.telegram.send_error(str(exc), "place_order")
             return
 
         # 8. Log trade + alert
+        spread = (
+            max(signal.models, key=lambda m: m.prob).prob
+            - min(signal.models, key=lambda m: m.prob).prob
+            if signal.models else None
+        )
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         trade_id = await self.db.log_trade(
             market_ticker=ticker,
             direction=order_params.side.upper(),
@@ -258,21 +265,24 @@ class BotRunner:
             contracts=order_params.contracts,
             edge=signal.confidence,
             ensemble_confidence=signal.confidence,
-            model_spread=max(signal.models, key=lambda m: m.prob).prob
-                         - min(signal.models, key=lambda m: m.prob).prob
-                         if signal.models else None,
+            model_spread=spread,
             btc_price_at_entry=self.feed.get_price(),
+            timestamp=ts,
         )
         self._last_trade_ts = time.time()
 
-        await self.telegram.alert_trade_open(
-            ticker=ticker,
-            side=order_params.side,
-            contracts=order_params.contracts,
-            price_cents=order_params.price_cents,
-            dollar_size=order_params.dollar_size,
-            confidence=signal.confidence,
+        # Build a TradeRow for the alert without an extra DB roundtrip
+        trade_row = TradeRow(
+            id=trade_id, timestamp=ts,
+            market_ticker=ticker, direction=order_params.side.upper(),
+            entry_price=order_params.price_cents, size_dollars=order_params.dollar_size,
+            contracts=order_params.contracts, kelly_fraction=None,
+            edge=signal.confidence, ensemble_confidence=signal.confidence,
+            model_spread=spread, btc_price_at_entry=self.feed.get_price(),
+            btc_momentum=None, status="open",
+            exit_price=None, exit_reason=None, pnl_dollars=None, closed_at=None,
         )
+        await self.telegram.send_trade_entry(trade_row)
 
     # ------------------------------------------------------------------
     # Position monitor (runs every 60s, independent of the 15m tick)
@@ -325,26 +335,28 @@ class BotRunner:
 
                 if exit_reason:
                     pnl = (current_price - trade.entry_price) * trade.contracts / 100
+                    closed_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                     await self.db.update_trade(
                         trade.id,
                         status="closed",
                         exit_price=current_price,
                         exit_reason=exit_reason,
                         pnl_dollars=pnl,
+                        closed_at=closed_ts,
                     )
                     await self.db.update_daily_stats()
                     self.strategy.record_trade_outcome(
                         int(trade.entry_price), int(current_price), trade.contracts
                     )
                     self.ensemble.record_outcome(trade.entry_price, current_price)
-                    await self.telegram.alert_trade_close(
-                        ticker=trade.market_ticker,
-                        side=trade.direction,
-                        contracts=trade.contracts,
-                        entry_cents=int(trade.entry_price),
-                        exit_cents=int(current_price),
-                        pnl=pnl,
+                    # Populate the closed fields on the trade object for the alert
+                    closed_trade = TradeRow(
+                        **{**trade.__dict__,
+                           "exit_price": current_price,
+                           "pnl_dollars": pnl,
+                           "closed_at": closed_ts}
                     )
+                    await self.telegram.send_trade_exit(closed_trade, exit_reason)
                     log.info("Trade %d closed  reason=%s  P&L=$%.2f", trade.id, exit_reason, pnl)
 
             elif order.status == "canceled":

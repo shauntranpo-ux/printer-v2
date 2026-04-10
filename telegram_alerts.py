@@ -6,33 +6,97 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import httpx
 
+from config import settings
+from database import DailyStats, TradeRow
+
 log = logging.getLogger(__name__)
 
-TELEGRAM_API = "https://api.telegram.org/bot{token}/sendMessage"
+_API_BASE = "https://api.telegram.org/bot{token}/sendMessage"
+_MAX_RETRIES = 3
+_RETRY_DELAYS = (2.0, 4.0)   # seconds between attempt 1→2 and 2→3
 
 
 # ---------------------------------------------------------------------------
-# Message queue + sender
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+def _pct(value: float | None, scale: float = 1.0) -> str:
+    """Format a fraction as a percentage string, e.g. 0.735 → '73.5%'."""
+    if value is None:
+        return "—"
+    return f"{value * scale:.1f}%"
+
+
+def _usd(value: float | None) -> str:
+    if value is None:
+        return "—"
+    sign = "+" if value > 0 else ""
+    return f"{sign}${value:.2f}"
+
+
+def _momentum_emoji(btc_momentum: float | None) -> str:
+    if btc_momentum is None:
+        return "➡️"
+    if btc_momentum > 0.001:
+        return "📈"
+    if btc_momentum < -0.001:
+        return "📉"
+    return "➡️"
+
+
+def _hold_time(opened: str | None, closed: str | None) -> str:
+    """Return a human-readable hold duration, e.g. '1h 23m' or '8m'."""
+    if not opened or not closed:
+        return "—"
+    try:
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        t0 = datetime.strptime(opened, fmt).replace(tzinfo=timezone.utc)
+        t1 = datetime.strptime(closed, fmt).replace(tzinfo=timezone.utc)
+        secs = int((t1 - t0).total_seconds())
+        if secs < 0:
+            return "—"
+        h, rem = divmod(secs, 3600)
+        m = rem // 60
+        if h > 0:
+            return f"{h}h {m}m"
+        return f"{m}m"
+    except (ValueError, TypeError):
+        return "—"
+
+
+def _direction_line(direction: str) -> str:
+    arrow = "🟢" if direction == "YES" else "🔴"
+    return f"{arrow} <b>{direction}</b>"
+
+
+# ---------------------------------------------------------------------------
+# TelegramAlerter
 # ---------------------------------------------------------------------------
 
 class TelegramAlerter:
-    def __init__(self, token: str, chat_id: str):
-        self._token = token
-        self._chat_id = chat_id
-        self._enabled = bool(token and chat_id)
+    def __init__(self) -> None:
+        self._token    = settings.TELEGRAM_BOT_TOKEN
+        self._chat_id  = settings.TELEGRAM_CHAT_ID
+        self._enabled  = settings.telegram_enabled
+        self._url      = _API_BASE.format(token=self._token)
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._http = httpx.AsyncClient(timeout=10.0)
 
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     async def start(self) -> None:
         if not self._enabled:
-            log.info("Telegram alerts disabled (no token/chat_id configured)")
+            log.info("Telegram disabled — TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set")
             return
         self._task = asyncio.create_task(self._sender_loop(), name="telegram-sender")
+        log.info("Telegram alerter started (chat_id=%s)", self._chat_id)
 
     async def stop(self) -> None:
         if self._task:
@@ -43,100 +107,143 @@ class TelegramAlerter:
                 pass
         await self._http.aclose()
 
-    async def send(self, text: str) -> None:
-        """Enqueue a message — never blocks the caller."""
+    # ------------------------------------------------------------------
+    # Internal queue + retry sender
+    # ------------------------------------------------------------------
+
+    async def _enqueue(self, text: str) -> None:
+        """Put a message on the queue. Always returns immediately."""
         if self._enabled:
             await self._queue.put(text)
 
     async def _sender_loop(self) -> None:
-        url = TELEGRAM_API.format(token=self._token)
         while True:
             text = await self._queue.get()
             try:
-                await self._http.post(url, json={
-                    "chat_id": self._chat_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                })
+                await self._send_with_retry(text)
             except Exception as exc:
-                log.warning("Telegram send failed: %s", exc)
+                # Already exhausted retries inside _send_with_retry;
+                # this is a belt-and-suspenders catch so the loop never dies.
+                log.error("Telegram sender loop unexpected error: %s", exc)
             finally:
                 self._queue.task_done()
-            await asyncio.sleep(0.3)   # stay well under 30 msg/s limit
+            await asyncio.sleep(0.35)   # ~2-3 msg/s, well under Telegram's 30/s limit
+
+    async def _send_with_retry(self, text: str) -> None:
+        payload = {
+            "chat_id":    self._chat_id,
+            "text":       text,
+            "parse_mode": "HTML",
+        }
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                resp = await self._http.post(self._url, json=payload)
+                if resp.status_code == 429:
+                    # Telegram rate-limit: honour Retry-After header
+                    retry_after = float(resp.headers.get("Retry-After", "5"))
+                    log.warning("Telegram rate-limited — waiting %.0fs", retry_after)
+                    await asyncio.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                return   # success
+            except httpx.HTTPStatusError as exc:
+                log.warning("Telegram HTTP %d on attempt %d: %s",
+                            exc.response.status_code, attempt, exc)
+            except Exception as exc:
+                log.warning("Telegram send attempt %d failed: %s", attempt, exc)
+
+            if attempt < _MAX_RETRIES:
+                await asyncio.sleep(_RETRY_DELAYS[attempt - 1])
+
+        log.warning("Telegram: all %d attempts failed — message dropped (silent fail)", _MAX_RETRIES)
 
     # ------------------------------------------------------------------
-    # Typed alert helpers
+    # Public alert methods
     # ------------------------------------------------------------------
 
-    async def alert_trade_open(
-        self,
-        ticker: str,
-        side: str,
-        contracts: int,
-        price_cents: int,
-        dollar_size: float,
-        confidence: float,
-    ) -> None:
-        emoji = "📈" if side == "yes" else "📉"
-        await self.send(
-            f"{emoji} <b>TRADE OPEN</b>\n"
-            f"Market: <code>{ticker}</code>\n"
-            f"Side: <b>{side.upper()}</b>  ×{contracts} contracts @ {price_cents}¢\n"
-            f"Cost: <b>${dollar_size:.2f}</b>  |  Confidence: {confidence:.0%}"
+    async def send_trade_entry(self, trade: TradeRow) -> None:
+        mom_emoji = _momentum_emoji(trade.btc_momentum)
+        mom_score = f"{trade.btc_momentum:+.4f}" if trade.btc_momentum is not None else "—"
+        btc = f"${trade.btc_price_at_entry:,.2f}" if trade.btc_price_at_entry else "—"
+        entry_cents = int(trade.entry_price)
+
+        await self._enqueue(
+            f"🟢 <b>TRADE ENTERED</b>\n"
+            f"Market: <code>{trade.market_ticker}</code>\n"
+            f"Direction: {_direction_line(trade.direction)}\n"
+            f"Size: <b>${trade.size_dollars:.2f}</b> ({trade.contracts} contracts)\n"
+            f"Entry Price: <b>{entry_cents}¢</b>\n"
+            f"Edge: <b>{_pct(trade.edge, 100)}</b>\n"
+            f"Confidence: <b>{_pct(trade.ensemble_confidence, 100)}</b>\n"
+            f"BTC Price: {btc}\n"
+            f"Momentum: {mom_emoji} {mom_score}"
         )
 
-    async def alert_trade_close(
-        self,
-        ticker: str,
-        side: str,
-        contracts: int,
-        entry_cents: int,
-        exit_cents: int,
-        pnl: float,
-    ) -> None:
-        emoji = "✅" if pnl >= 0 else "❌"
+    async def send_trade_exit(self, trade: TradeRow, reason: str) -> None:
+        pnl = trade.pnl_dollars or 0.0
+        pnl_pct = (pnl / trade.size_dollars * 100) if trade.size_dollars else 0.0
+        hold = _hold_time(trade.timestamp, trade.closed_at)
+        pnl_emoji = "✅" if pnl >= 0 else "❌"
         sign = "+" if pnl >= 0 else ""
-        await self.send(
-            f"{emoji} <b>TRADE CLOSED</b>\n"
-            f"Market: <code>{ticker}</code>  {side.upper()} ×{contracts}\n"
-            f"Entry: {entry_cents}¢  →  Exit: {exit_cents}¢\n"
-            f"P&amp;L: <b>{sign}${pnl:.2f}</b>"
+
+        await self._enqueue(
+            f"{pnl_emoji} <b>TRADE CLOSED</b>\n"
+            f"Market: <code>{trade.market_ticker}</code>\n"
+            f"Direction: {_direction_line(trade.direction)}\n"
+            f"P&amp;L: <b>{sign}${pnl:.2f}</b> ({sign}{pnl_pct:.1f}%)\n"
+            f"Exit Reason: <b>{reason}</b>\n"
+            f"Hold Time: {hold}"
         )
 
-    async def alert_gate_blocked(self, gate_num: int, gate_name: str, reason: str) -> None:
-        await self.send(
-            f"🚧 <b>Gate {gate_num} [{gate_name}] blocked trade</b>\n"
-            f"{reason}"
-        )
-
-    async def alert_error(self, context: str, error: str) -> None:
-        await self.send(
-            f"🔴 <b>ERROR</b> [{context}]\n"
-            f"<code>{error[:300]}</code>"
-        )
-
-    async def alert_daily_summary(
+    async def send_daily_summary(
         self,
-        trades: int,
-        wins: int,
-        net_pnl: float,
-        balance: float,
+        stats: DailyStats,
+        best_trade: float | None = None,
+        worst_trade: float | None = None,
     ) -> None:
-        win_rate = wins / trades if trades else 0.0
-        emoji = "💰" if net_pnl >= 0 else "📉"
-        sign = "+" if net_pnl >= 0 else ""
-        await self.send(
-            f"{emoji} <b>Daily Summary</b>\n"
-            f"Trades: {trades}  |  Win rate: {win_rate:.0%}\n"
-            f"Net P&amp;L: <b>{sign}${net_pnl:.2f}</b>\n"
-            f"Balance: ${balance:.2f}"
+        wr = _pct(stats.win_rate, 100)
+        pnl_emoji = "💰" if stats.total_pnl >= 0 else "📉"
+        loss_limit = settings.DAILY_LOSS_LIMIT
+
+        best_str  = _usd(best_trade)
+        worst_str = _usd(worst_trade)
+
+        await self._enqueue(
+            f"{pnl_emoji} <b>DAILY SUMMARY</b>\n"
+            f"Date: {stats.date}\n"
+            f"Trades: {stats.total_trades}\n"
+            f"Win Rate: <b>{wr}</b>\n"
+            f"P&amp;L: <b>{_usd(stats.total_pnl)}</b>\n"
+            f"Daily Loss Used: ${stats.daily_loss_used:.2f} / ${loss_limit:.0f}\n"
+            f"Best Trade: {best_str}\n"
+            f"Worst Trade: {worst_str}"
         )
 
-    async def alert_startup(self, env: str, btc_price: float) -> None:
-        await self.send(
-            f"🟢 <b>printer-v2 started</b>  [{env}]\n"
-            f"BTC: ${btc_price:,.2f}"
+    async def send_error(self, error_msg: str, context: str) -> None:
+        # Truncate long errors so the message doesn't get rejected (4096 char limit)
+        truncated = error_msg[:350] + ("…" if len(error_msg) > 350 else "")
+        await self._enqueue(
+            f"⚠️ <b>BOT ERROR</b>\n"
+            f"Error: <code>{truncated}</code>\n"
+            f"Context: {context}\n"
+            f"Action: Auto-restarting..."
         )
 
-    async def alert_shutdown(self, reason: str = "clean exit") -> None:
-        await self.send(f"🔴 <b>printer-v2 stopped</b>  [{reason}]")
+    async def send_startup(self) -> None:
+        models = (
+            f"Claude ({settings.CLAUDE_MODEL.split('-')[-1]}) / "
+            f"GPT-4o / "
+            f"Gemini ({settings.GEMINI_MODEL.split('-')[-1]}) / "
+            f"DeepSeek"
+        )
+        await self._enqueue(
+            f"🚀 <b>PRINTER V2 STARTED</b>\n"
+            f"Mode: <b>{'DEMO' if settings.KALSHI_DEMO else 'LIVE'}</b>\n"
+            f"Max Bet: <b>${settings.MAX_BET_SIZE:.0f}</b>\n"
+            f"Daily Stop: <b>${settings.DAILY_LOSS_LIMIT:.0f}</b>\n"
+            f"Models: {models}\n"
+            f"Status: Scanning 24/7"
+        )
+
+    async def send_kill_switch(self) -> None:
+        await self._enqueue("☠️ <b>KILL SWITCH ACTIVATED</b> — Bot stopped")
