@@ -129,6 +129,7 @@ class TradeRow:
     gpt_prob: float | None = None
     gemini_prob: float | None = None
     deepseek_prob: float | None = None
+    asset_symbol: str | None = None
 
 
 @dataclass
@@ -252,6 +253,7 @@ class Database:
                 ("gpt_prob",      "REAL"),
                 ("gemini_prob",   "REAL"),
                 ("deepseek_prob", "REAL"),
+                ("asset_symbol",  "TEXT"),   # multi-asset: BTC/ETH/SOL/XRP/DOGE etc.
             ]:
                 try:
                     await db.execute(f"ALTER TABLE trades ADD COLUMN {col} {coltype}")
@@ -341,6 +343,7 @@ class Database:
         model_spread: float | None = None,
         btc_price_at_entry: float | None = None,
         btc_momentum: float | None = None,
+        asset_symbol: str | None = None,
         claude_prob: float | None = None,
         gpt_prob: float | None = None,
         gemini_prob: float | None = None,
@@ -357,15 +360,15 @@ class Database:
                     timestamp, market_ticker, direction, entry_price,
                     size_dollars, contracts, kelly_fraction, edge,
                     ensemble_confidence, model_spread,
-                    btc_price_at_entry, btc_momentum,
+                    btc_price_at_entry, btc_momentum, asset_symbol,
                     claude_prob, gpt_prob, gemini_prob, deepseek_prob
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ts, market_ticker, direction, entry_price,
                     size_dollars, contracts, kelly_fraction, edge,
                     ensemble_confidence, model_spread,
-                    btc_price_at_entry, btc_momentum,
+                    btc_price_at_entry, btc_momentum, asset_symbol,
                     claude_prob, gpt_prob, gemini_prob, deepseek_prob,
                 ),
             )

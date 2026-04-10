@@ -106,8 +106,9 @@ class Strategy:
         ensemble_result: Any,
         gate_result:     Any,
         *,
-        btc_price:       float | None = None,
+        btc_price:       float | None = None,   # asset price at entry (kept name for compat)
         btc_momentum:    float | None = None,
+        asset_symbol:    str          = "BTC",  # which asset this market is for
         size_multiplier: float = 1.0,
     ) -> TradeRow | None:
         """
@@ -125,9 +126,14 @@ class Strategy:
             return None
 
         # Step 1 — edge + Kelly size
-        ask_cents   = market.get("yes_ask" if direction == "yes" else "no_ask", 50)
+        ask_cents    = market.get("yes_ask" if direction == "yes" else "no_ask", 50)
         market_price = ask_cents / 100.0
-        edge         = ensemble_result.consensus_prob - market_price
+
+        # P(win): YES trades use P(YES), NO trades use 1-P(YES)
+        p_win = (ensemble_result.consensus_prob
+                 if direction == "yes"
+                 else 1.0 - ensemble_result.consensus_prob)
+        edge  = p_win - market_price
 
         bet_size = await self.calculate_bet_size(edge, market_price, direction)
         bet_size = math.floor(bet_size * size_multiplier / _ROUNDING) * _ROUNDING
@@ -178,6 +184,7 @@ class Strategy:
             model_spread        = spread,
             btc_price_at_entry  = btc_price,
             btc_momentum        = btc_momentum,
+            asset_symbol        = asset_symbol,
             claude_prob         = claude_prob,
             gpt_prob            = gpt_prob,
             gemini_prob         = gemini_prob,
@@ -199,6 +206,7 @@ class Strategy:
             model_spread        = spread,
             btc_price_at_entry  = btc_price,
             btc_momentum        = btc_momentum,
+            asset_symbol        = asset_symbol,
             status              = "open",
             exit_price          = None,
             exit_reason         = None,
@@ -214,10 +222,10 @@ class Strategy:
         await self._telegram.send_trade_entry(trade)
 
         log.info(
-            "Trade entered: id=%d %s %s ×%d @ %d¢ | "
-            "edge=%.3f conf=%.3f cost=$%.2f",
-            trade_id, direction.upper(), ticker, contracts,
-            ask_cents, edge, ensemble_result.confidence, actual_cost,
+            "Trade entered: id=%d [%s] %s %s ×%d @ %d¢ | "
+            "p_win=%.3f edge=%.3f conf=%.3f cost=$%.2f",
+            trade_id, asset_symbol, direction.upper(), ticker, contracts,
+            ask_cents, p_win, edge, ensemble_result.confidence, actual_cost,
         )
         return trade
 

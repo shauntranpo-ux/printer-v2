@@ -16,6 +16,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from config import settings
 from database import Database
@@ -562,6 +563,7 @@ class TradingBot:
             gate_result,
             btc_price        = btc_price,
             btc_momentum     = momentum,
+            asset_symbol     = asset,
             size_multiplier  = size_mult,
         )
         if trade:

@@ -377,10 +377,10 @@ class KalshiClient:
             return out
 
         return {
-            "yes_bids": _parse(book.get("yes")),
-            "yes_asks": _parse(book.get("yes_asks")),
-            "no_bids":  _parse(book.get("no")),
-            "no_asks":  _parse(book.get("no_asks")),
+            "yes_bids": _parse(book.get("yes") or book.get("yes_bids") or []),
+            "yes_asks": _parse(book.get("yes_asks") or []),
+            "no_bids":  _parse(book.get("no") or book.get("no_bids") or []),
+            "no_asks":  _parse(book.get("no_asks") or []),
         }
 
     # ------------------------------------------------------------------
@@ -407,10 +407,6 @@ class KalshiClient:
             ticker = p.get("ticker", "")
             net    = p.get("position", 0)     # positive = YES, negative = NO
             if net == 0:
-                continue
-            # Filter to BTC markets only
-            ticker_up = ticker.upper()
-            if "BTC" not in ticker_up and "KXBTC" not in ticker_up:
                 continue
             out.append({
                 "ticker":          ticker,
