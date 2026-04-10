@@ -92,8 +92,12 @@ class TradingBot:
         """
         print("BOT STARTING - ENV CHECK")
         print(f"KALSHI_KEY SET: {bool(os.getenv('KALSHI_API_KEY'))}")
+        print(f"KALSHI_KEY PREFIX: {os.getenv('KALSHI_API_KEY', '')[:8]}...")
         print(f"TELEGRAM SET: {bool(os.getenv('TELEGRAM_BOT_TOKEN'))}")
-        print(f"PRIVATE_KEY SET: {bool(os.getenv('KALSHI_PRIVATE_KEY'))}")
+        _pkey_raw = os.getenv('KALSHI_PRIVATE_KEY', '')
+        print(f"PRIVATE_KEY SET: {bool(_pkey_raw)}")
+        print(f"PRIVATE_KEY LENGTH: {len(_pkey_raw)} chars")
+        print(f"PRIVATE_KEY NEWLINES: {_pkey_raw.count(chr(10))} real, {_pkey_raw.count(chr(92)+'n')} literal \\n")
 
         log.info("=== printer-v2 starting [%s] ===", settings.env)
 

@@ -10,7 +10,6 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 from cryptography.hazmat.primitives import hashes, serialization
@@ -157,7 +156,6 @@ class KalshiClient:
         self._api_key   = settings.KALSHI_API_KEY
         self._key       = _load_key()
         self._base_url  = settings.KALSHI_BASE_URL.rstrip("/")
-        self._base_path = urlparse(self._base_url).path   # e.g. "/trade-api/v2"
         self._limiter   = _RateLimiter(_RATE_LIMIT_RPS)
         self._http      = httpx.AsyncClient(
             base_url=self._base_url,
@@ -176,10 +174,10 @@ class KalshiClient:
         Signature covers:  timestamp_ms + METHOD_UPPER + path_without_query
         """
         ts  = str(int(time.time() * 1000))
-        # Kalshi signs: timestamp_ms + METHOD + full_path (including /trade-api/v2 prefix)
+        # Kalshi signs with the endpoint path only, not the base URL prefix.
+        # e.g. "/portfolio/balance" not "/trade-api/v2/portfolio/balance"
         bare_path = path.split("?")[0]
-        sign_path = self._base_path + bare_path   # "/trade-api/v2/portfolio/balance"
-        msg = ts + method.upper() + sign_path
+        msg = ts + method.upper() + bare_path
         sig = _rsa_sign(self._key, msg)
         return {
             "KALSHI-ACCESS-KEY":       self._api_key,
