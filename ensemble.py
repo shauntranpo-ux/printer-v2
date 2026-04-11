@@ -128,9 +128,9 @@ def _claude_prompt(symbol: str) -> str:
         "  c. Required > 2× average → pull probability 15 points toward 50.\n"
         "  d. Required > 1× average → pull probability 8 points toward 50.\n\n"
 
-        "Step R2 — TIME PENALTY:\n"
-        "  • Time remaining < 3 min  → pull 15 points toward 50\n"
-        "  • Time remaining 3–6 min  → pull 8 points toward 50\n"
+        "Step R2 — TIME PENALTY (entry window is 0.5-8 min in, so 7-14.5 min remain):\n"
+        "  • Time remaining < 8 min  → pull 10 points toward 50\n"
+        "  • Time remaining < 10 min → pull 5 points toward 50\n"
         "  • Strike gap > 0.5%       → pull 10 points toward 50\n"
         "  • Strike gap > 1.0%       → pull an additional 10 toward 50\n\n"
 
@@ -140,26 +140,40 @@ def _claude_prompt(symbol: str) -> str:
 
 
 def _gpt_prompt(symbol: str) -> str:
-    """Consistency validator — checks signal alignment, always outputs a direction."""
+    """Consistency validator + physical achievability check."""
     return (
         f"You are a signal consistency validator for {symbol} 15-minute binary markets.\n\n"
 
-        f"Your job: check whether the price structure, momentum, RSI, and candles AGREE"
-        f" on direction, then give your best probability estimate.\n\n"
+        f"Your job: check whether price structure, momentum, RSI, and candles AGREE"
+        f" on direction, then apply physical achievability penalties before outputting.\n\n"
 
-        f"CONFLICT CHECKS:\n"
-        f"  • Momentum vs RSI mismatch (strong momentum + overbought RSI → fade risk)\n"
+        f"STEP 1 — CONFLICT CHECKS:\n"
+        f"  • Momentum vs RSI mismatch (strong momentum + overbought/oversold RSI → fade risk)\n"
         f"  • Trend label vs recent candles mismatch (uptrend but last 3 candles red)\n"
         f"  • Momentum near zero despite trend label\n"
-        f"  • Mostly wick candles (indecision)\n\n"
+        f"  • Mostly wick candles (indecision — body < 30% of candle range)\n"
+        f"  • Volume spike on opposing move (high-vol candle in wrong direction)\n\n"
 
-        f"CONFIDENCE RULES:\n"
+        f"CONFIDENCE FROM CONFLICT COUNT:\n"
         f"  2+ conflicts  → confidence 15-25 (signals disagree)\n"
         f"  1 conflict    → confidence 30-50 (mild doubt)\n"
         f"  All aligned   → confidence 60-80 (clear setup)\n\n"
 
-        f"PROBABILITY:\n"
-        f"  Estimate probability_above (0-100). Conflicts pull it toward 50.\n"
+        f"STEP 2 — PHYSICAL ACHIEVABILITY (apply after initial estimate):\n"
+        f"  R1 — Required move check:\n"
+        f"    a. Required move = distance to strike in dollars.\n"
+        f"    b. Avg move/min = total range of last 3 candles / 45 minutes.\n"
+        f"    c. Required > 2× avg/min → pull probability 15 points toward 50.\n"
+        f"    d. Required > 1× avg/min → pull probability 8 points toward 50.\n"
+        f"    Note: if price is ABOVE strike, holding flat wins — penalize only downside risk.\n\n"
+        f"  R2 — Time penalty (entry window is 0.5-8 min in, so 7-14.5 min remain):\n"
+        f"    • Time remaining < 8 min  → pull 10 points toward 50\n"
+        f"    • Time remaining < 10 min → pull 5 points toward 50\n"
+        f"    • Strike gap > 0.5%       → pull 10 points toward 50\n"
+        f"    • Strike gap > 1.0%       → pull an additional 10 toward 50\n\n"
+
+        f"PROBABILITY OUTPUT:\n"
+        f"  After all adjustments, output probability_above (0-100).\n"
         f"  Always output YES (if > 50) or NO (if ≤ 50). Never skip.\n\n"
 
         f"Respond in JSON only."
@@ -167,45 +181,107 @@ def _gpt_prompt(symbol: str) -> str:
 
 
 def _gemini_prompt(symbol: str) -> str:
-    """Fast setup classifier — always outputs a direction with appropriate confidence."""
+    """Full quantitative setup classifier with explicit framework."""
     return (
-        f"You are a fast setup classifier for {symbol} 15-minute binary markets.\n\n"
+        f"You are a quantitative setup classifier for {symbol} 15-minute binary markets.\n\n"
 
-        f"Classify the setup, then always output YES or NO:\n\n"
+        f"Your ONLY objective: estimate the probability (0-100) that {symbol} price will"
+        f" settle ABOVE the strike at expiration, classify the setup quality, then output"
+        f" YES or NO. Always give a direction — never refuse.\n\n"
 
-        f"CLEAR SETUP → strong consistent momentum toward a reachable strike\n"
-        f"  → High confidence (60-80), probability skewed strongly in that direction\n\n"
+        f"ANALYSIS FRAMEWORK (evaluate in order):\n\n"
 
-        f"WEAK SETUP  → choppy, mixed, or fading signals\n"
-        f"  → Low confidence (20-40), probability closer to 50 but still pick a side\n\n"
+        f"1. POSITION RELATIVE TO STRIKE\n"
+        f"   - Is price above or below strike? Calculate exact distance and direction.\n"
+        f"   - If price is ABOVE strike: holding flat wins. Only downside pressure matters.\n"
+        f"   - If price is BELOW strike: needs positive movement. Calculate required move/min.\n"
+        f"   - Large gap + short time → pull probability toward 50.\n\n"
 
-        f"DECISION:\n"
-        f"  probability_above > 50 → YES\n"
-        f"  probability_above ≤ 50 → NO\n"
-        f"  Always give one of these. Never refuse.\n\n"
+        f"2. TIME DECAY (entry window is 0.5-8 min in, so you always see 7-14.5 min remaining)\n"
+        f"   - Time remaining < 8 min  → moderate decay: pull probability 8 points toward 50\n"
+        f"   - Time remaining < 10 min → mild decay: pull probability 4 points toward 50\n"
+        f"   - Strike gap > 0.5%       → pull 8 points toward 50\n"
+        f"   - Strike gap > 1.0%       → pull additional 8 points toward 50\n\n"
+
+        f"3. MOMENTUM\n"
+        f"   - Momentum score range: -1.0 (strong bearish) to +1.0 (strong bullish)\n"
+        f"   - |momentum| > 0.5 and aligned with direction → increase probability 5-10 pts\n"
+        f"   - |momentum| < 0.2 → weak signal, pull toward 50\n"
+        f"   - Momentum diverging from price trend → fade risk, pull toward 50\n\n"
+
+        f"4. CANDLE STRUCTURE\n"
+        f"   - 3+ bullish candles in last 4 → upward bias\n"
+        f"   - Mostly wick candles (body < 30% of range) → indecision, lower confidence\n"
+        f"   - Alternating bull/bear candles → choppy, pull toward 50\n"
+        f"   - Volume spike: candle marked +20%+ vs avg = conviction; -20%+ = weak move\n\n"
+
+        f"5. RSI (confirmation only — do not base decision on RSI alone)\n"
+        f"   - RSI > 70 (overbought) with strong upward momentum → fade risk\n"
+        f"   - RSI < 30 (oversold) with downward momentum → bounce risk\n"
+        f"   - Otherwise use as mild confirmation of trend direction\n\n"
+
+        f"6. ORDER BOOK IMBALANCE\n"
+        f"   - Imbalance > 1.5x (heavy YES demand) → mild bullish signal (+3 pts)\n"
+        f"   - Imbalance < 0.67x (heavy NO demand) → mild bearish signal (-3 pts)\n"
+        f"   - Near 1.0x → balanced, no adjustment\n\n"
+
+        f"SETUP CLASSIFICATION AND CONFIDENCE:\n"
+        f"  CLEAR SETUP: all signals aligned, reachable strike, momentum confirming\n"
+        f"    → confidence 65-80, probability skewed 60-75% in that direction\n"
+        f"  MODERATE SETUP: most signals aligned, minor conflicts\n"
+        f"    → confidence 40-60, probability 54-62% in favored direction\n"
+        f"  WEAK SETUP: choppy, mixed, or conflicting signals\n"
+        f"    → confidence 20-35, probability 50-54% (still pick a side)\n\n"
+
+        f"RULES:\n"
+        f"  - probability_above > 50 → output YES\n"
+        f"  - probability_above ≤ 50 → output NO\n"
+        f"  - Always give one direction. Never refuse.\n"
+        f"  - A 52% probability is a valid YES. Accuracy over conviction.\n\n"
 
         f"Respond in JSON only."
     )
 
 
 def _adversarial_prompt(symbol: str) -> str:
-    """Adversarial bear — looks for failure reasons, still always outputs a direction."""
+    """Adversarial bear — structured failure analysis with quantitative penalty rules."""
     return (
         f"You are an adversarial analyst for {symbol} 15-minute binary markets.\n\n"
 
-        f"Your bias: assume the obvious trade will FAIL. Look for reasons it won't work.\n\n"
+        f"Your bias: assume the obvious trade will FAIL. Quantify the failure probability.\n\n"
 
-        f"WHAT TO LOOK FOR:\n"
-        f"- Is the momentum likely to fade or reverse before expiry?\n"
-        f"- Is the strike too far given time remaining?\n"
-        f"- Does the setup look like noise (alternating candles, no conviction)?\n"
-        f"- RSI at extremes → mean reversion likely?\n"
-        f"- Late entry (< 5 min left) → heavy time-decay penalty\n\n"
+        f"STEP 1 — APPLY THESE QUANTITATIVE PENALTIES to the naive probability:\n\n"
+
+        f"Physical achievability:\n"
+        f"  • Required move > 2× avg candle range/min → pull probability 15 pts toward 50\n"
+        f"  • Required move > 1× avg candle range/min → pull probability 8 pts toward 50\n"
+        f"  • Note: if price is ABOVE strike, required move is zero (holding flat wins);\n"
+        f"    instead penalize only for significant downside momentum\n\n"
+
+        f"Time decay (entry window is 0.5-8 min in, so 7-14.5 min remain at evaluation):\n"
+        f"  • Time remaining < 8 min  → pull 10 pts toward 50 (late entry, limited recovery time)\n"
+        f"  • Time remaining < 10 min → pull 5 pts toward 50\n\n"
+
+        f"Momentum fade risk:\n"
+        f"  • RSI > 70 AND momentum score > +0.5 → overbought fade risk: pull 10 pts toward 50\n"
+        f"  • RSI < 30 AND momentum score < -0.5 → oversold bounce risk: pull 10 pts toward 50\n"
+        f"  • Momentum score near zero (|momentum| < 0.15) → no directional conviction: pull 8 pts toward 50\n\n"
+
+        f"Noise detection:\n"
+        f"  • 2+ alternating bull/bear candles in last 4 → choppy: pull 6 pts toward 50\n"
+        f"  • Mostly wick candles (body < 30% of range) in last 3 → indecision: pull 6 pts toward 50\n"
+        f"  • Volume -30% below average on directional move → weak conviction: pull 5 pts toward 50\n\n"
+
+        f"STEP 2 — LOOK FOR FAILURE REASONS:\n"
+        f"  • Is momentum likely to fade or reverse before expiry?\n"
+        f"  • Is the strike too far given average candle velocity?\n"
+        f"  • Are candles showing exhaustion (shrinking bodies, rising wicks)?\n"
+        f"  • Does order book imbalance contradict the price trend?\n\n"
 
         f"OUTPUT:\n"
-        f"  Give the direction you think is actually more likely, based on failure analysis.\n"
-        f"  If you think the price will fail to reach the strike → lean NO (or YES if strike is below).\n"
-        f"  Set probability_above to reflect your skeptical view.\n"
+        f"  After applying all penalties, output the direction that is actually more likely.\n"
+        f"  If price will fail to cross the strike → NO (or YES if already safely above).\n"
+        f"  Set probability_above to your skeptical, penalty-adjusted estimate.\n"
         f"  Always output YES or NO — never skip.\n\n"
 
         f"Respond in JSON only."
@@ -337,7 +413,10 @@ class EnsembleEngine:
         price    = btc_data.price
         strike   = market.strike_price
         now_utc  = datetime.now(timezone.utc)
-        mins_left = max(0, int((market.close_time - now_utc).total_seconds() / 60))
+        secs_left     = max(0, (market.close_time - now_utc).total_seconds())
+        mins_left     = int(secs_left // 60)
+        secs_rem      = int(secs_left % 60)
+        time_left_str = f"{mins_left}m {secs_rem}s"
         candles  = btc_data.candles  # up to 10 completed 15m candles
 
         # ── Strike distance ───────────────────────────────────────────────
@@ -352,18 +431,19 @@ class EnsembleEngine:
             if dist_pct > 0.5:
                 strike_note = (
                     f"price is {dist_pct:.3f}% (${dist_abs:,.2f}) ABOVE strike"
-                    f" — requires +${required_per_min:.2f}/min to stay above"
+                    f" — holding flat wins; must not drop more than ${required_per_min:.2f}/min"
                 )
             elif dist_pct > 0:
                 strike_note = (
                     f"price is {dist_pct:.3f}% (${dist_abs:,.2f}) ABOVE strike"
+                    f" — holding flat is sufficient to win"
                 )
             elif dist_pct > -0.05:
-                strike_note = f"price is AT the strike (within 0.05%)"
+                strike_note = f"price is AT the strike (within 0.05%) — coin flip on direction"
             else:
                 strike_note = (
                     f"price is {abs(dist_pct):.3f}% (${dist_abs:,.2f}) BELOW strike"
-                    f" — requires +${required_per_min:.2f}/min to cross above"
+                    f" — needs to gain ${required_per_min:.2f}/min to cross above by expiry"
                 )
 
         # ── Multi-timeframe price change ──────────────────────────────────
@@ -381,18 +461,20 @@ class EnsembleEngine:
         chg_60m  = pct_chg(candles[-5].close, price) if len(candles) >= 5 else "n/a"
         chg_2h   = pct_chg(candles[-9].close, price) if len(candles) >= 9 else "n/a"
 
-        # ── RSI (close-to-close, standard calculation) ────────────────────
+        # ── RSI (Wilder smoothing, up to 14 periods) ──────────────────────
         rsi_str = "n/a"
         if len(candles) >= 3:
-            closes = [c.close for c in candles]
+            closes  = [c.close for c in candles]
             changes = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
-            gains  = [c for c in changes if c > 0]
-            losses = [-c for c in changes if c < 0]
-            avg_g = sum(gains)  / len(gains)  if gains  else 0.0
-            avg_l = sum(losses) / len(losses) if losses else 1e-9
-            rsi   = 100 - (100 / (1 + avg_g / avg_l))
+            period  = min(14, len(changes))
+            avg_g   = sum(max(ch, 0)  for ch in changes[:period]) / period
+            avg_l   = sum(max(-ch, 0) for ch in changes[:period]) / period
+            for ch in changes[period:]:
+                avg_g = (avg_g * (period - 1) + max(ch, 0))  / period
+                avg_l = (avg_l * (period - 1) + max(-ch, 0)) / period
+            rsi       = 100 - (100 / (1 + avg_g / avg_l)) if avg_l > 0 else 100.0
             rsi_label = "OVERBOUGHT" if rsi > 70 else "OVERSOLD" if rsi < 30 else "neutral"
-            rsi_str = f"{rsi:.0f} ({rsi_label})"
+            rsi_str   = f"{rsi:.0f} ({rsi_label})"
 
         # ── Trend & candle bias ───────────────────────────────────────────
         if len(candles) >= 4:
@@ -423,17 +505,26 @@ class EnsembleEngine:
 
         # ── Completed candles table (all available, oldest → newest) ────────
         if candles:
+            avg_vol = sum(c.volume for c in candles) / len(candles)
             candle_rows = []
             for c in candles:
-                body_pct = (c.close - c.open) / c.open * 100 if c.open > 0 else 0
-                arrow    = "▲" if c.close >= c.open else "▼"
+                body_pct    = (c.close - c.open) / c.open * 100 if c.open > 0 else 0
+                arrow       = "▲" if c.close >= c.open else "▼"
+                vol_diff_pct = (c.volume - avg_vol) / avg_vol * 100 if avg_vol > 0 else 0
+                if vol_diff_pct > 20:
+                    vol_note = f"+{vol_diff_pct:.0f}% vs avg"
+                elif vol_diff_pct < -20:
+                    vol_note = f"{vol_diff_pct:.0f}% vs avg"
+                else:
+                    vol_note = "avg"
                 candle_rows.append(
                     f"  {c.timestamp.strftime('%H:%M')} {arrow} "
                     f"O={c.open:.2f} H={c.high:.2f} L={c.low:.2f} C={c.close:.2f} "
-                    f"({body_pct:+.2f}%) vol={c.volume:.0f}"
+                    f"({body_pct:+.2f}%) vol={c.volume:.0f} [{vol_note}]"
                 )
             candles_str = "\n".join(candle_rows)
         else:
+            avg_vol     = 0.0
             candles_str = "  (no history — candles loading)"
 
         # ── Current (live) candle ─────────────────────────────────────────
@@ -459,12 +550,13 @@ class EnsembleEngine:
 
         # Market implied P(YES) for edge calculation (model compares its estimate vs this)
         yes_implied = market.yes_price if market.yes_price else 50
+        avg_vol_str = f"{avg_vol:.0f}" if avg_vol > 0 else "n/a"
 
         return f"""=== {sym}/USD — 15-MINUTE BINARY MARKET ===
 Price now:    ${price:,.4f}
 Strike (YES threshold): ${strike:,.4f}
 Distance:     {strike_note}
-Time left:    {mins_left} min until expiry
+Time left:    {time_left_str} until expiry
 Kalshi market: {kalshi_prices}
 Market implied P(YES): {yes_implied}%  ← use this to calculate your edge
 
@@ -475,9 +567,10 @@ Last 60 min (vs now):         {chg_60m}
 Last 2 hours (vs now):        {chg_2h}
 Trend (last 4 candles): {trend}
 Candle bias:   {candle_bias}
-RSI (close-to-close): {rsi_str}
+RSI (Wilder-14): {rsi_str}
 Contract order book: {ob_signal}
 Momentum score: {btc_data.momentum:+.3f} (range -1 to +1)
+Avg candle volume: {avg_vol_str}  (per-candle deviation shown in history below)
 
 === COINBASE 15m CANDLE HISTORY (oldest → newest) ===
 {candles_str}
@@ -485,6 +578,8 @@ Momentum score: {btc_data.momentum:+.3f} (range -1 to +1)
 
 === YOUR TASK ===
 Will {sym} close ABOVE ${strike:,.4f} at {market.close_time.strftime('%H:%M UTC')}?
+Entry window context: you see markets 0.5-8 min into the 15-min window, so time
+remaining is always 7-14.5 min. Calibrate all time-decay penalties accordingly.
 Apply the quantitative framework. Calculate your edge vs market implied {yes_implied}%.
 Always output YES or NO — the EV gate will handle filtering weak signals.
 {_JSON_SCHEMA_HINT}"""
