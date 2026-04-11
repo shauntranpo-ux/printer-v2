@@ -135,7 +135,10 @@ class Strategy:
 
         # Step 1 — edge check + flat bet sizing
         # Use `or 50` so that explicit 0 from the API also falls back to 50¢
-        ask_cents    = market.get("yes_ask" if direction == "yes" else "no_ask") or 50
+        ask_cents = market.get("yes_ask" if direction == "yes" else "no_ask") or 0
+        if ask_cents == 0:
+            log.info("Skipping %s — %s ask price unknown (0¢), can't size position", ticker, direction.upper())
+            return None
         market_price = ask_cents / 100.0
 
         # Price cap: refuse to buy a contract priced ≥ 85¢ — too expensive, minimal upside
@@ -350,9 +353,28 @@ class Strategy:
             from kalshi_client import KalshiMarketClosedError
             if isinstance(exc, KalshiMarketClosedError):
                 log.info(
-                    "Trade %d: %s resolved — marking expired", trade.id, ticker
+                    "Trade %d: %s resolved — fetching settlement result", trade.id, ticker
                 )
-                return await self._close_trade(trade, int(trade.entry_price), "expired")
+                try:
+                    mkt    = await self._kalshi.get_market(ticker)
+                    result = (mkt.get("result") or "").lower()
+                    if result == "yes":
+                        resolved_price = 100 if trade.direction == "YES" else 0
+                    elif result == "no":
+                        resolved_price = 0 if trade.direction == "YES" else 100
+                    else:
+                        log.warning(
+                            "Trade %d: %s has no settlement result yet (result=%r) — using entry price",
+                            trade.id, ticker, result,
+                        )
+                        resolved_price = int(trade.entry_price)
+                except Exception as fetch_exc:
+                    log.warning(
+                        "Trade %d: failed to fetch settlement for %s: %s — using entry price",
+                        trade.id, ticker, fetch_exc,
+                    )
+                    resolved_price = int(trade.entry_price)
+                return await self._close_trade(trade, resolved_price, "expired")
             log.warning(
                 "Trade %d: orderbook fetch failed (%s) — skipping exit check",
                 trade.id, exc,
