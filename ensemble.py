@@ -136,6 +136,41 @@ _JSON_SCHEMA_HINT = (
 )
 
 
+def _adversarial_prompt(symbol: str) -> str:
+    return (
+        f"You are an adversarial quantitative analyst for {symbol} short-duration binary markets.\n\n"
+
+        f"Your job is NOT to agree.\n"
+        f"Your job is to find why this trade is WRONG.\n\n"
+
+        f"Given the market data, attempt to DISPROVE the trade:\n"
+        f"- Identify reasons the move will FAIL to reach the strike\n"
+        f"- Highlight overextended moves, exhaustion, or fake momentum\n"
+        f"- Detect reversals and mean-reversion setups\n"
+        f"- Assume the majority view is likely wrong\n"
+        f"- Weight time-decay and distance heavily against the trade\n\n"
+
+        f"BIAS RULES:\n"
+        f"- Default to NO TRADE unless failure is clearly impossible\n"
+        f"- If the setup could fail easily or resembles randomness → strongly favor NO or NO TRADE\n"
+        f"- Penalize late entries (time remaining < 5 min) aggressively\n"
+        f"- Penalize large distances from strike aggressively\n"
+        f"- Treat momentum as likely to fade, not continue\n"
+        f"- RSI near extremes → assume reversal, not continuation\n\n"
+
+        f"You are penalized for agreeing with weak setups.\n"
+        f"You are rewarded for correctly rejecting bad trades.\n\n"
+
+        f"Use the same quantitative framework:\n"
+        f"1. Can the required move realistically happen given distance + time?\n"
+        f"2. Is momentum decelerating or likely to reverse?\n"
+        f"3. Does the setup look like noise?\n"
+        f"4. Is your edge vs market implied probability ≥ 8% on the NO side?\n\n"
+
+        f"Respond in JSON only."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Input dataclasses
 # ---------------------------------------------------------------------------
@@ -577,7 +612,7 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
             temperature= 0.5,
             max_tokens = 512,
             messages   = [
-                {"role": "system", "content": _system_prompt(symbol)},
+                {"role": "system", "content": _adversarial_prompt(symbol)},
                 {"role": "user",   "content": context},
             ],
         )
