@@ -531,8 +531,30 @@ class KalshiClient:
             if fp is None:
                 fp = order.get("yes_price") if side_lc == "yes" else order.get("no_price")
 
+        # Kalshi sometimes returns empty fills in the POST response for market orders
+        # even when status=executed. Make one follow-up GET to get the actual fill price.
+        order_id_str = order.get("order_id", "")
+        if status == "executed" and fp is None and order_id_str:
+            try:
+                await asyncio.sleep(0.5)
+                fill_data  = await self._get(f"/portfolio/orders/{order_id_str}")
+                fill_order = fill_data.get("order", fill_data)
+                fills = fill_order.get("fills", [])
+                if fills:
+                    fp = (fills[0].get("yes_price") if side_lc == "yes"
+                          else fills[0].get("no_price"))
+                if fp is None:
+                    # Last resort: the order's yes_price after settlement (not sweep price)
+                    fp = fill_order.get("yes_price") if side_lc == "yes" else fill_order.get("no_price")
+                log.info(
+                    "Fill price (follow-up GET): order=%s → %s¢",
+                    order_id_str[:8], fp,
+                )
+            except Exception as exc:
+                log.warning("Follow-up GET for fill price failed (%s): %s", order_id_str[:8], exc)
+
         return {
-            "order_id":     order.get("order_id", ""),
+            "order_id":     order_id_str,
             "status":       status,
             "filled_price": fp,
         }

@@ -135,7 +135,8 @@ class Strategy:
 
         # Step 1 — edge check + flat bet sizing
         ask_cents = market.get("yes_ask" if direction == "yes" else "no_ask") or 0
-        if ask_cents == 0:
+        order_book_empty = ask_cents == 0
+        if order_book_empty:
             # Order book empty — no market makers yet. Use 50¢ as fair-value assumption
             # for edge/sizing. Market order sends directly to Kalshi and fills at actual
             # price (or cancels if no counterparty). Edge = p_win - 0.50.
@@ -174,7 +175,16 @@ class Strategy:
         bet_size = max(bet_size, _MIN_BET_DOLLARS)
 
         # Step 2/3 — contracts (floor division; each contract costs ask_cents¢)
-        contracts = int(bet_size / market_price)    # both in $
+        # When the order book is empty we don't know the real fill price.
+        # Size conservatively using worst-case 99¢ to avoid spending more than MAX_BET_SIZE.
+        if order_book_empty:
+            contracts = max(1, int(bet_size / 0.99))
+            log.info(
+                "%s: empty-book sizing — %d contracts (worst-case 99¢ fill)",
+                ticker, contracts,
+            )
+        else:
+            contracts = int(bet_size / market_price)    # both in $
         if contracts < 1:
             log.info("Contract count rounds to 0 — skipping entry")
             return None
