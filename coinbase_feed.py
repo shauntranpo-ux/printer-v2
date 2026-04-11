@@ -35,12 +35,12 @@ COINBASE_PRODUCT_MAP: dict[str, str] = {
     "SOL":  "SOL-USD",
     "XRP":  "XRP-USD",
     "DOGE": "DOGE-USD",
+    "HYPE": "HYPE-USD",   # listed on Coinbase Jan 2025
 }
 
-# Assets not on Coinbase — fetched via Binance public REST
-BINANCE_SYMBOL_MAP: dict[str, str] = {
-    "BNB":  "BNBUSDT",
-    "HYPE": "HYPEUSDT",
+# Assets not on Coinbase — fetched via OKX public REST (globally accessible)
+OKX_SYMBOL_MAP: dict[str, str] = {
+    "BNB": "BNB-USDT",   # Binance native token — not on Coinbase, use OKX
 }
 
 
@@ -177,7 +177,7 @@ class CoinbaseFeed:
     Multi-asset price feed via Coinbase Advanced Trade WebSocket.
 
     All supported Coinbase assets are subscribed in a single connection.
-    Assets not on Coinbase (BNB, HYPE) are polled via Binance REST.
+    Assets not on Coinbase (BNB) are polled via OKX public REST.
 
     Backward-compatible: un-keyed methods (get_current_price, get_momentum,
     is_stale, get_ohlcv) always refer to BTC.
@@ -198,9 +198,9 @@ class CoinbaseFeed:
                 self._cb_products[asset]           = pid
                 self._product_to_asset[pid]        = asset
 
-        # Binance REST assets
-        self._binance_assets: dict[str, str] = {
-            a: s for a, s in BINANCE_SYMBOL_MAP.items() if a in all_assets
+        # OKX REST assets (BNB — not on Coinbase)
+        self._okx_assets: dict[str, str] = {
+            a: s for a, s in OKX_SYMBOL_MAP.items() if a in all_assets
         }
 
         # Per-asset state
@@ -311,9 +311,9 @@ class CoinbaseFeed:
         self._ws_task   = asyncio.create_task(self._ws_loop(),   name="coinbase-feed-ws")
         self._rest_task = asyncio.create_task(self._rest_loop(), name="coinbase-feed-rest")
         log.info(
-            "CoinbaseFeed started — Coinbase: %s  REST: %s",
+            "CoinbaseFeed started — Coinbase: %s  OKX REST: %s",
             list(self._cb_products.keys()),
-            list(self._binance_assets.keys()),
+            list(self._okx_assets.keys()),
         )
 
     async def prefetch_candle_history(self, n: int = 10) -> None:
@@ -373,32 +373,37 @@ class CoinbaseFeed:
             except Exception as exc:
                 log.warning("Candle prefetch failed for %s: %s", asset, exc)
 
-        # Pre-populate candle history for Binance assets (BNB, HYPE)
-        for asset, symbol in self._binance_assets.items():
+        # Pre-populate candle history for OKX assets (BNB)
+        # OKX candles: GET /api/v5/market/candles?instId={symbol}&bar=15m&limit={n}
+        # Response: {"code":"0","data":[["ts_ms","open","high","low","close","vol",...], ...]}
+        # Newest first (descending) — same direction as Binance klines
+        for asset, symbol in self._okx_assets.items():
             try:
                 url = (
-                    f"https://api.binance.com/api/v3/klines"
-                    f"?symbol={symbol}&interval=15m&limit={n}"
+                    f"https://www.okx.com/api/v5/market/candles"
+                    f"?instId={symbol}&bar=15m&limit={n}"
                 )
                 async with aiohttp.ClientSession() as session:
                     async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                         if resp.status != 200:
                             log.warning(
-                                "Binance candle prefetch failed for %s: HTTP %d", asset, resp.status
+                                "OKX candle prefetch failed for %s: HTTP %d", asset, resp.status
                             )
                             continue
-                        raw = await resp.json()
+                        body = await resp.json()
 
-                # Binance klines: [[open_time_ms, open, high, low, close, volume, ...], ...]
-                if not isinstance(raw, list) or not raw:
-                    log.warning("Binance candle prefetch: empty response for %s", asset)
+                rows = body.get("data", []) if isinstance(body, dict) else []
+                if not rows:
+                    log.warning("OKX candle prefetch: empty response for %s", asset)
                     continue
 
+                # OKX returns newest-first — reverse to get oldest→newest
+                rows_asc = list(reversed(rows))
                 state = self._state[asset]
                 state.candles.clear()
-                for entry in raw:
+                for entry in rows_asc:
                     try:
-                        ts = datetime.fromtimestamp(entry[0] / 1000, tz=timezone.utc)
+                        ts = datetime.fromtimestamp(int(entry[0]) / 1000, tz=timezone.utc)
                         candle = Candle(
                             open      = float(entry[1]),
                             high      = float(entry[2]),
@@ -412,7 +417,7 @@ class CoinbaseFeed:
                         continue
 
                 log.info(
-                    "Binance candle prefetch [%s]: loaded %d candles (latest close=$%.4f)",
+                    "OKX candle prefetch [%s]: loaded %d candles (latest close=$%.4f)",
                     asset, len(state.candles),
                     state.candles[-1].close if state.candles else 0,
                 )
@@ -420,7 +425,7 @@ class CoinbaseFeed:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                log.warning("Binance candle prefetch failed for %s: %s", asset, exc)
+                log.warning("OKX candle prefetch failed for %s: %s", asset, exc)
 
     def get_current_candle_for(self, asset: str) -> dict | None:
         """Return the in-progress (incomplete) candle for an asset, or None."""
@@ -543,27 +548,30 @@ class CoinbaseFeed:
     # ------------------------------------------------------------------
 
     async def _rest_loop(self) -> None:
-        """Poll Binance public price endpoint every 10s for BNB/HYPE."""
-        if not self._binance_assets:
+        """Poll OKX public price endpoint every 10s for BNB (not on Coinbase)."""
+        if not self._okx_assets:
             return
 
         import aiohttp   # optional import — only needed if REST assets configured
 
         while self._running:
-            for asset, symbol in self._binance_assets.items():
+            for asset, symbol in self._okx_assets.items():
                 try:
-                    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+                    # OKX ticker: {"code":"0","data":[{"instId":"BNB-USDT","last":"...","vol24h":"..."}]}
+                    url = f"https://www.okx.com/api/v5/market/ticker?instId={symbol}"
                     async with aiohttp.ClientSession() as session:
                         async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                            data  = await resp.json()
-                            price = float(data.get("price", 0))
-                            if price > 0:
-                                _process_tick_into(self._state[asset], price, 0.0)
-                                log.debug("REST tick [%s] $%.4f", asset, price)
-                                self._price_event.set()
+                            body = await resp.json()
+                    data  = (body.get("data") or [{}])[0]
+                    price = float(data.get("last", 0))
+                    vol   = float(data.get("vol24h", 0))
+                    if price > 0:
+                        _process_tick_into(self._state[asset], price, vol)
+                        log.debug("OKX REST tick [%s] $%.4f", asset, price)
+                        self._price_event.set()
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    log.debug("Binance REST fetch failed for %s: %s", asset, exc)
+                    log.debug("OKX REST fetch failed for %s: %s", asset, exc)
 
             await asyncio.sleep(10)
