@@ -838,15 +838,6 @@ function renderWatchSection(w, positions) {
         <div class="bot-vote-dir" style="color:var(--muted);font-size:1.6rem;font-weight:700">&#10007;</div>
         <div style="font-size:10px;color:var(--muted);margin-top:4px">OFFLINE</div>
       </div>`;
-      // prob null or 50 means the model returned NO TRADE (no edge) — show WAITING state
-      if (m.prob == null || m.prob === 50) {
-        return `<div class="bot-vote-card" style="border-color:var(--border);opacity:.7">
-          <div class="bot-vote-name">${label}</div>
-          <div style="margin:6px 0 4px"><span style="color:var(--muted);font-size:1.1rem;font-weight:700;letter-spacing:1px">&#8212; WAITING</span></div>
-          <div class="bot-vote-prob" style="color:var(--muted)">—</div>
-          <div class="bot-vote-reason" style="color:var(--muted)">No edge detected<br><span style="opacity:.7">${m.reasoning || ''}</span></div>
-        </div>`;
-      }
       const isYes = m.direction === 'YES';
       const cls   = isYes ? 'vote-yes' : 'vote-no';
       const col   = isYes ? 'var(--green)' : 'var(--red)';
@@ -863,21 +854,15 @@ function renderWatchSection(w, positions) {
     }).join('');
 
     // Consensus banner
-    const working    = mdefs.map(d => models[d.key]).filter(Boolean);
-    // Models with null or 50% prob returned NO TRADE — exclude from directional vote
-    const withEdge   = working.filter(m => m.prob != null && m.prob !== 50);
-    const waitCount  = working.length - withEdge.length;
-    const yesCount   = withEdge.filter(m => m.direction === 'YES').length;
-    const noCount    = withEdge.filter(m => m.direction === 'NO').length;
-    const total      = working.length;
-    const allWaiting = total > 0 && waitCount === total;
-    const allAgree   = withEdge.length > 0 && (yesCount === withEdge.length || noCount === withEdge.length);
-    const winner     = yesCount >= noCount ? 'YES' : 'NO';
+    const working  = mdefs.map(d => models[d.key]).filter(Boolean);
+    const yesCount = working.filter(m => m.direction === 'YES').length;
+    const noCount  = working.filter(m => m.direction === 'NO').length;
+    const total    = working.length;
+    const allAgree = total > 0 && (yesCount === total || noCount === total);
+    const winner   = yesCount >= noCount ? 'YES' : 'NO';
     let bannerHtml;
     if (total === 0) {
-      bannerHtml = `<div class="consensus-banner cbanner-split">All models offline &mdash; no trade</div>`;
-    } else if (allWaiting) {
-      bannerHtml = `<div class="consensus-banner cbanner-split">&#8212; WAITING &mdash; No edge detected across all models &mdash; skipping cycle</div>`;
+      bannerHtml = `<div class="consensus-banner cbanner-split">All models offline</div>`;
     } else if (allAgree) {
       const bcls   = winner === 'YES' ? 'cbanner-yes' : 'cbanner-no';
       const barrow = winner === 'YES' ? '&#9650;' : '&#9660;';
@@ -885,14 +870,14 @@ function renderWatchSection(w, positions) {
       const bwhat  = winner === 'YES' ? 'above strike' : 'below strike';
       bannerHtml = `<div class="consensus-banner ${bcls}">
         ${barrow}&nbsp;FULL CONSENSUS &mdash; <b>${bdir}</b>
-        &nbsp;&middot;&nbsp; ${withEdge.length}/${total} bots agree &middot; all expect price to finish <b>${bwhat}</b>
+        &nbsp;&middot;&nbsp; ${total}/${total} bots agree &middot; all expect price to finish <b>${bwhat}</b>
         <span class="cbanner-sub">&nbsp;&#8594; trade if risk gates pass</span>
       </div>`;
     } else {
       bannerHtml = `<div class="consensus-banner cbanner-split">
-        &#8764; SPLIT VOTE &mdash; ${yesCount} say UP &middot; ${noCount} say DOWN${waitCount > 0 ? ' &middot; ' + waitCount + ' waiting' : ''}
+        &#8764; SPLIT VOTE &mdash; ${yesCount} say UP &middot; ${noCount} say DOWN
         &nbsp;&middot;&nbsp; leaning <b>${winner === 'YES' ? 'UP' : 'DOWN'}</b> (${Math.max(yesCount,noCount)}/${total})
-        <span class="cbanner-sub">&nbsp;&#8594; models disagree, no trade</span>
+        <span class="cbanner-sub">&nbsp;&#8594; models disagree, no trade this cycle</span>
       </div>`;
     }
 

@@ -713,12 +713,9 @@ class TradingBot:
         def _mdata(r: Any) -> dict | None:
             if r is None:
                 return None
-            # prob=0.50 + conf=0.0 means this model returned NO TRADE (no edge found).
-            # Pass prob=None so the dashboard renders the WAITING card, not a 50% signal.
-            no_edge = (r.probability == 0.50 and r.confidence == 0.0)
             return {
-                "prob":      None if no_edge else _directional_prob(r.probability, r.direction),
-                "direction": None if no_edge else r.direction,
+                "prob":      _directional_prob(r.probability, r.direction),
+                "direction": r.direction,
                 "reasoning": r.reasoning[:120],
             }
 
