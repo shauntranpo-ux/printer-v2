@@ -838,8 +838,8 @@ function renderWatchSection(w, positions) {
         <div class="bot-vote-dir" style="color:var(--muted);font-size:1.6rem;font-weight:700">&#10007;</div>
         <div style="font-size:10px;color:var(--muted);margin-top:4px">OFFLINE</div>
       </div>`;
-      // prob===50 means the model returned NO TRADE (no edge) — show neutral waiting state
-      if (m.prob === 50) {
+      // prob null or 50 means the model returned NO TRADE (no edge) — show WAITING state
+      if (m.prob == null || m.prob === 50) {
         return `<div class="bot-vote-card" style="border-color:var(--border);opacity:.7">
           <div class="bot-vote-name">${label}</div>
           <div style="margin:6px 0 4px"><span style="color:var(--muted);font-size:1.1rem;font-weight:700;letter-spacing:1px">&#8212; WAITING</span></div>
@@ -864,8 +864,8 @@ function renderWatchSection(w, positions) {
 
     // Consensus banner
     const working    = mdefs.map(d => models[d.key]).filter(Boolean);
-    // Models at exactly 50% returned NO TRADE — exclude from directional vote
-    const withEdge   = working.filter(m => m.prob !== 50);
+    // Models with null or 50% prob returned NO TRADE — exclude from directional vote
+    const withEdge   = working.filter(m => m.prob != null && m.prob !== 50);
     const waitCount  = working.length - withEdge.length;
     const yesCount   = withEdge.filter(m => m.direction === 'YES').length;
     const noCount    = withEdge.filter(m => m.direction === 'NO').length;

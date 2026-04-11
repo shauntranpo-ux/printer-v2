@@ -53,13 +53,6 @@ _ASSET_SIZE_OVERRIDES: dict[str, float] = {
     "BTC": 0.50,
 }
 
-# Per-asset minimum confidence thresholds (overrides global MIN_CONFIDENCE).
-# SOL and XRP are highly choppy — require much stronger AI conviction before entering.
-_ASSET_MIN_CONFIDENCE: dict[str, float] = {
-    "SOL": 0.45,
-    "XRP": 0.45,
-}
-
 
 # ---------------------------------------------------------------------------
 # TradingBot
@@ -618,47 +611,40 @@ class TradingBot:
             "detail": f"spread {result.spread:.2f}",
         })
 
-        # Check 3: Confidence — use asset-specific threshold for choppy assets
-        asset_min_conf = _ASSET_MIN_CONFIDENCE.get(asset, settings.MIN_CONFIDENCE)
-        conf_ok = result.action == "TRADE" and result.confidence >= asset_min_conf
+        # Check 3: EV — expected value anchored to the live market ask price
+        if result.direction == "yes":
+            _ask = (market.get("yes_ask") or 50) / 100.0
+            _ev  = result.consensus_prob - _ask
+        elif result.direction == "no":
+            _ask = (market.get("no_ask") or 50) / 100.0
+            _ev  = (1.0 - result.consensus_prob) - _ask
+        else:
+            _ev = 0.0
+        ev_ok = result.action == "TRADE" and _ev >= settings.MIN_EV
         checks.append({
-            "id": "confidence",
-            "label": f"Confidence \u2265{asset_min_conf*100:.0f}%",
-            "passed": conf_ok,
-            "detail": f"{result.confidence*100:.0f}%",
+            "id": "ev",
+            "label": f"EV \u2265{settings.MIN_EV*100:.0f}\u00a2",
+            "passed": ev_ok,
+            "detail": f"{_ev*100:.1f}\u00a2",
         })
 
-        # If WAIT or SKIP, fill remaining checks as not-evaluated and store
+        # If WAIT, fill remaining checks as not-evaluated and store
         _pending = [
             ("drawdown",  "Daily loss"),
             ("data_age",  "Data fresh"),
         ]
-        if result.action in ("WAIT", "SKIP"):
+        if result.action == "WAIT":
             for cid, clabel in _pending:
                 checks.append({"id": cid, "label": clabel, "passed": None, "detail": "—"})
             await self._store_last_signal(ticker, result, checks)
-            if result.action == "WAIT":
-                log.info("Models disagree on %s — adding to wait list (1 cycle pause)", ticker)
-                self._wait_list[ticker] = time.time()
-            else:
-                log.info("Skipping %s: %s", ticker, result.skip_reason)
-            return
-
-        # Asset-specific confidence gate (SOL/XRP require higher conviction)
-        if not conf_ok:
-            for cid, clabel in _pending:
-                checks.append({"id": cid, "label": clabel, "passed": None, "detail": "—"})
-            await self._store_last_signal(ticker, result, checks)
-            log.info(
-                "Skipping %s [%s] — confidence %.3f below asset minimum %.2f (choppy asset)",
-                ticker, asset, result.confidence, asset_min_conf,
-            )
+            log.info("Models disagree on %s — adding to wait list (1 cycle pause)", ticker)
+            self._wait_list[ticker] = time.time()
             return
 
         # --- Risk gates ---
         gate_result = await self.risk.check_all(market, result, settings.MAX_BET_SIZE, asset=asset)
 
-        # Checks 4-5: from gate results
+        # Checks 4-5: from gate results (ev gate already shown as Check 3 above)
         for gate_key, chk_id, chk_label in [
             ("drawdown",  "drawdown",  "Daily loss"),
             ("staleness", "data_age",  "Data fresh"),
@@ -727,9 +713,12 @@ class TradingBot:
         def _mdata(r: Any) -> dict | None:
             if r is None:
                 return None
+            # prob=0.50 + conf=0.0 means this model returned NO TRADE (no edge found).
+            # Pass prob=None so the dashboard renders the WAITING card, not a 50% signal.
+            no_edge = (r.probability == 0.50 and r.confidence == 0.0)
             return {
-                "prob":      _directional_prob(r.probability, r.direction),
-                "direction": r.direction,
+                "prob":      None if no_edge else _directional_prob(r.probability, r.direction),
+                "direction": None if no_edge else r.direction,
                 "reasoning": r.reasoning[:120],
             }
 

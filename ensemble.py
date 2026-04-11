@@ -108,8 +108,11 @@ def _system_prompt(symbol: str) -> str:
         f"7. PROBABILITY ESTIMATION\n"
         f"Estimate probability (0-100) that price finishes ABOVE strike.\n"
         f"Base ONLY on: distance to strike, time remaining, strength of movement.\n"
-        f"  Slight edge → 52-58% | Moderate edge → 60-70% | Strong edge → 70%+\n"
-        f"Never assign extreme probabilities unless move is trivial.\n\n"
+        f"  Strong YES signal  → 60-80%+  (clear, high-confidence upside)\n"
+        f"  Strong NO signal   → 20-40%   (clear, high-confidence downside)\n"
+        f"  Uncertain / weak   → 41-59%   → you MUST return NO TRADE\n"
+        f"Do NOT assign probability_above in the 41-59 range and call it YES or NO."
+        f" That is a forced trade with no real conviction.\n\n"
 
         f"8. EDGE CALCULATION\n"
         f"Edge = Your probability - Market implied probability (from Kalshi price)\n"
@@ -147,9 +150,10 @@ _JSON_SCHEMA_HINT = (
     '{"decision": "YES" or "NO" or "NO TRADE", "probability_above": 0-100, '
     '"confidence": 0-100, "edge_percent": number, "is_likely_noise": true or false, '
     '"reasoning": "concise explanation referencing distance, time, momentum, noise"}\n'
-    'decision "YES"      → probability_above > 50 with edge ≥ 8%\n'
-    'decision "NO"       → probability_above < 50 with edge ≥ 8% on the NO side\n'
-    'decision "NO TRADE" → edge < 8%, noise, or insufficient conviction\n'
+    'decision "YES"      → probability_above ≥ 60 with edge ≥ 8% (real conviction only)\n'
+    'decision "NO"       → probability_above ≤ 40 with edge ≥ 8% on the NO side\n'
+    'decision "NO TRADE" → probability_above 41-59, edge < 8%, noise, or any doubt\n'
+    'STRICT RULE: probability_above between 41-59 MUST use NO TRADE — never force a direction.\n'
 )
 
 
@@ -607,6 +611,18 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
         confidence = max(0.0, min(1.0, raw_conf / 100.0))
 
         is_likely_noise = bool(data.get("is_likely_noise", False))
+
+        # Hard enforcement: YES requires ≥60%, NO requires ≤40%.
+        # Models that output weak signals like 52% YES or 48% NO are guessing —
+        # treat them as NO TRADE regardless of what decision field says.
+        if decision == "YES" and probability < 0.60:
+            decision    = "NO TRADE"
+            probability = 0.50
+            confidence  = 0.0
+        elif decision == "NO" and probability > 0.40:
+            decision    = "NO TRADE"
+            probability = 0.50
+            confidence  = 0.0
 
         # "NO TRADE": model found no edge — force to 0.50 and zero confidence
         # so the EV gate in risk_gates blocks the trade (consensus ≈ ask → EV ≈ 0).
