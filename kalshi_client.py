@@ -297,7 +297,10 @@ class KalshiClient:
                 "volume":        volume,
                 "open_interest": m.get("open_interest", 0),
                 "close_time":    m.get("close_time", ""),
-                "strike_price":  m.get("floor_strike") or m.get("cap_strike") or 0,
+                "strike_price":  (
+                    m.get("floor_strike") or m.get("cap_strike") or
+                    m.get("strike_price") or m.get("strike") or 0
+                ),
                 "asset":         asset,
             })
 

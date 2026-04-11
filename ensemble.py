@@ -36,27 +36,36 @@ _CALL_TIMEOUT = 30.0   # seconds before a model is marked as failed
 
 def _system_prompt(symbol: str) -> str:
     return (
-        f"You are a professional {symbol} scalper making 15-minute binary option calls. "
-        f"Your job is to read price action and output a probability — NOT to hedge. "
-        f"Use this scoring table to set your probability:\n\n"
-        f"  Score each signal: Trend UPTREND=+2, DOWNTREND=-2, SIDEWAYS=0\n"
-        f"                     Candle bias: bullish candles above 50% = +1, below 50% = -1\n"
-        f"                     RSI >65 = -1 (overbought, fading), RSI <35 = +1 (oversold, bouncing)\n"
-        f"                     Momentum >+0.4 = +2, +0.1 to +0.4 = +1, -0.1 to +0.1 = 0, -0.1 to -0.4 = -1, <-0.4 = -2\n"
-        f"                     Order book: strong BUY = +2, mild BUY = +1, balanced = 0, mild SELL = -1, strong SELL = -2\n\n"
-        f"  Map total score → P(YES):\n"
-        f"    ≥ +5 → 0.82   +3 to +4 → 0.72   +1 to +2 → 0.60   0 → 0.50\n"
-        f"    -1 to -2 → 0.40   -3 to -4 → 0.28   ≤ -5 → 0.18\n\n"
-        f"Apply this framework literally. Do not soften outputs toward 0.50. "
+        f"You are a professional {symbol} 15-minute binary options trader.\n"
+        f"probability = P(YES) = chance that {symbol} closes ABOVE the strike at expiry.\n\n"
+
+        f"STEP 1 — START from strike distance (this is the most important factor):\n"
+        f"  Price already >0.5% ABOVE strike  → start 0.82\n"
+        f"  Price 0.2–0.5% ABOVE strike       → start 0.70\n"
+        f"  Price 0–0.2% ABOVE strike          → start 0.58\n"
+        f"  Price AT strike (within 0.05%)     → start 0.50\n"
+        f"  Price 0–0.2% BELOW strike          → start 0.42\n"
+        f"  Price 0.2–0.5% BELOW strike        → start 0.30\n"
+        f"  Price already >0.5% BELOW strike  → start 0.18\n\n"
+
+        f"STEP 2 — Adjust based on momentum signals (small adjustments, ±0.05 each):\n"
+        f"  Trend UPTREND → +0.05 | DOWNTREND → -0.05 | SIDEWAYS → 0\n"
+        f"  RSI >70 (overbought, price may fade) → -0.05\n"
+        f"  RSI <30 (oversold, price may bounce) → +0.05\n"
+        f"  Momentum >+0.5 → +0.04 | <-0.5 → -0.04\n"
+        f"  3+ same-direction consecutive candles → ±0.04\n\n"
+
+        f"STEP 3 — Cap your final output between 0.12 and 0.88.\n\n"
+
+        f"Show your reasoning: 'start=0.70, DOWNTREND-0.05, RSI71-0.05 → 0.60'\n"
         f"Respond in JSON only."
     )
 
 _JSON_SCHEMA_HINT = (
     '\n\nRespond with ONLY this JSON — no other text:\n'
-    '{"direction": "YES" or "NO", "probability": 0.0-1.0, "reasoning": "score: X — one sentence"}\n'
-    'probability = P(YES) = probability price closes ABOVE strike.\n'
+    '{"direction": "YES" or "NO", "probability": 0.0-1.0, "reasoning": "start=X adj=Y → Z"}\n'
     'direction "YES" → probability > 0.50 | direction "NO" → probability < 0.50\n'
-    'Use the scoring table. Show your score in reasoning. Do NOT output 0.50 unless score is exactly 0.'
+    'ALWAYS show your step 1 starting point in reasoning. Never skip the strike distance anchor.'
 )
 
 
@@ -188,14 +197,36 @@ class EnsembleEngine:
         mins_left = max(0, int((market.close_time - now_utc).total_seconds() / 60))
         candles  = btc_data.candles  # up to 10 completed 15m candles
 
-        # ── Strike distance ───────────────────────────────────────────────
-        dist_pct = ((strike - price) / price * 100) if price > 0 else 0.0
-        if abs(dist_pct) < 0.01:
-            strike_note = f"price is AT the strike (coin-flip territory unless momentum is strong)"
-        elif dist_pct > 0:
-            strike_note = f"price must rise {dist_pct:.3f}% to hit YES"
+        # ── Strike distance + starting probability anchor ─────────────────
+        if strike <= 0:
+            # Kalshi didn't return a strike — context will be incomplete.
+            # AIs should treat this as neutral (0.50 anchor).
+            dist_pct        = 0.0
+            strike_note     = "STRIKE DATA UNAVAILABLE — treat as neutral starting point 0.50"
+            starting_prob   = 0.50
         else:
-            strike_note = f"price must fall {abs(dist_pct):.3f}% to hit NO (currently {abs(dist_pct):.3f}% above strike)"
+            dist_pct = (price - strike) / price * 100   # positive = above strike
+            if dist_pct > 0.5:
+                strike_note   = f"price is {dist_pct:.3f}% ABOVE strike — strong YES territory"
+                starting_prob = 0.82
+            elif dist_pct > 0.2:
+                strike_note   = f"price is {dist_pct:.3f}% ABOVE strike — moderate YES territory"
+                starting_prob = 0.70
+            elif dist_pct > 0.05:
+                strike_note   = f"price is {dist_pct:.3f}% ABOVE strike — slight YES edge"
+                starting_prob = 0.58
+            elif dist_pct > -0.05:
+                strike_note   = f"price is AT the strike (within 0.05%) — coin-flip"
+                starting_prob = 0.50
+            elif dist_pct > -0.2:
+                strike_note   = f"price is {abs(dist_pct):.3f}% BELOW strike — slight NO edge"
+                starting_prob = 0.42
+            elif dist_pct > -0.5:
+                strike_note   = f"price is {abs(dist_pct):.3f}% BELOW strike — moderate NO territory"
+                starting_prob = 0.30
+            else:
+                strike_note   = f"price is {abs(dist_pct):.3f}% BELOW strike — strong NO territory"
+                starting_prob = 0.18
 
         # ── Multi-timeframe price change ──────────────────────────────────
         def pct_chg(old: float, new: float) -> str:
@@ -232,13 +263,18 @@ class EnsembleEngine:
             candle_bias = "insufficient data"
 
         # ── Order book signal ─────────────────────────────────────────────
+        # imbalance = YES-contract bid volume / NO-contract bid volume
+        # High = more YES buyers = bullish sentiment on this market
+        # Low  = more NO buyers  = bearish sentiment on this market
+        # NOTE: at extreme prices (YES=90¢) NO-buyers dominate (buying cheap NO);
+        # this is normal and does NOT mean the underlying is selling off.
         imb = btc_data.imbalance
         ob_signal = (
-            f"{imb:.2f}x — strong BUY pressure" if imb > 1.5 else
-            f"{imb:.2f}x — mild BUY pressure"   if imb > 1.1 else
-            f"{imb:.2f}x — strong SELL pressure" if imb < 0.67 else
-            f"{imb:.2f}x — mild SELL pressure"   if imb < 0.9 else
-            f"{imb:.2f}x — balanced"
+            f"{imb:.2f}x — heavy YES-contract demand (bullish sentiment)" if imb > 1.5 else
+            f"{imb:.2f}x — mild YES-contract demand"                       if imb > 1.1 else
+            f"{imb:.2f}x — heavy NO-contract demand (bearish sentiment)"   if imb < 0.67 else
+            f"{imb:.2f}x — mild NO-contract demand"                        if imb < 0.9 else
+            f"{imb:.2f}x — balanced contract demand"
         )
 
         # ── Completed candles table ───────────────────────────────────────
@@ -270,9 +306,11 @@ class EnsembleEngine:
         return f"""=== {sym}/USD — 15-MINUTE BINARY MARKET ===
 Price now:    ${price:,.4f}
 Strike (YES threshold): ${strike:,.4f}
-Strike note:  {strike_note}
+Distance:     {strike_note}
+★ STARTING PROBABILITY (from strike distance): {starting_prob:.2f}
+  → Adjust ±0.05 per indicator signal, then output your final probability.
 Time left:    {mins_left} min until expiry
-Market price: YES={market.yes_price}¢  NO={market.no_price}¢
+Kalshi market: YES={market.yes_price}¢  NO={market.no_price}¢
 
 === PRICE ACTION ===
 15-min change: {chg_15m}
@@ -281,18 +319,16 @@ Market price: YES={market.yes_price}¢  NO={market.no_price}¢
 Trend (last 4 candles): {trend}
 Candle bias:   {candle_bias}
 RSI (approx):  {rsi_str}
-Order book:    {ob_signal}
+Contract order book: {ob_signal}
 Momentum score: {btc_data.momentum:+.3f} (range -1 to +1)
 
 === CANDLE HISTORY (15m, oldest → newest) ===
 {candles_str}
 {live_str}
 
-=== TASK ===
+=== YOUR TASK ===
 Will {sym} close ABOVE ${strike:,.4f} at {market.close_time.strftime('%H:%M UTC')}?
-You have {mins_left} minutes of price movement left.
-
-Analyze trend, RSI, candle bias, momentum, and order book. Make a DECISIVE call.
+Start at {starting_prob:.2f} (strike distance anchor). Apply indicator adjustments.
 {_JSON_SCHEMA_HINT}"""
 
     # ------------------------------------------------------------------

@@ -141,10 +141,10 @@ class Strategy:
             return None
         market_price = ask_cents / 100.0
 
-        # Price cap: refuse to buy a contract priced ≥ 85¢ — too expensive, minimal upside
-        if ask_cents >= 85:
+        # Price cap: refuse to buy a contract priced ≥ 77¢ — too expensive, minimal upside
+        if ask_cents >= 77:
             log.info(
-                "Skipping %s — %s ask is %d¢ (≥85¢ price cap)",
+                "Skipping %s — %s ask is %d¢ (≥77¢ price cap)",
                 ticker, direction.upper(), ask_cents,
             )
             return None
