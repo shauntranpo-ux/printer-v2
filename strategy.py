@@ -136,11 +136,14 @@ class Strategy:
         # Step 1 — edge check + flat bet sizing
         ask_cents = market.get("yes_ask" if direction == "yes" else "no_ask") or 0
         if ask_cents == 0:
+            # Order book empty — no market makers yet. Use 50¢ as fair-value assumption
+            # for edge/sizing. Market order sends directly to Kalshi and fills at actual
+            # price (or cancels if no counterparty). Edge = p_win - 0.50.
+            ask_cents = 50
             log.info(
-                "Skipping %s — no ask price yet (order book empty), can't calculate real edge",
+                "%s: order book empty — using 50¢ fair value for sizing, sending market order",
                 ticker,
             )
-            return None
         market_price = ask_cents / 100.0
 
         # Price cap: refuse to buy a contract priced ≥ 77¢ — too expensive, minimal upside
