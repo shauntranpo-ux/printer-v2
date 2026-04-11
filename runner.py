@@ -49,9 +49,9 @@ _STOP_FILE      = Path("STOP")
 _START_FILE     = Path("START")  # must exist for live trading; absent = analysis-only (off mode)
 
 # Per-asset bet size multipliers (applied on top of time/streak multipliers)
-# SOL at 50% — WFA showed lower OOS efficiency (0.77) vs other assets
+# BTC at 50% — fewer trades, lower % volatility vs alts; backtest showed 309 trades vs 1,250+ for alts
 _ASSET_SIZE_OVERRIDES: dict[str, float] = {
-    "SOL": 0.50,
+    "BTC": 0.50,
 }
 
 # Per-asset minimum confidence thresholds (overrides global MIN_CONFIDENCE).
