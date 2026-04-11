@@ -384,12 +384,14 @@ class Strategy:
             return None
 
         # Current best bid for our side
+        # If bids are empty the contract is effectively worthless on that side —
+        # use 0 so stop-loss and decay exits fire correctly instead of masking the loss
         if trade.direction == "YES":
             bids        = ob.get("yes_bids", [])
-            current_bid = bids[0]["price"] if bids else int(trade.entry_price)
+            current_bid = bids[0]["price"] if bids else 0
         else:
             bids        = ob.get("no_bids", [])
-            current_bid = bids[0]["price"] if bids else int(trade.entry_price)
+            current_bid = bids[0]["price"] if bids else 0
 
         # --- Compute P&L fraction and update peak ---
         entry   = trade.entry_price  # cents (stored as float)

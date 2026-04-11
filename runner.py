@@ -506,6 +506,17 @@ class TradingBot:
         # Market passed all timing checks — count it as evaluated
         self._cycle_markets_evaluated += 1
 
+        # Skip if no real price data — don't feed fake 50¢ to the AI models
+        yes_ask = market.get("yes_ask") or 0
+        no_ask  = market.get("no_ask")  or 0
+        if not yes_ask and not no_ask:
+            log.info(
+                "Market %s: no ask prices yet (order book empty) — skipping, "
+                "will retry when liquidity appears",
+                ticker,
+            )
+            return
+
         btc_data   = BtcData(
             price          = btc_price,
             momentum       = momentum,
@@ -516,8 +527,8 @@ class TradingBot:
         )
         market_obj = Market(
             ticker       = ticker,
-            yes_price    = market.get("yes_ask") or 50,
-            no_price     = market.get("no_ask")  or 50,
+            yes_price    = yes_ask or no_ask,
+            no_price     = no_ask  or yes_ask,
             strike_price = float(market.get("strike_price") or 0),
             close_time   = close_dt,
         )
