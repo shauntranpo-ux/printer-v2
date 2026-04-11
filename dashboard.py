@@ -892,6 +892,18 @@ function renderWatchSection(w, positions) {
     </div>`;
   }
 
+  // ── Gray "waiting for decision" card set ────────────────────────────────
+  function waitingCards() {
+    return mdefs.map(({label}) => `
+      <div class="bot-vote-card" style="border-color:var(--border);background:var(--dim);opacity:.55">
+        <div class="bot-vote-name">${label}</div>
+        <div style="margin:10px 0 6px;text-align:center">
+          <span style="color:var(--muted);font-size:.85rem;font-weight:700;letter-spacing:1.5px">&#8213;&#8213; WAITING &#8213;&#8213;</span>
+        </div>
+        <div style="font-size:10px;color:var(--muted);text-align:center;opacity:.7">Waiting for next evaluation</div>
+      </div>`).join('');
+  }
+
   // ── Build all signal panels ──────────────────────────────────────────────
   // Build a quick lookup: ticker → open trade (from /api/positions)
   const openByTicker = {};
@@ -938,19 +950,34 @@ function renderWatchSection(w, positions) {
 
   let signalPanels;
   if (allSignals.length === 0) {
-    const placeholders = mdefs.map(({label}) => `
-      <div class="bot-vote-card vote-fail">
-        <div class="bot-vote-name">${label}</div>
-        <div class="bot-vote-dir" style="color:var(--muted);font-size:1.6rem;font-weight:700">?</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:4px">Waiting...</div>
-      </div>`).join('');
+    // No signals yet — show gray waiting cards
     signalPanels = `<div class="consensus-panel">
-      <div class="consensus-title">AI Bot Votes &mdash; What Each Model Is Watching</div>
-      <div class="bot-vote-cards">${placeholders}</div>
-      <div class="consensus-banner cbanner-split">Waiting for next cycle evaluation...</div>
+      <div class="consensus-title">AI Bot Votes</div>
+      <div class="bot-vote-cards">${waitingCards()}</div>
+      <div class="consensus-banner cbanner-split" style="opacity:.6">&#8213; Waiting for first cycle evaluation...</div>
     </div>`;
   } else {
     signalPanels = allSignals.map(sig => {
+      // If signal is older than 12 min the bot is sleeping between cycles — show waiting state
+      const sigTs    = sig.ts ? new Date(sig.ts) : null;
+      const ageMins  = sigTs ? (Date.now() - sigTs.getTime()) / 60000 : 0;
+      const sleeping = ageMins > 12;
+
+      if (sleeping) {
+        const sTicker = sig.ticker || '';
+        const sAsset  = sTicker.replace(/^KX/,'').replace(/15M.*/,'');
+        const sLbl    = tickerLabel(sTicker, sAsset);
+        const sLabel  = sLbl.name + (sLbl.sub ? ' &middot; ' + sLbl.sub : '');
+        const minsToNext = Math.max(0, Math.round(15 - ageMins));
+        return `<div class="consensus-panel" style="opacity:.7">
+          <div class="consensus-title">AI Bot Votes &mdash; <span style="color:var(--blue)">${sLabel}</span></div>
+          <div class="bot-vote-cards">${waitingCards()}</div>
+          <div class="consensus-banner cbanner-split" style="opacity:.7">
+            &#8213; Sleeping between cycles &mdash; next evaluation in ~${minsToNext} min
+          </div>
+        </div>`;
+      }
+
       const openTrade = openByTicker[sig.ticker];
       return openTrade ? renderFilledPanel(sig, openTrade) : renderSignalPanel(sig);
     }).join('');
