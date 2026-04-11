@@ -520,11 +520,12 @@ class Database:
             )
             closed_rows = await cursor.fetchall()
 
-        pnls:   list[float] = [r["pnl_dollars"] for r in closed_rows
-                               if r["pnl_dollars"] is not None]
-        sizes:  list[float] = [r["size_dollars"] for r in closed_rows]
+        pnls:   list[float] = [r["pnl_dollars"]  for r in closed_rows
+                               if r["pnl_dollars"]  is not None]
+        sizes:  list[float] = [r["size_dollars"] for r in closed_rows
+                               if r["size_dollars"] is not None]
 
-        total_trades    = len(pnls)
+        total_trades    = len(closed_rows)
         winning_trades  = sum(1 for p in pnls if p > 0)
         total_pnl       = sum(pnls)
         total_wagered   = sum(sizes)

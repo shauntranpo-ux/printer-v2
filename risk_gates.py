@@ -1,11 +1,11 @@
 """
 risk_gates.py — 3-gate pre-trade risk filter
 
-Active gates: drawdown, confidence, staleness.
-Edge and liquidity gate methods exist but are intentionally not wired
-into check_all() (markets have no order-book depth, so liquidity always
-fails; edge threshold is enforced by ensemble confidence instead).
-All 3 active gates must pass for a trade to execute.
+Active gates: drawdown, ev, staleness.
+  drawdown  — daily loss used must be below DAILY_LOSS_LIMIT
+  ev        — expected value (consensus_prob - ask) must clear MIN_EV
+  staleness — asset price feed must be fresh
+All 3 gates must pass for a trade to execute.
 """
 
 from __future__ import annotations
@@ -62,9 +62,9 @@ class RiskGates:
         Returns GateResult with passed=True only when ALL gates pass.
         """
         gates = [
-            ("drawdown",   self._gate_drawdown()),
-            ("confidence", self._gate_confidence(ensemble_result)),
-            ("staleness",  self._gate_staleness(asset)),
+            ("drawdown",  self._gate_drawdown()),
+            ("ev",        self._gate_ev(market, ensemble_result)),
+            ("staleness", self._gate_staleness(asset)),
         ]
 
         details: dict = {}
@@ -80,7 +80,7 @@ class RiskGates:
                     checked_at   = datetime.now(timezone.utc),
                 )
 
-        log.info("All 3 risk gates passed (drawdown / confidence / staleness)")
+        log.info("All 3 risk gates passed (drawdown / ev / staleness)")
         return GateResult(
             passed       = True,
             failed_gate  = None,
@@ -90,99 +90,7 @@ class RiskGates:
         )
 
     # ------------------------------------------------------------------
-    # Gate 1 — Edge
-    # ------------------------------------------------------------------
-
-    async def _gate_edge(
-        self, market: dict, ensemble_result
-    ) -> tuple[bool, str]:
-        """
-        Ensemble edge must clear MIN_EDGE above the market ask price.
-
-        edge = consensus_prob - market_ask_price
-        pass if edge >= MIN_EDGE (0.05)
-        """
-        direction      = ensemble_result.direction     # "yes" | "no" | "flat"
-        consensus_prob = ensemble_result.consensus_prob
-        min_edge       = settings.MIN_EDGE
-
-        if direction not in ("yes", "no"):
-            reason = f"direction is '{direction}' — no trade signal"
-            log.info("Gate [edge]: FAIL — %s", reason)
-            return False, reason
-
-        if direction == "yes":
-            market_price = (market.get("yes_ask") or 50) / 100.0
-        else:
-            market_price = (market.get("no_ask") or 50) / 100.0
-
-        edge   = consensus_prob - market_price
-        passed = edge >= min_edge
-        reason = f"Edge: {edge:.1%} vs min {min_edge:.1%}"
-        log.info("Gate [edge]: %s — %s", "PASS" if passed else "FAIL", reason)
-        return passed, reason
-
-    # ------------------------------------------------------------------
-    # Gate 2 — Liquidity
-    # ------------------------------------------------------------------
-
-    async def _gate_liquidity(
-        self, market: dict, ensemble_result, bet_size: float
-    ) -> tuple[bool, str]:
-        """
-        Enough ask-side depth must exist within 3 cents of the best ask
-        to fill our intended bet at market.
-
-        available_liquidity = sum of ask sizes within 3¢ of best ask
-        contracts_needed    = bet_size / ask_price_per_contract
-        pass if available_liquidity >= contracts_needed
-        """
-        ticker    = market.get("ticker", "")
-        direction = ensemble_result.direction
-
-        try:
-            ob = await self._kalshi.get_order_book(ticker)
-        except Exception as exc:
-            reason = f"Order book fetch failed: {exc}"
-            log.warning("Gate [liquidity]: FAIL — %s", reason)
-            return False, reason
-
-        if direction == "yes":
-            asks            = ob.get("yes_asks", [])
-            ask_price_cents = market.get("yes_ask") or 50
-        else:
-            asks            = ob.get("no_asks", [])
-            ask_price_cents = market.get("no_ask") or 50
-
-        if not asks:
-            reason = f"No {direction.upper()} asks in order book"
-            log.info("Gate [liquidity]: FAIL — %s", reason)
-            return False, reason
-
-        best_ask      = asks[0]["price"]
-        price_ceiling = best_ask + 3    # accept fills up to 3¢ worse than best
-
-        available_liquidity = sum(
-            lv["size"] for lv in asks if lv["price"] <= price_ceiling
-        )
-
-        ask_price_dollars = ask_price_cents / 100.0
-        if ask_price_dollars <= 0:
-            reason = "Ask price is zero — market not tradeable"
-            log.warning("Gate [liquidity]: FAIL — %s", reason)
-            return False, reason
-
-        contracts_needed = bet_size / ask_price_dollars
-        passed = available_liquidity >= contracts_needed
-        reason = (
-            f"Liquidity: {available_liquidity:.0f} contracts available, "
-            f"need {contracts_needed:.1f}"
-        )
-        log.info("Gate [liquidity]: %s — %s", "PASS" if passed else "FAIL", reason)
-        return passed, reason
-
-    # ------------------------------------------------------------------
-    # Gate 3 — Drawdown
+    # Gate 1 — Drawdown
     # ------------------------------------------------------------------
 
     async def _gate_drawdown(self) -> tuple[bool, str]:
@@ -206,31 +114,47 @@ class RiskGates:
         return True, reason
 
     # ------------------------------------------------------------------
-    # Gate 4 — Confidence
+    # Gate 2 — Expected Value
     # ------------------------------------------------------------------
 
-    async def _gate_confidence(self, ensemble_result) -> tuple[bool, str]:
+    async def _gate_ev(
+        self, market: dict, ensemble_result
+    ) -> tuple[bool, str]:
         """
-        Ensemble must have both sufficient confidence AND action == "TRADE".
-        Ensemble sets action to WAIT/SKIP when spread or confidence fails
-        its own internal thresholds — this gate catches those cases.
+        Expected value of the trade must clear MIN_EV.
+
+        For a Kalshi binary contract paying $1 at resolution:
+          EV = consensus_prob - ask          (YES trade)
+          EV = (1 - consensus_prob) - ask    (NO trade)
+
+        This is dollars of expected profit per $1 of payout. It also
+        checks that the ensemble action is TRADE (catches WAIT/SKIP from
+        the spread-based model-agreement gate in ensemble.py).
         """
-        confidence = ensemble_result.confidence
-        action     = ensemble_result.action
-        min_conf   = settings.MIN_CONFIDENCE
+        action         = ensemble_result.action
+        direction      = ensemble_result.direction   # "yes" | "no" | "flat"
+        consensus_prob = ensemble_result.consensus_prob
 
         if action != "TRADE":
             reason = f"Ensemble action is '{action}' — not TRADE"
-            log.info("Gate [confidence]: FAIL — %s", reason)
+            log.info("Gate [ev]: FAIL — %s", reason)
             return False, reason
 
-        passed = confidence >= min_conf
-        reason = f"Confidence: {confidence:.1%} vs min {min_conf:.1%}"
-        log.info("Gate [confidence]: %s — %s", "PASS" if passed else "FAIL", reason)
+        if direction == "yes":
+            ask = (market.get("yes_ask") or 50) / 100.0
+            ev  = consensus_prob - ask
+        else:
+            ask = (market.get("no_ask") or 50) / 100.0
+            ev  = (1.0 - consensus_prob) - ask
+
+        min_ev = settings.MIN_EV
+        passed = ev >= min_ev
+        reason = f"EV: {ev:.1%} vs min {min_ev:.1%}"
+        log.info("Gate [ev]: %s — %s", "PASS" if passed else "FAIL", reason)
         return passed, reason
 
     # ------------------------------------------------------------------
-    # Gate 5 — Staleness
+    # Gate 3 — Staleness
     # ------------------------------------------------------------------
 
     async def _gate_staleness(self, asset: str = "BTC") -> tuple[bool, str]:

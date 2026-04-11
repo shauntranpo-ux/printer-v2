@@ -485,8 +485,8 @@ Momentum score: {btc_data.momentum:+.3f} (range -1 to +1)
 
 === YOUR TASK ===
 Will {sym} close ABOVE ${strike:,.4f} at {market.close_time.strftime('%H:%M UTC')}?
-Apply the quantitative framework. Test for noise first. Calculate your edge vs market implied {yes_implied}%.
-Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TRADE.
+Apply the quantitative framework. Calculate your edge vs market implied {yes_implied}%.
+Always output YES or NO — the EV gate will handle filtering weak signals.
 {_JSON_SCHEMA_HINT}"""
 
     # ------------------------------------------------------------------
@@ -687,7 +687,7 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
         """
         # Skip paused models — no API call, no coroutine created, no timeout wait
         resume_at = EnsembleEngine._MODEL_PAUSED_UNTIL.get(model_name, 0)
-        if EnsembleEngine._DEBATE_CYCLE <= resume_at:
+        if EnsembleEngine._DEBATE_CYCLE < resume_at:
             log.info(
                 "%s: paused after repeated failures — skipping "
                 "(resumes at cycle %d, current=%d)",
@@ -759,7 +759,7 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
         _all_models = ("claude", "gpt", "gemini", "deepseek")
         paused_now = {
             m for m in _all_models
-            if EnsembleEngine._DEBATE_CYCLE <= EnsembleEngine._MODEL_PAUSED_UNTIL.get(m, 0)
+            if EnsembleEngine._DEBATE_CYCLE < EnsembleEngine._MODEL_PAUSED_UNTIL.get(m, 0)
         }
         active_count = len(_all_models) - len(paused_now)
         min_required = 2 if active_count >= 3 else 1

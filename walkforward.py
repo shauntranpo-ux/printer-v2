@@ -63,10 +63,12 @@ DEFAULT_N_STRIKES   =   3   # mirrors STRIKE_OFFSETS in backtest.py
 DEFAULT_COMPOUND_PCT = 5.0  # max_bet = this % of bankroll when --compound is used
 
 # Parameter grid  (4 × 3 × 3 = 36 combos per IS window)
+# min_ev: your floor is 5% — grid goes 5 / 7 / 9 / 11¢ per $1 payout.
+# 5¢ is the loose entry bar; 11¢ forces only the highest-conviction edges.
 PARAM_GRID = {
-    "min_conf": [0.10, 0.14, 0.18, 0.22],
-    "tp":       [0.45, 0.55, 0.65],
-    "sl":       [0.70, 0.80, 0.90],
+    "min_ev": [0.05, 0.07, 0.09, 0.11],
+    "tp":     [0.45, 0.55, 0.65],
+    "sl":     [0.70, 0.80, 0.90],
 }
 
 
@@ -126,13 +128,13 @@ def _run(
     bankroll:    float,
     tp:          float,
     sl:          float,
-    min_conf:    float,
+    min_ev:      float,
     max_bet:     float = DEFAULT_MAX_BET,
     n_strikes:   int   = DEFAULT_N_STRIKES,
 ) -> tuple[list, dict]:
     """Patch backtest globals, run, return (trades, metrics)."""
-    bt.MIN_CONF        = min_conf
-    bt.MIN_CONF_CHOPPY = min(min_conf + 0.10, 0.50)
+    bt.MIN_EV        = min_ev
+    bt.MIN_EV_CHOPPY = min(min_ev + 0.05, 0.20)
     bt.STRIKE_OFFSETS  = _build_strike_offsets(n_strikes)
     bt.MAX_POSITIONS   = n_strikes   # allow one trade per strike per candle
     args = _make_args(bankroll, tp, sl)
@@ -212,21 +214,21 @@ def grid_search_is(
     best_metrics = {}
 
     combos = list(product(
-        PARAM_GRID["min_conf"],
+        PARAM_GRID["min_ev"],
         PARAM_GRID["tp"],
         PARAM_GRID["sl"],
     ))
 
-    for min_conf, tp, sl in combos:
+    for min_ev, tp, sl in combos:
         _, m = _run(
-            df_is, ind_is, DEFAULT_BANKROLL, tp, sl, min_conf,
+            df_is, ind_is, DEFAULT_BANKROLL, tp, sl, min_ev,
             n_strikes=n_strikes,
         )
         s = _sharpe(m)
         n = m.get("total_trades", 0)
         if n >= MIN_IS_TRADES and s > best_sharpe:
             best_sharpe  = s
-            best_params  = {"min_conf": min_conf, "tp": tp, "sl": sl}
+            best_params  = {"min_ev": min_ev, "tp": tp, "sl": sl}
             best_metrics = m
 
     return best_params, best_metrics
@@ -279,9 +281,9 @@ def main() -> None:
     print(f"Strike offsets ({args.n_strikes}): {strikes_list}")
     print(f"Compound mode: {'ON (' + str(args.compound_pct) + '% of bankroll per window)' if compound_mode else 'OFF (fixed $' + str(args.max_bet) + ')'}")
     print(f"Parameter combos per IS window: "
-          f"{len(PARAM_GRID['min_conf'])} x {len(PARAM_GRID['tp'])} x "
+          f"{len(PARAM_GRID['min_ev'])} x {len(PARAM_GRID['tp'])} x "
           f"{len(PARAM_GRID['sl'])} = "
-          f"{len(PARAM_GRID['min_conf'])*len(PARAM_GRID['tp'])*len(PARAM_GRID['sl'])}")
+          f"{len(PARAM_GRID['min_ev'])*len(PARAM_GRID['tp'])*len(PARAM_GRID['sl'])}")
 
     if n_win == 0:
         print("ERROR: Not enough data for even one window. Exiting.")
@@ -328,11 +330,11 @@ def main() -> None:
         if best_params is None:
             print("  SKIP — no IS combo met min-trade threshold")
             # Use default fallback params so OOS still runs
-            best_params = {"min_conf": 0.18, "tp": 0.55, "sl": 0.80}
+            best_params = {"min_ev": 0.07, "tp": 0.55, "sl": 0.80}
             is_metrics  = {}
 
         print(
-            f"  Best IS params: min_conf={best_params['min_conf']}  "
+            f"  Best IS params: min_ev={best_params['min_ev']}  "
             f"tp={best_params['tp']}  sl={best_params['sl']}  "
             f"Sharpe={_sharpe(is_metrics):.3f}  "
             f"WR={is_metrics.get('win_rate', 0):.1f}%"
@@ -350,7 +352,7 @@ def main() -> None:
             oos_bankroll,
             best_params["tp"],
             best_params["sl"],
-            best_params["min_conf"],
+            best_params["min_ev"],
             max_bet   = window_max_bet,
             n_strikes = args.n_strikes,
         )
@@ -383,7 +385,7 @@ def main() -> None:
             "oos_start":     oos_start.date().isoformat(),
             "oos_end":       oos_end.date().isoformat(),
             # Best params
-            "min_conf":      best_params["min_conf"],
+            "min_ev":        best_params["min_ev"],
             "tp":            best_params["tp"],
             "sl":            best_params["sl"],
             "max_bet_used":  round(window_max_bet, 2),
@@ -429,9 +431,9 @@ def main() -> None:
 
         # Most-selected params
         param_freq = {
-            "min_conf": results_df["min_conf"].value_counts().to_dict(),
-            "tp":       results_df["tp"].value_counts().to_dict(),
-            "sl":       results_df["sl"].value_counts().to_dict(),
+            "min_ev": results_df["min_ev"].value_counts().to_dict(),
+            "tp":     results_df["tp"].value_counts().to_dict(),
+            "sl":     results_df["sl"].value_counts().to_dict(),
         }
     else:
         total_oos_trades = 0
@@ -496,13 +498,13 @@ def main() -> None:
     print(sep)
 
     if not results_df.empty:
-        most_conf = results_df["min_conf"].mode()[0]
-        most_tp   = results_df["tp"].mode()[0]
-        most_sl   = results_df["sl"].mode()[0]
+        most_ev = results_df["min_ev"].mode()[0]
+        most_tp = results_df["tp"].mode()[0]
+        most_sl = results_df["sl"].mode()[0]
         print(f"\n  Most-selected params (deploy these live):")
-        print(f"    MIN_CONFIDENCE = {most_conf}")
-        print(f"    TAKE_PROFIT    = {most_tp}")
-        print(f"    STOP_LOSS      = {most_sl}")
+        print(f"    MIN_EV      = {most_ev}")
+        print(f"    TAKE_PROFIT = {most_tp}")
+        print(f"    STOP_LOSS   = {most_sl}")
 
     # ── Annual projection ────────────────────────────────────────────────────
     if not compound_mode and avg_oos_wr > 55:
@@ -616,9 +618,9 @@ def _plot_params(results_df: pd.DataFrame, out_dir: Path) -> None:
     fig, axes = plt.subplots(1, 3, figsize=(13, 4))
 
     param_cfg = [
-        ("min_conf", "MIN_CONFIDENCE", PARAM_GRID["min_conf"]),
-        ("tp",       "TAKE_PROFIT",    PARAM_GRID["tp"]),
-        ("sl",       "STOP_LOSS",      PARAM_GRID["sl"]),
+        ("min_ev", "MIN_EV",      PARAM_GRID["min_ev"]),
+        ("tp",     "TAKE_PROFIT", PARAM_GRID["tp"]),
+        ("sl",     "STOP_LOSS",   PARAM_GRID["sl"]),
     ]
 
     for ax, (col, title, grid_vals) in zip(axes, param_cfg):

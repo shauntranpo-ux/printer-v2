@@ -608,8 +608,8 @@ class KalshiClient:
                 fill_yes_p = 100 - fill_no_p
 
         # Fall back to order-level price (limit price for resting orders)
-        yes_p = fill_yes_p or order.get("yes_price", 0) or 0
-        no_p  = fill_no_p  or order.get("no_price",  0) or 0
+        yes_p = fill_yes_p if fill_yes_p is not None else (order.get("yes_price") or 0)
+        no_p  = fill_no_p  if fill_no_p  is not None else (order.get("no_price")  or 0)
         # Derive missing side price if only one is present
         if yes_p and not no_p:
             no_p = 100 - yes_p

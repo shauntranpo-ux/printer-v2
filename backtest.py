@@ -36,10 +36,8 @@ DEFAULT_BANKROLL       = 500.0
 DEFAULT_MAX_BET        = 25.0
 DEFAULT_TP             = 0.55   # take profit at +55 % (or hold to expiry if bid ≥ 75¢)
 DEFAULT_SL             = 0.80   # stop loss at -80 %
-MIN_EDGE               = 0.03
-MIN_EDGE_CHOPPY        = 0.08   # higher bar for mean reversion
-MIN_CONF               = 0.18   # calibrated for rule-based proxy
-MIN_CONF_CHOPPY        = 0.28   # mean reversion needs stronger conviction
+MIN_EV                 = 0.05   # minimum expected value per $1 payout
+MIN_EV_CHOPPY          = 0.08   # higher bar for mean reversion
 MAX_SPREAD             = 0.35
 MAX_POSITIONS          = 3
 DAILY_LOSS_LIMIT       = 100.0
@@ -49,7 +47,6 @@ STRIKE_OFFSETS         = [+0.005, 0.0, -0.005]
 
 # ── High-frequency / high-quality mode (toggled via --hf flag) ──────────────
 # Drops TRENDING (low WR), expands to 7 strikes, adds volume+momentum scoring.
-HF_MIN_CONF            = 0.14   # lower base bar — scoring filter compensates
 HF_MAX_SPREAD          = 0.28   # tighter model agreement
 HF_STRIKE_OFFSETS      = [-0.015, -0.010, -0.005, 0.0, 0.005, 0.010, 0.015]
 HF_MAX_POSITIONS       = 7
@@ -299,8 +296,10 @@ def classify_regime(adx: float, atr_pct: float) -> str:
 
 def ensemble_at(i: int, ind: dict[str, np.ndarray], regime: str = "VOLATILE") -> dict:
     """
-    Rule-based ensemble proxy.  Model weights and confidence thresholds
-    adapt to the current market regime (Upgrades 1 & 5).
+    Rule-based ensemble proxy.  Model weights adapt to regime (Upgrades 1 & 5).
+    Returns action WAIT when model spread is too high, TRADE otherwise.
+    EV filtering (replaces the old confidence gate) happens per-strike in the
+    main loop via the edge variable.
     """
     momentum = float(ind["momentum"][i])
     rsi      = float(ind["rsi"][i])
@@ -342,11 +341,7 @@ def ensemble_at(i: int, ind: dict[str, np.ndarray], regime: str = "VOLATILE") ->
     avg_conf   = sum(abs(p - 0.5) * 2.0 for p in probs.values()) / len(probs)
     confidence = avg_conf * 0.8 if spread > 0.20 else avg_conf
 
-    min_conf_use = MIN_CONF_CHOPPY if regime == "CHOPPY" else MIN_CONF
-
-    if   spread     > MAX_SPREAD:    action = "WAIT"
-    elif confidence < min_conf_use:  action = "SKIP"
-    else:                            action = "TRADE"
+    action = "WAIT" if spread > MAX_SPREAD else "TRADE"
 
     return {
         "consensus":  consensus,
@@ -426,6 +421,7 @@ def run_backtest(
     tp_base   = args.tp
     sl_base   = args.sl
     hf_mode   = getattr(args, "hf", False)
+    base_ev   = getattr(args, "min_ev", MIN_EV)
 
     # Apply high-frequency overrides
     strike_offsets  = HF_STRIKE_OFFSETS if hf_mode else STRIKE_OFFSETS
@@ -477,27 +473,23 @@ def run_backtest(
         regime  = classify_regime(adx, atr_pct)
 
         # ── Upgrade 7: time-based sizing multiplier ───────────────────────────
-        # Dead-zone min_conf gate removed — off-hours just use reduced size
         hour = ts.hour
         if HIGH_ACTIVITY_START <= hour < HIGH_ACTIVITY_END:
-            time_mult     = 1.0
+            time_mult = 1.0
         elif MED_ACTIVITY_START <= hour < MED_ACTIVITY_END:
-            time_mult     = 0.75
+            time_mult = 0.75
         else:
-            time_mult     = 0.50
-        time_min_conf = MIN_CONF    # same confidence bar for all hours
+            time_mult = 0.50
 
         # ── Upgrade 6: streak soft trigger ───────────────────────────────────
         recent_losses = sum(1 for w in recent_results[-3:] if not w)
         if recent_losses >= STREAK_SOFT:
-            # Reduce size to 25%; slightly raise confidence but stay achievable
-            streak_mult     = 0.25
-            streak_min_conf = MIN_CONF + 0.05   # e.g. 0.23 — still reachable
+            # Reduce size to 25%; raise EV bar slightly during losing streak
+            streak_mult      = 0.25
+            effective_min_ev = base_ev + 0.02
         else:
-            streak_mult     = 1.0
-            streak_min_conf = 0.0
-
-        effective_min_conf = max(time_min_conf, streak_min_conf)
+            streak_mult      = 1.0
+            effective_min_ev = base_ev
 
         # ── Regime branch: CHOPPY mean reversion vs TRENDING/VOLATILE ────────
         if regime == "CHOPPY":
@@ -521,14 +513,12 @@ def run_backtest(
             ens = ensemble_at(i, ind, "CHOPPY")
             if ens["action"] == "WAIT":
                 continue
-            if ens["confidence"] < max(MIN_CONF_CHOPPY, effective_min_conf):
-                continue
 
             direction  = mr_direction
             tp_trade   = 0.25
             sl_trade   = 0.20
             size_mult  = 0.50 * time_mult * streak_mult
-            min_edge_use = MIN_EDGE_CHOPPY
+            min_ev_use = max(MIN_EV_CHOPPY, effective_min_ev)
 
         else:
             # TRENDING or VOLATILE
@@ -539,8 +529,6 @@ def run_backtest(
 
                 ens = ensemble_at(i, ind, regime)
                 if ens["action"] != "TRADE":
-                    continue
-                if ens["confidence"] < HF_MIN_CONF:
                     continue
                 if ens["spread"] > HF_MAX_SPREAD:
                     continue
@@ -599,17 +587,15 @@ def run_backtest(
                 if direction == "NO"  and momentum >  0.10:
                     continue
 
-                tp_trade  = max(tp_base, atr_pct * 15)
-                sl_trade  = max(sl_base, atr_pct * 10)
-                size_mult = 1.0 * time_mult * streak_mult
-                min_edge_use = MIN_EDGE
+                tp_trade   = max(tp_base, atr_pct * 15)
+                sl_trade   = max(sl_base, atr_pct * 10)
+                size_mult  = 1.0 * time_mult * streak_mult
+                min_ev_use = effective_min_ev
 
             else:
                 # ── Standard mode: TRENDING + VOLATILE ───────────────────────
                 ens = ensemble_at(i, ind, regime)
                 if ens["action"] != "TRADE":
-                    continue
-                if ens["confidence"] < effective_min_conf:
                     continue
 
                 direction = ens["direction"]
@@ -636,15 +622,15 @@ def run_backtest(
 
                 # ── Upgrade 4: dynamic TP/SL ──────────────────────────────────
                 if regime == "VOLATILE":
-                    tp_trade  = max(tp_base, atr_pct * 15)
-                    sl_trade  = max(sl_base, atr_pct * 10)
-                    size_mult = 1.0 * time_mult * streak_mult
+                    tp_trade   = max(tp_base, atr_pct * 15)
+                    sl_trade   = max(sl_base, atr_pct * 10)
+                    size_mult  = 1.0 * time_mult * streak_mult
                 else:   # TRENDING
-                    tp_trade  = 0.45
-                    sl_trade  = 0.30
-                    size_mult = 0.75 * time_mult * streak_mult
+                    tp_trade   = 0.45
+                    sl_trade   = 0.30
+                    size_mult  = 0.75 * time_mult * streak_mult
 
-                min_edge_use = MIN_EDGE
+                min_ev_use = effective_min_ev
 
         candle_trades = 0
 
@@ -662,7 +648,7 @@ def run_backtest(
                 entry_frac = 1.0 - yes_entry_frac
                 edge       = (1.0 - ens["consensus"]) - entry_frac
 
-            if edge < min_edge_use:
+            if edge < min_ev_use:
                 continue
 
             bet = kelly_size(edge, entry_frac, bankroll, max_bet) * size_mult
@@ -1159,6 +1145,7 @@ def save_json(metrics: dict, args: argparse.Namespace) -> None:
             "max_bet":  args.max_bet,
             "tp":       args.tp,
             "sl":       args.sl,
+            "min_ev":   getattr(args, "min_ev", MIN_EV),
         },
         "summary": {k: v for k, v in metrics.items() if k != "monthly"},
         "monthly":  metrics.get("monthly", {}),
@@ -1192,6 +1179,8 @@ def parse_args() -> argparse.Namespace:
                    help=f"Stop loss fraction (default: {DEFAULT_SL})")
     p.add_argument("--hf",       action="store_true", default=False,
                    help="High-frequency mode: VOLATILE-only, 7 strikes, volume+momentum scoring")
+    p.add_argument("--min-ev",   type=float, default=MIN_EV,
+                   help=f"Minimum expected value per $1 payout to enter a trade (default: {MIN_EV})")
     return p.parse_args()
 
 
