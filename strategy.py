@@ -390,7 +390,7 @@ class Strategy:
             try:
                 tp_order  = await self._kalshi.get_order(trade.tp_order_id)
                 tp_status = tp_order.get("status", "unknown")
-                if tp_status in ("filled", "executed"):
+                if tp_status in ("filled", "executed", "partially_filled"):
                     # Use the price for OUR side of the trade
                     if trade.direction == "YES":
                         tp_price = tp_order.get("yes_price") or int(trade.entry_price)
@@ -539,6 +539,17 @@ class Strategy:
                 log.info("Trade %d: cancelled resting TP order %s", trade.id, trade.tp_order_id[:8])
             except Exception as exc:
                 log.warning("Trade %d: failed to cancel TP order %s: %s", trade.id, trade.tp_order_id[:8], exc)
+
+        # Race condition guard: re-fetch from DB to ensure trade is still open.
+        # Both the main cycle and exit monitor call check_exits independently —
+        # without this check a trade could be sold twice if both calls race.
+        fresh = await self._db.get_trade(trade.id)
+        if fresh is None or fresh.status != "open":
+            log.warning(
+                "Trade %d: already closed/expired in DB (status=%s) — aborting sell (race guard)",
+                trade.id, fresh.status if fresh else "not found",
+            )
+            return trade
 
         if not skip_sell and exit_reason != "expired":
             # Retry up to 4 times only on API exception.
