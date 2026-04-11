@@ -226,20 +226,22 @@ class TradingBot:
                 if self._is_new_day():
                     await self._send_daily_summary()
 
-                # Short-cycle retry: when markets were found but ALL had empty order books,
-                # wait 90s and scan again instead of skipping the whole 15-min window.
-                # Kalshi late-night sessions can take 4-6 min for the first bids to appear.
-                _EMPTY_RETRY_WAIT = 90
-                _EMPTY_MAX_RETRIES = 3
-                for _attempt in range(_EMPTY_MAX_RETRIES):
-                    if self._cycle_signals or self._cycle_markets_evaluated == 0:
-                        break   # signals generated, or no markets passed timing checks
+                # Within-window retry loop: keep re-evaluating every 2 min while
+                # we're still inside the current session's entry window (< 420s in).
+                # This handles both empty order books AND mid-session bot starts —
+                # the bot will keep trying until the window closes, then sleep to next.
+                _RETRY_INTERVAL = 120  # re-check every 2 minutes within same window
+                while True:
+                    now_ts          = time.time()
+                    boundary        = int(now_ts // _CYCLE_SECONDS) * _CYCLE_SECONDS
+                    time_into_window = now_ts - boundary
+                    if time_into_window >= 420 or self._cycle_signals:
+                        break   # past entry window, or already got a signal
                     log.info(
-                        "All %d evaluated markets had empty order books — retrying in %ds (%d/%d)",
-                        self._cycle_markets_evaluated, _EMPTY_RETRY_WAIT,
-                        _attempt + 1, _EMPTY_MAX_RETRIES,
+                        "Still in entry window (%.0fs/420s) — re-evaluating in %ds",
+                        time_into_window, _RETRY_INTERVAL,
                     )
-                    await asyncio.sleep(_EMPTY_RETRY_WAIT)
+                    await asyncio.sleep(_RETRY_INTERVAL)
                     await self.run_cycle()
                     if self._is_new_day():
                         await self._send_daily_summary()
