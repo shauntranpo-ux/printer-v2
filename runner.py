@@ -226,7 +226,7 @@ class TradingBot:
                     continue
                 open_trades = await self.db.get_open_trades()
                 if open_trades:
-                    log.debug("Exit monitor: checking %d open trade(s)", len(open_trades))
+                    log.info("Exit monitor: checking %d open trade(s)", len(open_trades))
                     await self.strategy.check_exits(open_trades)
             except asyncio.CancelledError:
                 raise
@@ -546,14 +546,16 @@ class TradingBot:
 
         yes_ask = market.get("yes_ask") or 0
         no_ask  = market.get("no_ask")  or 0
-        # Note: prices may be 0 when order book is brand-new.
-        # We still call the ensemble — AIs reason from strike distance and candles.
-        # strategy.enter_trade() will block the actual order if ask is still 0.
+        # Order book must have prices before we run the ensemble.
+        # Without YES/NO prices the models see "market implied P(YES): 0%" which is
+        # meaningless — they all return 50%/NO TRADE, burn API credits, and keep the
+        # dashboard stuck on WAITING. Skip until Kalshi publishes the order book.
         if not yes_ask and not no_ask:
             log.info(
-                "Market %s: order book empty — running AI analysis but will not trade until prices appear",
+                "Market %s: order book empty — skipping ensemble until prices appear",
                 ticker,
             )
+            return
 
         btc_data   = BtcData(
             price          = btc_price,
