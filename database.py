@@ -629,6 +629,29 @@ class Database:
             )
             await db.commit()
 
+    async def get_bot_enabled(self) -> bool:
+        """Return True if the bot has been started via the dashboard."""
+        async with self._conn() as db:
+            cur = await db.execute(
+                "SELECT value FROM bot_kv WHERE key = 'bot_enabled'"
+            )
+            row = await cur.fetchone()
+            return row[0] == "1" if row else False
+
+    async def set_bot_enabled(self, enabled: bool) -> None:
+        """Persist bot enabled/disabled state (survives container restarts)."""
+        async with self._conn() as db:
+            await db.execute(
+                """
+                INSERT INTO bot_kv (key, value, updated) VALUES ('bot_enabled', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value   = excluded.value,
+                    updated = excluded.updated
+                """,
+                ("1" if enabled else "0", _now_utc()),
+            )
+            await db.commit()
+
     async def get_market_watch(self) -> dict | None:
         """Return the latest cycle watch data written by the runner, or None."""
         async with self._conn() as db:

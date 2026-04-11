@@ -25,7 +25,6 @@ from kalshi_client import KalshiClient
 app = Flask(__name__)
 
 _STOP_FILE      = Path("STOP")
-_START_FILE     = Path("START")
 _HEARTBEAT_FILE = Path("heartbeat.txt")
 
 # ---------------------------------------------------------------------------
@@ -106,9 +105,10 @@ def _get_balance() -> float | None:
 # ---------------------------------------------------------------------------
 
 def _bot_status_info() -> dict:
-    """Derive bot state from sentinel files."""
+    """Derive bot state from DB (persists across container restarts)."""
+    _ensure_db()
     stop  = _STOP_FILE.exists()
-    start = _START_FILE.exists()
+    start = _run(_db.get_bot_enabled())
     if stop:
         status = "stopped"
     elif start:
@@ -325,8 +325,9 @@ def api_daily_pnl():
 
 @app.post("/api/bot/start")
 def api_bot_start():
+    _ensure_db()
     _STOP_FILE.unlink(missing_ok=True)
-    _START_FILE.touch()
+    _run(_db.set_bot_enabled(True))
     # Send Telegram notification — fires only when the dashboard START button is clicked
     try:
         token = settings.TELEGRAM_BOT_TOKEN
@@ -345,7 +346,9 @@ def api_bot_start():
 
 @app.post("/api/bot/stop")
 def api_bot_stop():
+    _ensure_db()
     _STOP_FILE.touch()
+    _run(_db.set_bot_enabled(False))
     return jsonify({"ok": True, "status": "stopped"})
 
 

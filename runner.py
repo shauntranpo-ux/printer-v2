@@ -46,7 +46,6 @@ _CYCLE_SECONDS  = 15 * 60     # 15-minute interval
 _CYCLE_BUFFER   = 180          # seconds after boundary before first tick (3-min buffer for order books to populate)
 _MAX_MARKETS    = 10           # top N markets evaluated per cycle
 _STOP_FILE      = Path("STOP")
-_START_FILE     = Path("START")  # must exist for live trading; absent = analysis-only (off mode)
 
 # Per-asset bet size multipliers (applied on top of time/streak multipliers)
 # BTC at 50% — fewer trades, lower % volatility vs alts; backtest showed 309 trades vs 1,250+ for alts
@@ -170,7 +169,8 @@ class TradingBot:
 
         # Initialise day tracker so we don't send a summary on first cycle
         self._last_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        trading_mode = "LIVE TRADING" if _START_FILE.exists() else "OFF MODE (analysis only — press START on dashboard to enable trading)"
+        bot_enabled  = await self.db.get_bot_enabled()
+        trading_mode = "LIVE TRADING" if bot_enabled else "OFF MODE (analysis only — press START on dashboard to enable trading)"
         log.info("Startup complete — entering main loop  [%s]", trading_mode)
 
     # ------------------------------------------------------------------
@@ -638,10 +638,10 @@ class TradingBot:
                 )
             return
 
-        # --- Execute trade (only when START file present — off mode skips this) ---
-        if not _START_FILE.exists():
+        # --- Execute trade (only when bot is enabled — off mode skips this) ---
+        if not await self.db.get_bot_enabled():
             log.info(
-                "Bot in OFF mode (no START file) — signal valid for %s but not trading",
+                "Bot in OFF mode — signal valid for %s but not trading",
                 ticker,
             )
             return
