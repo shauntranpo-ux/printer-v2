@@ -130,6 +130,8 @@ class TradeRow:
     gemini_prob: float | None = None
     deepseek_prob: float | None = None
     asset_symbol: str | None = None
+    tp_order_id: str | None = None
+    sl_order_id: str | None = None
 
 
 @dataclass
@@ -254,6 +256,8 @@ class Database:
                 ("gemini_prob",   "REAL"),
                 ("deepseek_prob", "REAL"),
                 ("asset_symbol",  "TEXT"),   # multi-asset: BTC/ETH/SOL/XRP/DOGE etc.
+                ("tp_order_id",   "TEXT"),   # Kalshi order ID for resting TP sell
+                ("sl_order_id",   "TEXT"),   # Kalshi order ID for resting SL sell (future)
             ]:
                 try:
                     await db.execute(f"ALTER TABLE trades ADD COLUMN {col} {coltype}")
@@ -414,6 +418,26 @@ class Database:
                 "Trade updated: id=%d  status=%s  exit=%.4f  pnl=$%.2f  reason=%s",
                 trade_id, status, exit_price, pnl_dollars, exit_reason,
             )
+
+    async def update_bracket_orders(
+        self,
+        trade_id: int,
+        *,
+        tp_order_id: str | None = None,
+        sl_order_id: str | None = None,
+    ) -> None:
+        """Store the Kalshi order IDs for resting TP/SL limit orders."""
+        async with self._conn() as db:
+            await db.execute(
+                """
+                UPDATE trades
+                SET tp_order_id = COALESCE(?, tp_order_id),
+                    sl_order_id = COALESCE(?, sl_order_id)
+                WHERE id = ?
+                """,
+                (tp_order_id, sl_order_id, trade_id),
+            )
+            await db.commit()
 
     async def get_open_trades(self) -> list[TradeRow]:
         """All trades with status='open', ordered oldest first."""

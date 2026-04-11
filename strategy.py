@@ -329,6 +329,31 @@ class Strategy:
             trade_id, asset_symbol, direction.upper(), ticker, contracts,
             filled_cents, p_win, edge, ensemble_result.confidence, actual_cost,
         )
+
+        # Step 7 — Place resting TP limit sell order so Kalshi fills it automatically
+        # TP price: entry * (1 + TAKE_PROFIT_PCT), capped at 99¢
+        tp_cents = min(99, int(filled_cents * (1.0 + settings.TAKE_PROFIT_PCT)))
+        if tp_cents > filled_cents:
+            try:
+                tp_result = await self._kalshi.place_order(
+                    ticker     = ticker,
+                    side       = direction,
+                    count      = contracts,
+                    action     = "sell",
+                    price      = tp_cents,
+                    order_type = "limit",
+                )
+                tp_order_id = tp_result.get("order_id", "")
+                if tp_order_id:
+                    await self._db.update_bracket_orders(trade_id, tp_order_id=tp_order_id)
+                    trade.tp_order_id = tp_order_id
+                    log.info(
+                        "Trade %d: TP resting sell placed at %d¢ (order %s)",
+                        trade_id, tp_cents, tp_order_id[:8],
+                    )
+            except Exception as exc:
+                log.warning("Trade %d: failed to place TP resting order: %s", trade_id, exc)
+
         return trade
 
     # ------------------------------------------------------------------
@@ -359,6 +384,21 @@ class Strategy:
 
     async def _evaluate_exit(self, trade: TradeRow) -> TradeRow | None:
         ticker = trade.market_ticker
+
+        # --- Trigger 0: check if resting TP limit order has already been filled ---
+        if trade.tp_order_id:
+            try:
+                tp_order = await self._kalshi.get_order(trade.tp_order_id)
+                tp_status = tp_order.get("status", "unknown")
+                if tp_status in ("filled", "executed"):
+                    tp_price = tp_order.get("yes_price") or int(trade.entry_price)
+                    log.info(
+                        "Trade %d: TP resting order %s filled at %d¢",
+                        trade.id, trade.tp_order_id[:8], tp_price,
+                    )
+                    return await self._close_trade(trade, tp_price, "take_profit", skip_sell=True)
+            except Exception as exc:
+                log.warning("Trade %d: TP order status check failed: %s", trade.id, exc)
 
         # --- Trigger 1: market already resolved ---
         try:
@@ -487,6 +527,8 @@ class Strategy:
         exit_price:  int,       # cents — current best bid, used as P&L fallback
         exit_reason: str,       # "stop_loss" | "decay" | "take_profit" |
                                 # "trailing_stop" | "expired" | "manual"
+        *,
+        skip_sell:   bool = False,  # True when resting order already filled (TP)
     ) -> TradeRow:
         """
         Place a market sell order with up to 4 retries (1 s between attempts).
@@ -496,7 +538,16 @@ class Strategy:
         """
         final_exit_price = exit_price   # updated to fill price if order confirms
 
-        if exit_reason != "expired":
+        # Cancel the resting TP order if we're closing for a different reason
+        # (SL/decay/expiry) to avoid a dangling resting order on Kalshi.
+        if not skip_sell and trade.tp_order_id and exit_reason != "take_profit":
+            try:
+                await self._kalshi.cancel_order(trade.tp_order_id)
+                log.info("Trade %d: cancelled resting TP order %s", trade.id, trade.tp_order_id[:8])
+            except Exception as exc:
+                log.warning("Trade %d: failed to cancel TP order %s: %s", trade.id, trade.tp_order_id[:8], exc)
+
+        if not skip_sell and exit_reason != "expired":
             # Retry up to 4 times only on API exception.
             # YES and NO positions are symmetric: we always sell OUR side at market
             # (yes_bids for YES trades, no_bids for NO trades). P&L = (fill - entry).

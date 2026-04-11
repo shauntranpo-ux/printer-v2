@@ -200,7 +200,38 @@ class TradingBot:
 
     async def run(self) -> None:
         await self.start()
-        await self.run_loop()
+        # Run exit monitor and main loop concurrently
+        await asyncio.gather(
+            self.run_loop(),
+            self._exit_monitor_loop(),
+        )
+
+    # ------------------------------------------------------------------
+    # Background exit monitor — checks SL/TP/decay every 60s independently
+    # of the main entry cycle so positions don't wait up to 14 min for an exit
+    # ------------------------------------------------------------------
+
+    async def _exit_monitor_loop(self) -> None:
+        """
+        Runs forever alongside run_loop().
+        Every 60 seconds: if bot is enabled and there are open trades,
+        calls check_exits. This ensures SL/TP fires promptly even when
+        the main cycle is sleeping between 15-minute windows.
+        """
+        _INTERVAL = 60
+        while True:
+            try:
+                await asyncio.sleep(_INTERVAL)
+                if not await self.db.get_bot_enabled():
+                    continue
+                open_trades = await self.db.get_open_trades()
+                if open_trades:
+                    log.debug("Exit monitor: checking %d open trade(s)", len(open_trades))
+                    await self.strategy.check_exits(open_trades)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("Exit monitor error (non-fatal): %s", exc)
 
     # ------------------------------------------------------------------
     # Main loop
