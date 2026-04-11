@@ -94,6 +94,8 @@ class TradingBot:
         self._cycle_signals: list[dict] = []
         # Markets found this cycle (non-zero = found but may have been empty)
         self._cycle_markets_found: int = 0
+        # Markets that passed timing checks and were actually evaluated
+        self._cycle_markets_evaluated: int = 0
 
     # ------------------------------------------------------------------
     # Startup sequence
@@ -230,11 +232,11 @@ class TradingBot:
                 _EMPTY_RETRY_WAIT = 90
                 _EMPTY_MAX_RETRIES = 3
                 for _attempt in range(_EMPTY_MAX_RETRIES):
-                    if self._cycle_signals or self._cycle_markets_found == 0:
-                        break   # signals generated, or genuinely no markets open
+                    if self._cycle_signals or self._cycle_markets_evaluated == 0:
+                        break   # signals generated, or no markets passed timing checks
                     log.info(
-                        "All %d markets had empty order books — retrying in %ds (%d/%d)",
-                        self._cycle_markets_found, _EMPTY_RETRY_WAIT,
+                        "All %d evaluated markets had empty order books — retrying in %ds (%d/%d)",
+                        self._cycle_markets_evaluated, _EMPTY_RETRY_WAIT,
                         _attempt + 1, _EMPTY_MAX_RETRIES,
                     )
                     await asyncio.sleep(_EMPTY_RETRY_WAIT)
@@ -265,8 +267,9 @@ class TradingBot:
           5. For each: ensemble → gates → momentum check → enter
         """
         cycle_start = datetime.now(timezone.utc)
-        self._cycle_signals = []   # fresh slate for this cycle's dashboard signals
-        self._wait_list.clear()    # clear stale wait entries from previous 15m window
+        self._cycle_signals = []         # fresh slate for this cycle's dashboard signals
+        self._cycle_markets_evaluated = 0  # markets that passed timing checks this cycle
+        self._wait_list.clear()          # clear stale wait entries from previous 15m window
         Path("heartbeat.txt").write_text(cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"))
         print(f"=== CYCLE START === {cycle_start.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         log.info("--- Cycle %s ---", cycle_start.strftime("%Y-%m-%d %H:%M:%S UTC"))
@@ -499,6 +502,9 @@ class TradingBot:
                 ticker, time_left,
             )
             return
+
+        # Market passed all timing checks — count it as evaluated
+        self._cycle_markets_evaluated += 1
 
         btc_data   = BtcData(
             price          = btc_price,
