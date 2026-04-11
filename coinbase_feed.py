@@ -316,6 +316,70 @@ class CoinbaseFeed:
             list(self._binance_assets.keys()),
         )
 
+    async def prefetch_candle_history(self, n: int = 10) -> None:
+        """
+        Pre-populate candle history from Coinbase Exchange public REST API.
+        Fetches the last `n` completed 15m candles for every Coinbase asset.
+        Called once at startup so models have data immediately instead of
+        waiting 60–90 min for candles to accumulate from live ticks.
+        """
+        import aiohttp
+        base = "https://api.exchange.coinbase.com/products"
+
+        for asset, product_id in self._cb_products.items():
+            try:
+                url = f"{base}/{product_id}/candles?granularity=900"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status != 200:
+                            log.warning("Candle prefetch failed for %s: HTTP %d", asset, resp.status)
+                            continue
+                        raw = await resp.json()
+
+                # API returns [[timestamp, low, high, open, close, volume], ...] descending
+                if not isinstance(raw, list) or not raw:
+                    log.warning("Candle prefetch: empty response for %s", asset)
+                    continue
+
+                # Reverse so oldest→newest, take last n completed candles
+                candles_desc = raw[:n]
+                candles_asc  = list(reversed(candles_desc))
+
+                state = self._state[asset]
+                state.candles.clear()
+                for entry in candles_asc:
+                    try:
+                        ts    = datetime.fromtimestamp(entry[0], tz=timezone.utc)
+                        candle = Candle(
+                            open      = float(entry[3]),
+                            high      = float(entry[2]),
+                            low       = float(entry[1]),
+                            close     = float(entry[4]),
+                            volume    = float(entry[5]),
+                            timestamp = ts,
+                        )
+                        state.candles.append(candle)
+                    except (IndexError, ValueError, TypeError):
+                        continue
+
+                log.info(
+                    "Candle prefetch [%s]: loaded %d candles (latest close=$%.4f)",
+                    asset, len(state.candles),
+                    state.candles[-1].close if state.candles else 0,
+                )
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("Candle prefetch failed for %s: %s", asset, exc)
+
+    def get_current_candle_for(self, asset: str) -> dict | None:
+        """Return the in-progress (incomplete) candle for an asset, or None."""
+        state = self._state.get(asset)
+        if state and state.current_candle:
+            return dict(state.current_candle)
+        return None
+
     async def stop(self) -> None:
         self._running = False
         for task in (self._ws_task, self._rest_task):

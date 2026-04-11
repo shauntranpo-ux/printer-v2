@@ -34,46 +34,25 @@ _CALL_TIMEOUT = 30.0   # seconds before a model is marked as failed
 # System prompts  (asset symbol is injected at call time)
 # ---------------------------------------------------------------------------
 
-def _claude_system(symbol: str) -> str:
+def _system_prompt(symbol: str) -> str:
     return (
-        f"You are a neutral {symbol} price analyst. "
-        f"Use momentum, candle patterns, and order flow to objectively predict "
-        f"15-minute price direction. Do NOT have a directional bias — follow the data. "
-        "Respond in JSON only."
-    )
-
-def _gpt_system(symbol: str) -> str:
-    return (
-        f"You are an objective {symbol} price analyst. "
-        f"Assess whether price is more likely to move UP or DOWN over the next 15 minutes "
-        f"based solely on the provided data. No directional bias — be data-driven. "
-        "JSON only."
-    )
-
-def _gemini_system(symbol: str) -> str:
-    return (
-        f"You are an independent {symbol} price analyst. "
-        f"Evaluate momentum, candle structure, and order book data to predict "
-        f"the 15-minute price direction. No predetermined bias — follow the evidence. "
-        "JSON only."
-    )
-
-def _deepseek_system(symbol: str) -> str:
-    return (
-        f"You are a quantitative {symbol} analyst. "
-        f"Analyze the provided market data objectively and estimate the probability "
-        f"that price ends above the strike in 15 minutes. Be data-driven, no bias. "
-        "JSON only."
+        f"You are an expert {symbol} short-term trader specializing in 15-minute binary outcomes. "
+        f"You analyze price action, momentum, RSI, candle patterns, and order flow to make "
+        f"high-conviction directional calls. "
+        f"You are NOT a hedge — you commit to a view. When data supports a direction, "
+        f"your probability should reflect that conviction (0.65–0.85 for strong signals, "
+        f"0.55–0.65 for moderate signals). "
+        f"Only return 0.45–0.55 when data is genuinely contradictory with no clear edge. "
+        f"Respond in JSON only."
     )
 
 _JSON_SCHEMA_HINT = (
-    '\n\nRespond with exactly this JSON structure and nothing else:\n'
-    '{"direction": "YES" or "NO", "probability": 0.0-1.0, '
-    '"confidence": 0.0-1.0, "reasoning": "one sentence"}\n'
-    'IMPORTANT: "probability" is ALWAYS P(YES) — the probability that price ends ABOVE the strike. '
-    'If you predict DOWN, set direction "NO" and probability BELOW 0.50 '
-    '(e.g. 0.35 means 35% chance YES / 65% chance NO). '
-    'If you predict UP, set direction "YES" and probability ABOVE 0.50.'
+    '\n\nRespond with ONLY this JSON — no other text:\n'
+    '{"direction": "YES" or "NO", "probability": 0.0-1.0, "confidence": 0.0-1.0, "reasoning": "one sentence"}\n'
+    'probability = P(YES) = probability price closes ABOVE strike.\n'
+    'direction "YES" → probability > 0.50 | direction "NO" → probability < 0.50\n'
+    'COMMIT to a view. If trend/momentum is clear, show it: 0.68, 0.72, 0.30, 0.25 etc.\n'
+    'DO NOT default to 0.50 unless signals are genuinely mixed.'
 )
 
 
@@ -83,11 +62,12 @@ _JSON_SCHEMA_HINT = (
 
 @dataclass
 class BtcData:
-    price:     float          # current asset price in USD
-    momentum:  float          # -1.0 to +1.0 from CoinbaseFeed.get_momentum_for()
-    candles:   list[Candle]   # last 4 completed 15m candles
-    imbalance: float          # bid_vol / ask_vol from order book
-    symbol:    str = "BTC"    # asset symbol — used in AI prompts
+    price:          float           # current asset price in USD
+    momentum:       float           # -1.0 to +1.0 from CoinbaseFeed.get_momentum_for()
+    candles:        list[Candle]    # last 10 completed 15m candles
+    imbalance:      float           # bid_vol / ask_vol from order book
+    symbol:         str = "BTC"     # asset symbol — used in AI prompts
+    current_candle: dict | None = None  # in-progress candle (live, incomplete)
 
 
 @dataclass
@@ -197,31 +177,119 @@ class EnsembleEngine:
 
     @staticmethod
     def _build_context(btc_data: BtcData, market: Market) -> str:
-        if btc_data.candles:
-            candles_str = "\n".join(
-                f"  [{c.timestamp.strftime('%H:%M')}] "
-                f"O={c.open:.2f} H={c.high:.2f} L={c.low:.2f} "
-                f"C={c.close:.2f} V={c.volume:.4f}"
-                for c in btc_data.candles[-4:]
+        sym      = btc_data.symbol
+        price    = btc_data.price
+        strike   = market.strike_price
+        now_utc  = datetime.now(timezone.utc)
+        mins_left = max(0, int((market.close_time - now_utc).total_seconds() / 60))
+        candles  = btc_data.candles  # up to 10 completed 15m candles
+
+        # ── Strike distance ───────────────────────────────────────────────
+        dist_pct = ((strike - price) / price * 100) if price > 0 else 0.0
+        if abs(dist_pct) < 0.01:
+            strike_note = f"price is AT the strike (coin-flip territory unless momentum is strong)"
+        elif dist_pct > 0:
+            strike_note = f"price must rise {dist_pct:.3f}% to hit YES"
+        else:
+            strike_note = f"price must fall {abs(dist_pct):.3f}% to hit NO (currently {abs(dist_pct):.3f}% above strike)"
+
+        # ── Multi-timeframe price change ──────────────────────────────────
+        def pct_chg(old: float, new: float) -> str:
+            if old <= 0:
+                return "n/a"
+            return f"{(new - old) / old * 100:+.3f}%"
+
+        chg_15m = pct_chg(candles[-2].close, candles[-1].close) if len(candles) >= 2 else "n/a"
+        chg_60m = pct_chg(candles[-5].close, candles[-1].close) if len(candles) >= 5 else "n/a"
+        chg_2h  = pct_chg(candles[-9].close, candles[-1].close) if len(candles) >= 9 else "n/a"
+
+        # ── RSI (14-period approx on available candles) ───────────────────
+        rsi_str = "n/a"
+        if len(candles) >= 3:
+            moves = [(c.close - c.open) for c in candles]
+            gains  = [m for m in moves if m > 0]
+            losses = [-m for m in moves if m < 0]
+            avg_g = sum(gains)  / len(gains)  if gains  else 0.0
+            avg_l = sum(losses) / len(losses) if losses else 1e-9
+            rsi   = 100 - (100 / (1 + avg_g / avg_l))
+            rsi_label = "OVERBOUGHT" if rsi > 70 else "OVERSOLD" if rsi < 30 else "neutral"
+            rsi_str = f"{rsi:.0f} ({rsi_label})"
+
+        # ── Trend & candle bias ───────────────────────────────────────────
+        if len(candles) >= 4:
+            first_c = candles[-4].close
+            last_c  = candles[-1].close
+            trend_pct = (last_c - first_c) / first_c * 100 if first_c > 0 else 0
+            trend = "UPTREND" if trend_pct > 0.15 else "DOWNTREND" if trend_pct < -0.15 else "SIDEWAYS"
+            bull_count = sum(1 for c in candles[-4:] if c.close >= c.open)
+            candle_bias = f"{bull_count}/4 bullish candles"
+        else:
+            trend = "UNKNOWN"
+            candle_bias = "insufficient data"
+
+        # ── Order book signal ─────────────────────────────────────────────
+        imb = btc_data.imbalance
+        ob_signal = (
+            f"{imb:.2f}x — strong BUY pressure" if imb > 1.5 else
+            f"{imb:.2f}x — mild BUY pressure"   if imb > 1.1 else
+            f"{imb:.2f}x — strong SELL pressure" if imb < 0.67 else
+            f"{imb:.2f}x — mild SELL pressure"   if imb < 0.9 else
+            f"{imb:.2f}x — balanced"
+        )
+
+        # ── Completed candles table ───────────────────────────────────────
+        if candles:
+            candle_rows = []
+            for c in candles[-6:]:   # last 6 for readability
+                body_pct = (c.close - c.open) / c.open * 100 if c.open > 0 else 0
+                arrow    = "▲" if c.close >= c.open else "▼"
+                candle_rows.append(
+                    f"  {c.timestamp.strftime('%H:%M')} {arrow} "
+                    f"O={c.open:.2f} H={c.high:.2f} L={c.low:.2f} C={c.close:.2f} "
+                    f"({body_pct:+.2f}%) vol={c.volume:.2f}"
+                )
+            candles_str = "\n".join(candle_rows)
+        else:
+            candles_str = "  (no history — candles loading)"
+
+        # ── Current (live) candle ─────────────────────────────────────────
+        cc = btc_data.current_candle
+        if cc and cc.get("open", 0) > 0:
+            live_pct = (price - cc["open"]) / cc["open"] * 100
+            live_str = (
+                f"  LIVE O={cc['open']:.2f} H={cc['high']:.2f} "
+                f"L={cc['low']:.2f} C={price:.2f} ({live_pct:+.2f}%) ← current candle"
             )
         else:
-            candles_str = "  (no completed candles yet)"
+            live_str = "  (live candle data pending)"
 
-        now_utc = datetime.now(timezone.utc)
-        minutes_left = max(0, int((market.close_time - now_utc).total_seconds() / 60))
+        return f"""=== {sym}/USD — 15-MINUTE BINARY MARKET ===
+Price now:    ${price:,.4f}
+Strike (YES threshold): ${strike:,.4f}
+Strike note:  {strike_note}
+Time left:    {mins_left} min until expiry
+Market price: YES={market.yes_price}¢  NO={market.no_price}¢
 
-        sym = btc_data.symbol
-        return (
-            f"Current {sym} price: ${btc_data.price:,.4f}\n"
-            f"15m momentum score: {btc_data.momentum:.3f} (-1 to +1)\n"
-            f"Last 4 candles OHLCV:\n{candles_str}\n"
-            f"Order book imbalance: {btc_data.imbalance:.3f} (bid volume / ask volume)\n"
-            f"Market: Will {sym} be above ${market.strike_price:,.4f} "
-            f"at {market.close_time.strftime('%H:%M UTC')}?\n"
-            f"Current market price: YES at {market.yes_price}¢ / NO at {market.no_price}¢\n"
-            f"Time to expiry: {minutes_left} minutes"
-            + _JSON_SCHEMA_HINT
-        )
+=== PRICE ACTION ===
+15-min change: {chg_15m}
+60-min change: {chg_60m}
+2-hour change: {chg_2h}
+Trend (last 4 candles): {trend}
+Candle bias:   {candle_bias}
+RSI (approx):  {rsi_str}
+Order book:    {ob_signal}
+Momentum score: {btc_data.momentum:+.3f} (range -1 to +1)
+
+=== CANDLE HISTORY (15m, oldest → newest) ===
+{candles_str}
+{live_str}
+
+=== TASK ===
+Will {sym} close ABOVE ${strike:,.4f} at {market.close_time.strftime('%H:%M UTC')}?
+You have {mins_left} minutes of price movement left.
+
+Analyze trend, RSI, candle bias, momentum, and order book. Make a DECISIVE call.
+{_JSON_SCHEMA_HINT}"""
 
     # ------------------------------------------------------------------
     # JSON parser (shared by all models)
@@ -286,9 +354,9 @@ class EnsembleEngine:
         t0 = time.monotonic()
         msg = await self._anthropic_client.messages.create(  # type: ignore[union-attr]
             model      = settings.CLAUDE_MODEL,
-            max_tokens = 256,
-            temperature= 0.1,
-            system     = _claude_system(symbol),
+            max_tokens = 300,
+            temperature= 0.3,
+            system     = _system_prompt(symbol),
             messages   = [{"role": "user", "content": context}],
         )
         text = msg.content[0].text
@@ -298,11 +366,11 @@ class EnsembleEngine:
         t0 = time.monotonic()
         resp = await self._openai_client.chat.completions.create(  # type: ignore[union-attr]
             model           = settings.GPT_MODEL,
-            temperature     = 0.1,
-            max_tokens      = 256,
+            temperature     = 0.3,
+            max_tokens      = 300,
             response_format = {"type": "json_object"},
             messages        = [
-                {"role": "system", "content": _gpt_system(symbol)},
+                {"role": "system", "content": _system_prompt(symbol)},
                 {"role": "user",   "content": context},
             ],
         )
@@ -343,8 +411,8 @@ class EnsembleEngine:
                     model=model,
                     contents=context,
                     config=types.GenerateContentConfig(
-                        system_instruction=_gemini_system(symbol),
-                        temperature=0.1,
+                        system_instruction=_system_prompt(symbol),
+                        temperature=0.3,
                     ),
                 )
                 if model != settings.GEMINI_MODEL and model not in EnsembleEngine._GEMINI_DEAD:
@@ -372,10 +440,10 @@ class EnsembleEngine:
         t0 = time.monotonic()
         resp = await self._deepseek_client.chat.completions.create(  # type: ignore[union-attr]
             model      = settings.DEEPSEEK_MODEL,
-            temperature= 0.1,
+            temperature= 0.3,
             max_tokens = 512,
             messages   = [
-                {"role": "system", "content": _deepseek_system(symbol)},
+                {"role": "system", "content": _system_prompt(symbol)},
                 {"role": "user",   "content": context},
             ],
         )

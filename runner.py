@@ -120,6 +120,11 @@ class TradingBot:
         btc_price = await self.feed.wait_for_price(timeout=30.0)
         log.info("BTC price: $%.2f", btc_price)
 
+        # Pre-populate candle history so AI models have data immediately
+        log.info("Pre-fetching candle history...")
+        await self.feed.prefetch_candle_history(n=10)
+        log.info("Candle history loaded")
+
         # 4. Kalshi
         balance: float | None = None
         try:
@@ -287,7 +292,8 @@ class TradingBot:
 
             asset_price    = self.feed.get_price_for(asset)
             asset_momentum = self.feed.get_momentum_for(asset)
-            asset_ohlcv    = self.feed.get_ohlcv_for(asset, 4)
+            asset_ohlcv    = self.feed.get_ohlcv_for(asset, 10)
+            asset_cur_candle = self.feed.get_current_candle_for(asset)
 
             if asset_price <= 0:
                 log.debug("%s price is 0 — skipping", asset)
@@ -338,7 +344,8 @@ class TradingBot:
                 log.info("Re-evaluating waited market %s", ticker)
                 await self._evaluate_market(
                     market_by_ticker[ticker], asset_price, asset_momentum,
-                    asset_ohlcv, open_tickers, asset_size_mult, asset=asset,
+                    asset_ohlcv, open_tickers, asset_size_mult,
+                    asset=asset, current_candle=asset_cur_candle,
                 )
 
             # Evaluate remaining new markets for this asset
@@ -348,7 +355,8 @@ class TradingBot:
                     continue
                 await self._evaluate_market(
                     market, asset_price, asset_momentum, asset_ohlcv,
-                    open_tickers, asset_size_mult, asset=asset,
+                    open_tickers, asset_size_mult,
+                    asset=asset, current_candle=asset_cur_candle,
                 )
 
         print(f"Total markets scanned: {len(all_markets_found)} across {len(supported_assets)} assets")
@@ -384,13 +392,14 @@ class TradingBot:
 
     async def _evaluate_market(
         self,
-        market:       dict,
-        btc_price:    float,
-        momentum:     float,
-        ohlcv:        list,
-        open_tickers: set[str],
-        size_mult:    float = 1.0,
-        asset:        str   = "BTC",
+        market:          dict,
+        btc_price:       float,
+        momentum:        float,
+        ohlcv:           list,
+        open_tickers:    set[str],
+        size_mult:       float = 1.0,
+        asset:           str   = "BTC",
+        current_candle:  dict | None = None,
     ) -> None:
         ticker = market["ticker"]
 
@@ -464,11 +473,12 @@ class TradingBot:
             return
 
         btc_data   = BtcData(
-            price     = btc_price,
-            momentum  = momentum,
-            candles   = ohlcv,
-            imbalance = imbalance,
-            symbol    = asset,
+            price          = btc_price,
+            momentum       = momentum,
+            candles        = ohlcv,
+            imbalance      = imbalance,
+            symbol         = asset,
+            current_candle = current_candle,
         )
         market_obj = Market(
             ticker       = ticker,
