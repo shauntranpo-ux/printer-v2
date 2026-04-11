@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = Field(default="", description="Google Gemini API key")
     DEEPSEEK_API_KEY: str = Field(default="", description="DeepSeek API key")
 
-    CLAUDE_MODEL: str = Field(default="claude-sonnet-4-5", description="Claude model ID")
+    CLAUDE_MODEL: str = Field(default="claude-sonnet-4-6", description="Claude model ID")
     GPT_MODEL: str = Field(default="gpt-4o", description="OpenAI model ID")
     GEMINI_MODEL: str = Field(default="gemini-2.5-flash", description="Gemini model ID")
     DEEPSEEK_MODEL: str = Field(default="deepseek-chat", description="DeepSeek model ID (deepseek-chat for JSON, deepseek-reasoner for CoT)")

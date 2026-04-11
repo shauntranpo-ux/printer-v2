@@ -29,7 +29,22 @@ log = logging.getLogger(__name__)
 
 _CALL_TIMEOUT        = 30.0   # seconds before a model is marked as failed
 _STREAK_BEFORE_PAUSE = 3      # consecutive failures before pausing a model
-_PAUSE_CYCLES        = 5      # debate() calls to skip before auto-retrying
+_PAUSE_CYCLES        = 5      # debate() calls to skip before auto-retrying (transient errors)
+_PAUSE_CYCLES_HARD   = 70     # pause cycles for permanent errors (billing/auth/bad key)
+                               # ~70 debate calls ÷ 7 assets = ~10 main cycles ≈ ~10 min
+
+# Error substrings that signal a permanent/billing failure — long pause, no fast-retry
+_PERMANENT_ERROR_HINTS = (
+    "credit balance",           # Anthropic billing
+    "insufficient_quota",       # OpenAI billing
+    "quota",                    # generic quota
+    "billing",                  # generic billing
+    "invalid api key",          # bad key
+    "invalid_api_key",
+    "authentication",           # auth failure
+    "permission_denied",
+    "access denied",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -594,7 +609,7 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
         is_likely_noise = bool(data.get("is_likely_noise", False))
 
         # "NO TRADE": model found no edge — force to 0.50 and zero confidence
-        # so the ensemble MIN_CONFIDENCE gate blocks the trade automatically.
+        # so the EV gate in risk_gates blocks the trade (consensus ≈ ask → EV ≈ 0).
         if decision == "NO TRADE":
             probability = 0.50
             confidence  = 0.0
@@ -689,6 +704,7 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
                     config=types.GenerateContentConfig(
                         system_instruction=_gemini_prompt(symbol),
                         temperature=0.5,
+                        response_mime_type="application/json",
                     ),
                 )
                 if model != settings.GEMINI_MODEL and model not in EnsembleEngine._GEMINI_DEAD:
@@ -715,10 +731,11 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
     async def _call_deepseek(self, context: str, symbol: str = "BTC") -> ModelResult:
         t0 = time.monotonic()
         resp = await self._deepseek_client.chat.completions.create(  # type: ignore[union-attr]
-            model      = settings.DEEPSEEK_MODEL,
-            temperature= 0.5,
-            max_tokens = 512,
-            messages   = [
+            model           = settings.DEEPSEEK_MODEL,
+            temperature     = 0.5,
+            max_tokens      = 512,
+            response_format = {"type": "json_object"},
+            messages        = [
                 {"role": "system", "content": _adversarial_prompt(symbol)},
                 {"role": "user",   "content": context},
             ],
@@ -760,6 +777,7 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
             )
             return None
 
+        permanent = False
         try:
             result = await asyncio.wait_for(fn(), timeout=_CALL_TIMEOUT)
             # Success — reset failure tracking
@@ -777,6 +795,8 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
                 model_name, _CALL_TIMEOUT,
             )
         except Exception as exc:
+            exc_str = str(exc).lower()
+            permanent = any(hint in exc_str for hint in _PERMANENT_ERROR_HINTS)
             log.warning(
                 "%s failed (%s: %s) — excluded from consensus",
                 model_name, type(exc).__name__, exc,
@@ -786,12 +806,15 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
         streak = EnsembleEngine._MODEL_FAIL_STREAK.get(model_name, 0) + 1
         EnsembleEngine._MODEL_FAIL_STREAK[model_name] = streak
         if streak >= _STREAK_BEFORE_PAUSE:
-            resume_at = EnsembleEngine._DEBATE_CYCLE + _PAUSE_CYCLES
+            pause_len = _PAUSE_CYCLES_HARD if permanent else _PAUSE_CYCLES
+            resume_at = EnsembleEngine._DEBATE_CYCLE + pause_len
             EnsembleEngine._MODEL_PAUSED_UNTIL[model_name] = resume_at
             log.warning(
-                "%s: %d consecutive failures — pausing for %d cycles "
+                "%s: %d consecutive failures — pausing for %d cycles%s "
                 "(will auto-retry at debate cycle %d)",
-                model_name, streak, _PAUSE_CYCLES, resume_at,
+                model_name, streak, pause_len,
+                " [PERMANENT ERROR — long pause]" if permanent else "",
+                resume_at,
             )
         return None
 
@@ -910,12 +933,6 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
             skip_reason = (
                 f"model spread {spread:.3f} > {settings.MAX_MODEL_SPREAD:.2f} "
                 f"with only {int(majority * len(valid))}/{len(valid)} models agreeing on direction"
-            )
-        elif confidence < settings.MIN_CONFIDENCE:
-            action = "SKIP"
-            skip_reason = (
-                f"confidence {confidence:.3f} below MIN_CONFIDENCE "
-                f"{settings.MIN_CONFIDENCE:.2f}"
             )
         else:
             action = "TRADE"
