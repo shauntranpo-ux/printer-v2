@@ -167,6 +167,40 @@ def _claude_prompt(symbol: str) -> str:
     )
 
 
+def _gpt_prompt(symbol: str) -> str:
+    """Consistency validator assigned to GPT."""
+    return (
+        f"You are a consistency validator for {symbol} 15-minute binary markets.\n\n"
+
+        f"Your role is NOT prediction. Your role is to check whether the signals AGREE.\n\n"
+
+        f"CHECK FOR THESE CONFLICTS:\n"
+        f"  • Momentum vs RSI mismatch"
+        f" (e.g. strong positive momentum but RSI severely overbought → fade risk)\n"
+        f"  • Price near strike but no directional push (stalling = likely NO TRADE)\n"
+        f"  • Trend direction vs recent candles mismatch"
+        f" (e.g. uptrend label but last 3 candles are red → trend may be ending)\n"
+        f"  • Momentum score near zero despite a trend label\n"
+        f"  • Candle bodies mostly wicks (indecision, not conviction)\n\n"
+
+        f"CONFIDENCE RULES:\n"
+        f"  If 2+ conflicts exist → reduce confidence to 20 or below → lean NO TRADE\n"
+        f"  If 1 conflict exists  → reduce confidence by 30\n"
+        f"  If everything aligns cleanly (momentum, RSI, candles, trend all agree)"
+        f" → allow confidence up to 80\n\n"
+
+        f"PROBABILITY:\n"
+        f"  Still estimate probability_above (0-100) using the standard framework.\n"
+        f"  But let contradictions pull probability_above toward 50.\n"
+        f"  Contradictions = uncertainty = closer to 50/50.\n\n"
+
+        f"Your output gates the ensemble. If you flag heavy contradictions, the trade"
+        f" will likely be blocked by low confidence — that is your purpose.\n\n"
+
+        f"Respond in JSON only."
+    )
+
+
 def _gemini_prompt(symbol: str) -> str:
     """High-speed setup filter assigned to Gemini."""
     return (
@@ -602,7 +636,7 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
             max_tokens      = 300,
             response_format = {"type": "json_object"},
             messages        = [
-                {"role": "system", "content": _system_prompt(symbol)},
+                {"role": "system", "content": _gpt_prompt(symbol)},
                 {"role": "user",   "content": context},
             ],
         )
