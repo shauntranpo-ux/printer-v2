@@ -39,6 +39,12 @@ import sqlite3
 from collections import defaultdict
 from pathlib import Path
 
+try:
+    import requests as _req
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
+
 
 # ---------------------------------------------------------------------------
 # Spread model
@@ -90,21 +96,8 @@ PRICE_BUCKETS = [
 ]
 
 
-def run(db_path: Path) -> dict:
-    con = sqlite3.connect(db_path)
-    con.row_factory = sqlite3.Row
-    trades = con.execute(
-        """
-        SELECT id, direction, entry_price, exit_price, size_dollars,
-               contracts, pnl_dollars, exit_reason, edge, timestamp
-        FROM   trades
-        WHERE  status IN ('closed', 'expired')
-          AND  pnl_dollars  IS NOT NULL
-          AND  entry_price  IS NOT NULL
-        ORDER  BY timestamp ASC
-        """
-    ).fetchall()
-    con.close()
+def run(trades_raw: list, source: str = "local") -> dict:
+    trades = [t for t in trades_raw if t.get("entry_price") is not None]
 
     if not trades:
         return {"error": "No closed trades with entry_price in database."}
@@ -254,7 +247,7 @@ def run(db_path: Path) -> dict:
     # ── Assembly ──────────────────────────────────────────────────────────────
     return {
         "meta": {
-            "db_path":        str(db_path.resolve()),
+            "source":         source,
             "total_trades":   n,
             "total_contracts": total_contracts,
             "spread_model":   "parametric price-dependent half-spread (no order-book data)",
@@ -292,23 +285,46 @@ def run(db_path: Path) -> dict:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _load_trades(args) -> tuple[list, str]:
+    if args.url:
+        if not _HAS_REQUESTS:
+            raise RuntimeError("pip install requests to use --url")
+        url = args.url.rstrip("/")
+        print(f"Fetching trades from {url}/api/backtest/trades ...")
+        resp = _req.get(f"{url}/api/backtest/trades", timeout=60)
+        resp.raise_for_status()
+        return resp.json(), url
+    db_path = Path(args.db)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        "SELECT * FROM trades WHERE status IN ('closed','expired') AND pnl_dollars IS NOT NULL ORDER BY timestamp ASC"
+    ).fetchall()
+    con.close()
+    return [dict(r) for r in rows], str(db_path.resolve())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Slippage-adjusted P&L backtest from printer_v2.db"
     )
     parser.add_argument("--db",  default="printer_v2.db", help="Path to SQLite database")
+    parser.add_argument("--url", default=None, help="Live Railway URL (e.g. https://printerv2.up.railway.app)")
     parser.add_argument("--out", default="backtest_liquidity.json", help="Output JSON path")
     args = parser.parse_args()
 
-    db_path  = Path(args.db)
     out_path = Path(args.out)
 
-    if not db_path.exists():
-        print(f"[error] Database not found: {db_path}")
+    try:
+        trades, source = _load_trades(args)
+    except Exception as exc:
+        print(f"[error] {exc}")
         return
 
-    print(f"Reading {db_path} ...")
-    results = run(db_path)
+    print(f"Loaded {len(trades)} trades from {source}")
+    results = run(trades, source=source)
 
     if "error" in results:
         print(f"[error] {results['error']}")

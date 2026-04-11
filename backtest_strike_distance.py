@@ -47,6 +47,12 @@ import sqlite3
 from collections import defaultdict
 from pathlib import Path
 
+try:
+    import requests as _req
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
+
 
 # ---------------------------------------------------------------------------
 # Bucket config
@@ -169,35 +175,13 @@ def _agg(records: list[dict]) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 
-def run(db_path: Path) -> dict:
-    con = sqlite3.connect(db_path)
-    con.row_factory = sqlite3.Row
-
-    # Verify schema and warn about any unexpected columns
-    col_names = {
-        row[1]
-        for row in con.execute("PRAGMA table_info(trades)").fetchall()
-    }
-    has_btc_price = "btc_price_at_entry" in col_names
-
-    raw = con.execute(
-        """
-        SELECT id, market_ticker, timestamp, direction, entry_price,
-               pnl_dollars, exit_reason, edge, ensemble_confidence
-               {btc_col}
-        FROM   trades
-        WHERE  status IN ('closed', 'expired')
-          AND  pnl_dollars IS NOT NULL
-        ORDER  BY timestamp ASC
-        """.format(
-            btc_col=", btc_price_at_entry" if has_btc_price else ""
-        )
-    ).fetchall()
-    con.close()
+def run(trades_raw: list, source: str = "local") -> dict:
+    raw = list(trades_raw)
 
     if not raw:
         return {"error": "No closed trades found in database."}
 
+    has_btc_price = any(t.get("btc_price_at_entry") is not None for t in raw)
     schema_note = (
         "btc_price_at_entry present" if has_btc_price
         else "btc_price_at_entry column missing — strike distance unavailable"
@@ -349,7 +333,7 @@ def run(db_path: Path) -> dict:
     # ── Assembly ──────────────────────────────────────────────────────────────
     return {
         "meta": {
-            "db_path":              str(db_path.resolve()),
+            "source":               source,
             "total_trades":         total,
             "btc_trades":           len(btc_records),
             "schema_note":          schema_note,
@@ -439,23 +423,46 @@ def _print_summary(results: dict) -> None:
     print(f"{SEP}\n")
 
 
+def _load_trades(args) -> tuple[list, str]:
+    if args.url:
+        if not _HAS_REQUESTS:
+            raise RuntimeError("pip install requests to use --url")
+        url = args.url.rstrip("/")
+        print(f"Fetching trades from {url}/api/backtest/trades ...")
+        resp = _req.get(f"{url}/api/backtest/trades", timeout=60)
+        resp.raise_for_status()
+        return resp.json(), url
+    db_path = Path(args.db)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        "SELECT * FROM trades WHERE status IN ('closed','expired') AND pnl_dollars IS NOT NULL ORDER BY timestamp ASC"
+    ).fetchall()
+    con.close()
+    return [dict(r) for r in rows], str(db_path.resolve())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Strike-distance win rate analysis from printer_v2.db"
     )
     parser.add_argument("--db",  default="printer_v2.db")
+    parser.add_argument("--url", default=None, help="Live Railway URL (e.g. https://printerv2.up.railway.app)")
     parser.add_argument("--out", default="backtest_strike_distance.json")
     args = parser.parse_args()
 
-    db_path  = Path(args.db)
     out_path = Path(args.out)
 
-    if not db_path.exists():
-        print(f"[error] Database not found: {db_path}")
+    try:
+        trades, source = _load_trades(args)
+    except Exception as exc:
+        print(f"[error] {exc}")
         return
 
-    print(f"Reading {db_path} ...")
-    results = run(db_path)
+    print(f"Loaded {len(trades)} trades from {source}")
+    results = run(trades, source=source)
 
     if "error" in results:
         print(f"[error] {results['error']}")

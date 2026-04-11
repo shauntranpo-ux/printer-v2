@@ -289,21 +289,8 @@ def _by_regime(records: list[dict], regime_key: str = "regime") -> dict:
 # Main
 # ---------------------------------------------------------------------------
 
-def run(db_path: Path, csv_dir: Path) -> dict:
-    con = sqlite3.connect(db_path)
-    con.row_factory = sqlite3.Row
-    raw = con.execute(
-        """
-        SELECT id, market_ticker, timestamp, direction,
-               entry_price, pnl_dollars, exit_reason,
-               btc_price_at_entry, btc_momentum
-        FROM   trades
-        WHERE  status IN ('closed', 'expired')
-          AND  pnl_dollars IS NOT NULL
-        ORDER  BY timestamp ASC
-        """
-    ).fetchall()
-    con.close()
+def run(trades_raw: list, csv_dir: Path, source: str = "local") -> dict:
+    raw = list(trades_raw)
 
     if not raw:
         return {"error": "No closed trades in database."}
@@ -420,7 +407,7 @@ def run(db_path: Path, csv_dir: Path) -> dict:
     total = len(records)
     return {
         "meta": {
-            "db_path":        str(db_path.resolve()),
+            "source":         source,
             "total_trades":   total,
             "trade_period":   f"{min_dt.date()} to {max_dt.date()}",
             "assets_traded":  assets_seen,
@@ -479,23 +466,47 @@ def _print_summary(results: dict) -> None:
     print(f"{SEP}\n")
 
 
+def _load_trades(args) -> tuple[list, str]:
+    if args.url:
+        if not _HAS_REQUESTS:
+            raise RuntimeError("pip install requests to use --url")
+        url = args.url.rstrip("/")
+        print(f"Fetching trades from {url}/api/backtest/trades ...")
+        resp = _req.get(f"{url}/api/backtest/trades", timeout=60)
+        resp.raise_for_status()
+        return resp.json(), url
+    db_path = Path(args.db)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
+    import sqlite3 as _sqlite3
+    con = _sqlite3.connect(db_path)
+    con.row_factory = _sqlite3.Row
+    rows = con.execute(
+        "SELECT * FROM trades WHERE status IN ('closed','expired') AND pnl_dollars IS NOT NULL ORDER BY timestamp ASC"
+    ).fetchall()
+    con.close()
+    return [dict(r) for r in rows], str(db_path.resolve())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Regime backtest from printer_v2.db")
     parser.add_argument("--db",      default="printer_v2.db")
+    parser.add_argument("--url",     default=None, help="Live Railway URL (e.g. https://printerv2.up.railway.app)")
     parser.add_argument("--out",     default="backtest_regimes.json")
     parser.add_argument("--csv-dir", default=".", help="Directory containing *USDT_1m.csv files")
     args = parser.parse_args()
 
-    db_path  = Path(args.db)
     out_path = Path(args.out)
     csv_dir  = Path(args.csv_dir)
 
-    if not db_path.exists():
-        print(f"[error] Database not found: {db_path}")
+    try:
+        trades, source = _load_trades(args)
+    except Exception as exc:
+        print(f"[error] {exc}")
         return
 
-    print(f"Reading {db_path} ...")
-    results = run(db_path, csv_dir)
+    print(f"Loaded {len(trades)} trades from {source}")
+    results = run(trades, csv_dir, source=source)
 
     if "error" in results:
         print(f"[error] {results['error']}")

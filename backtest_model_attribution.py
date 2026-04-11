@@ -23,6 +23,12 @@ import sqlite3
 from collections import defaultdict
 from pathlib import Path
 
+try:
+    import requests as _req
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -79,35 +85,12 @@ MODEL_PROB_COLS = {
 }
 
 
-def run(db_path: Path) -> dict:
-    con = sqlite3.connect(db_path)
-    con.row_factory = sqlite3.Row
-
+def run(trades_raw: list, ensemble_raw: list, source: str = "local") -> dict:
     # ── 1. Closed / expired trades ────────────────────────────────────────────
-    trades = con.execute(
-        """
-        SELECT id, direction, entry_price, size_dollars, contracts,
-               pnl_dollars, exit_reason, edge, ensemble_confidence,
-               claude_prob, gpt_prob, gemini_prob, deepseek_prob,
-               timestamp, closed_at
-        FROM   trades
-        WHERE  status IN ('closed', 'expired')
-          AND  pnl_dollars IS NOT NULL
-        ORDER  BY timestamp ASC
-        """
-    ).fetchall()
+    trades = trades_raw
 
     # ── 2. All ensemble_log rows (includes SKIP / WAIT, not just TRADE) ───────
-    ensemble_rows = con.execute(
-        """
-        SELECT market_ticker, timestamp, action,
-               claude_prob, gpt_prob, gemini_prob, deepseek_prob,
-               consensus_prob, model_spread, confidence
-        FROM   ensemble_log
-        ORDER  BY timestamp ASC
-        """
-    ).fetchall()
-    con.close()
+    ensemble_rows = ensemble_raw
 
     total_trades = len(trades)
     if total_trades == 0:
@@ -314,7 +297,7 @@ def run(db_path: Path) -> dict:
     # ── 7. Assembly ───────────────────────────────────────────────────────────
     return {
         "meta": {
-            "db_path":        str(db_path.resolve()),
+            "source":         source,
             "total_closed_trades": total_trades,
             "total_ensemble_signals": total_signals,
         },
@@ -339,21 +322,52 @@ def run(db_path: Path) -> dict:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _load_data(args) -> tuple[list, list, str]:
+    if args.url:
+        if not _HAS_REQUESTS:
+            raise RuntimeError("pip install requests to use --url")
+        url = args.url.rstrip("/")
+        print(f"Fetching trades from {url}/api/backtest/trades ...")
+        resp = _req.get(f"{url}/api/backtest/trades", timeout=60)
+        resp.raise_for_status()
+        trades = resp.json()
+        print(f"Fetching ensemble_log from {url}/api/backtest/ensemble_log ...")
+        resp2 = _req.get(f"{url}/api/backtest/ensemble_log", timeout=60)
+        resp2.raise_for_status()
+        ensemble = resp2.json()
+        return trades, ensemble, url
+    db_path = Path(args.db)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {db_path}")
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    trades = [dict(r) for r in con.execute(
+        "SELECT * FROM trades WHERE status IN ('closed','expired') AND pnl_dollars IS NOT NULL ORDER BY timestamp ASC"
+    ).fetchall()]
+    ensemble = [dict(r) for r in con.execute(
+        "SELECT * FROM ensemble_log ORDER BY timestamp ASC"
+    ).fetchall()]
+    con.close()
+    return trades, ensemble, str(db_path.resolve())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Per-model attribution from printer_v2.db")
     parser.add_argument("--db",  default="printer_v2.db", help="Path to SQLite database")
+    parser.add_argument("--url", default=None, help="Live Railway URL (e.g. https://printerv2.up.railway.app)")
     parser.add_argument("--out", default="backtest_model_attribution.json", help="Output file")
     args = parser.parse_args()
 
-    db_path  = Path(args.db)
     out_path = Path(args.out)
 
-    if not db_path.exists():
-        print(f"[error] Database not found: {db_path}")
+    try:
+        trades, ensemble, source = _load_data(args)
+    except Exception as exc:
+        print(f"[error] {exc}")
         return
 
-    print(f"Reading {db_path} ...")
-    results = run(db_path)
+    print(f"Loaded {len(trades)} trades, {len(ensemble)} ensemble rows from {source}")
+    results = run(trades, ensemble, source=source)
 
     if "error" in results:
         print(f"[error] {results['error']}")

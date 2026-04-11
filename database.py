@@ -471,6 +471,29 @@ class Database:
             rows = await cursor.fetchall()
             return [TradeRow(**dict(r)) for r in rows]
 
+    async def get_all_closed_trades(self) -> list[dict]:
+        """All closed/expired trades with full column set — for backtesting."""
+        async with self._conn() as db:
+            cursor = await db.execute(
+                """
+                SELECT * FROM trades
+                WHERE  status IN ('closed', 'expired')
+                  AND  pnl_dollars IS NOT NULL
+                ORDER  BY timestamp ASC
+                """
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+    async def get_all_ensemble_log(self) -> list[dict]:
+        """All ensemble_log rows — for model attribution backtesting."""
+        async with self._conn() as db:
+            cursor = await db.execute(
+                "SELECT * FROM ensemble_log ORDER BY timestamp ASC"
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
     # ------------------------------------------------------------------
     # daily_stats
     # ------------------------------------------------------------------

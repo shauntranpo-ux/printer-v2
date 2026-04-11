@@ -352,6 +352,26 @@ def api_bot_stop():
     return jsonify({"ok": True, "status": "stopped"})
 
 
+@app.get("/api/backtest/trades")
+def api_backtest_trades():
+    """Return ALL closed/expired trades with full column set for backtesting."""
+    _ensure_db()
+    try:
+        return jsonify(_run(_db.get_all_closed_trades()))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/api/backtest/ensemble_log")
+def api_backtest_ensemble_log():
+    """Return ALL ensemble_log rows for model attribution backtesting."""
+    _ensure_db()
+    try:
+        return jsonify(_run(_db.get_all_ensemble_log()))
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.get("/")
 def index():
     _ensure_db()

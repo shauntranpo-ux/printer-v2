@@ -34,6 +34,12 @@ import sqlite3
 from pathlib import Path
 from typing import NamedTuple
 
+try:
+    import requests as _req
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -104,20 +110,7 @@ MODEL_PROB_COLS = {
 }
 
 
-def load_trades(db_path: Path) -> list[Trade]:
-    con = sqlite3.connect(db_path)
-    con.row_factory = sqlite3.Row
-    rows = con.execute(
-        """
-        SELECT pnl_dollars, direction,
-               claude_prob, gpt_prob, gemini_prob, deepseek_prob
-        FROM   trades
-        WHERE  status IN ('closed', 'expired')
-          AND  pnl_dollars IS NOT NULL
-        ORDER  BY timestamp ASC
-        """
-    ).fetchall()
-    con.close()
+def _rows_to_trades(rows: list) -> list[Trade]:
     return [
         Trade(
             pnl           = r["pnl_dollars"],
@@ -129,6 +122,26 @@ def load_trades(db_path: Path) -> list[Trade]:
         )
         for r in rows
     ]
+
+
+def load_trades(db_path: Path) -> list[Trade]:
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    rows = con.execute(
+        "SELECT * FROM trades WHERE status IN ('closed','expired') AND pnl_dollars IS NOT NULL ORDER BY timestamp ASC"
+    ).fetchall()
+    con.close()
+    return _rows_to_trades([dict(r) for r in rows])
+
+
+def load_trades_from_url(url: str) -> list[Trade]:
+    if not _HAS_REQUESTS:
+        raise RuntimeError("pip install requests to use --url")
+    base = url.rstrip("/")
+    print(f"Fetching trades from {base}/api/backtest/trades ...")
+    resp = _req.get(f"{base}/api/backtest/trades", timeout=60)
+    resp.raise_for_status()
+    return _rows_to_trades(resp.json())
 
 
 # ---------------------------------------------------------------------------
@@ -411,20 +424,28 @@ def run(trades: list[Trade], n_perm: int, seed: int = 42) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Permutation significance test for printer-v2")
     parser.add_argument("--db",  default="printer_v2.db",            help="SQLite DB path")
+    parser.add_argument("--url", default=None,                        help="Live Railway URL (e.g. https://printerv2.up.railway.app)")
     parser.add_argument("--n",   type=int, default=10_000,           help="Permutation count")
     parser.add_argument("--out", default="backtest_permutation.json", help="Output JSON path")
     parser.add_argument("--seed", type=int, default=42,              help="RNG seed (reproducibility)")
     args = parser.parse_args()
 
-    db_path  = Path(args.db)
     out_path = Path(args.out)
 
-    if not db_path.exists():
-        print(f"[error] Database not found: {db_path}")
+    try:
+        if args.url:
+            trades = load_trades_from_url(args.url)
+        else:
+            db_path = Path(args.db)
+            if not db_path.exists():
+                print(f"[error] Database not found: {db_path}")
+                return
+            print(f"Loading trades from {db_path} ...")
+            trades = load_trades(db_path)
+    except Exception as exc:
+        print(f"[error] {exc}")
         return
 
-    print(f"Loading trades from {db_path} ...")
-    trades = load_trades(db_path)
     n = len(trades)
 
     if n == 0:
