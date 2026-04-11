@@ -26,8 +26,7 @@ class Settings(BaseSettings):
     MAX_BET_SIZE: float = Field(default=5.0, description="Max dollars per trade")
     DAILY_LOSS_LIMIT: float = Field(default=100.0, description="Halt trading after losing this much today (dollars)")
     KELLY_FRACTION: float = Field(default=0.5, description="Fractional Kelly multiplier (0.5 = half-Kelly)")
-    MIN_EDGE: float = Field(default=0.02, description="Minimum implied edge (2%) required to place a trade")
-    MIN_CONFIDENCE: float = Field(default=0.25, description="Minimum ensemble confidence score to trade")
+    MIN_EV: float = Field(default=0.05, description="Minimum expected value per dollar of payout required to trade (e.g. 0.05 = need 5¢ EV per $1 contract: consensus_prob - ask ≥ 0.05)")
     MAX_MODEL_SPREAD: float = Field(default=0.50, description="Max allowed disagreement between models (abort if exceeded)")
     MAX_OPEN_POSITIONS: int = Field(default=4, description="Maximum concurrent open positions")
     STOP_LOSS_PCT: float = Field(default=0.70, description="Close position when it loses 70% of entry cost (e.g. entry 60¢ → SL triggers at 18¢)")
@@ -61,7 +60,7 @@ class Settings(BaseSettings):
     # Multi-asset trading
     # ------------------------------------------------------------------
     SUPPORTED_ASSETS: str = Field(
-        default="BTC,ETH,SOL,XRP,HYPE,BNB,DOGE",
+        default="BTC,ETH,SOL,XRP,HYPE,DOGE",
         description="Comma-separated crypto assets to trade 15m Kalshi markets for",
     )
 
@@ -126,14 +125,14 @@ class Settings(BaseSettings):
             raise ValueError(f"KELLY_FRACTION must be in (0.0, 1.0], got {v}")
         return v
 
-    @field_validator("MIN_CONFIDENCE", "CONFIDENCE_DECAY_EXIT")
+    @field_validator("CONFIDENCE_DECAY_EXIT")
     @classmethod
     def confidence_in_range(cls, v: float) -> float:
         if not 0.0 < v < 1.0:
             raise ValueError(f"Confidence values must be in (0.0, 1.0), got {v}")
         return v
 
-    @field_validator("STOP_LOSS_PCT", "MIN_EDGE", "MAX_MODEL_SPREAD")
+    @field_validator("STOP_LOSS_PCT", "MIN_EV", "MAX_MODEL_SPREAD")
     @classmethod
     def pct_in_range(cls, v: float) -> float:
         if not 0.0 < v < 1.0:
@@ -249,7 +248,7 @@ def _print_summary(s: Settings) -> None:
     print(
         f"[config] printer-v2  env={s.env}  "
         f"bet=${s.MAX_BET_SIZE}  loss_limit=${s.DAILY_LOSS_LIMIT}  "
-        f"kelly={s.KELLY_FRACTION}  min_conf={s.MIN_CONFIDENCE}  "
+        f"kelly={s.KELLY_FRACTION}  min_ev={s.MIN_EV}  "
         f"max_positions={s.MAX_OPEN_POSITIONS}\n"
         f"[config] weights  claude={s.CLAUDE_WEIGHT:.2f}  gpt={s.GPT_WEIGHT:.2f}  "
         f"gemini={s.GEMINI_WEIGHT:.2f}  deepseek={s.DEEPSEEK_WEIGHT:.2f}\n"

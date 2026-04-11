@@ -764,7 +764,7 @@ function renderWatchSection(w, positions) {
     const MONTHS = {JAN:'Jan',FEB:'Feb',MAR:'Mar',APR:'Apr',MAY:'May',JUN:'Jun',
                     JUL:'Jul',AUG:'Aug',SEP:'Sep',OCT:'Oct',NOV:'Nov',DEC:'Dec'};
     const NAMES  = {BTC:'Bitcoin',ETH:'Ethereum',SOL:'Solana',XRP:'XRP',
-                    DOGE:'Dogecoin',BNB:'BNB',HYPE:'HYPE'};
+                    DOGE:'Dogecoin',HYPE:'HYPE'};
     const parts = (ticker || '').split('-');
     if (parts.length >= 2) {
       const dp = parts[1]; // e.g. 26APR101700

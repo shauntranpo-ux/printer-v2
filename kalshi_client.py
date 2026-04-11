@@ -234,7 +234,6 @@ class KalshiClient:
         "XRP":  ["KXXRP15M", "KXXRP"],
         "DOGE": ["KXDOGE15M", "KXDOGE"],
         "HYPE": ["KXHYPE15M", "KXHYPE"],
-        "BNB":  ["KXBNB15M",  "KXBNB"],
     }
 
     async def get_crypto_15m_markets(self, asset: str = "BTC") -> list[dict]:
@@ -493,13 +492,15 @@ class KalshiClient:
             body["yes_price"] = yes_price
             body["no_price"]  = no_price
         elif order_type == "market":
-            # Kalshi market orders still need a worst-acceptable yes_price.
-            # Buy:  sweep aggressively (pay up to 99¢ YES / 99¢ NO side)
-            # Sell: accept any price (down to 1¢)
+            # Kalshi requires both yes_price and no_price even for market orders.
+            # Buy:  sweep aggressively — pay up to 99¢ on our side
+            # Sell: accept any price — down to 1¢ on our side
             if action_lc == "buy":
-                body["yes_price"] = 99 if side_lc == "yes" else 1
+                yes_p = 99 if side_lc == "yes" else 1
             else:
-                body["yes_price"] = 1 if side_lc == "yes" else 99
+                yes_p = 1 if side_lc == "yes" else 99
+            body["yes_price"] = yes_p
+            body["no_price"]  = 100 - yes_p
 
         try:
             data = await self._post("/portfolio/orders", body)
@@ -520,16 +521,26 @@ class KalshiClient:
 
         qty_filled = order.get("quantity_filled", 0)
         fp = None
+
+        def _fill_price_from(obj: dict) -> int | None:
+            """
+            Extract the execution price for OUR side from an order or fill object.
+            Kalshi fills always include yes_price. For NO trades, our price = 100 - yes_price.
+            """
+            yes_p = obj.get("yes_price")
+            if yes_p is None:
+                return None
+            return yes_p if side_lc == "yes" else (100 - yes_p)
+
         if qty_filled:
             # Actual fill price lives in the fills array (the sweep yes_price we sent
             # is NOT the execution price for market orders).
             fills = order.get("fills", [])
             if fills:
-                fp = (fills[0].get("yes_price") if side_lc == "yes"
-                      else fills[0].get("no_price"))
-            # Fallback: use order price field if fills absent (limit orders)
+                fp = _fill_price_from(fills[0])
+            # Fallback: use order-level yes_price if fills absent (limit orders)
             if fp is None:
-                fp = order.get("yes_price") if side_lc == "yes" else order.get("no_price")
+                fp = _fill_price_from(order)
 
         # Kalshi sometimes returns empty fills in the POST response for market orders
         # even when status=executed. Make one follow-up GET to get the actual fill price.
@@ -541,11 +552,9 @@ class KalshiClient:
                 fill_order = fill_data.get("order", fill_data)
                 fills = fill_order.get("fills", [])
                 if fills:
-                    fp = (fills[0].get("yes_price") if side_lc == "yes"
-                          else fills[0].get("no_price"))
+                    fp = _fill_price_from(fills[0])
                 if fp is None:
-                    # Last resort: the order's yes_price after settlement (not sweep price)
-                    fp = fill_order.get("yes_price") if side_lc == "yes" else fill_order.get("no_price")
+                    fp = _fill_price_from(fill_order)
                 log.info(
                     "Fill price (follow-up GET): order=%s → %s¢",
                     order_id_str[:8], fp,
