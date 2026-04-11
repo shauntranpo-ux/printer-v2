@@ -48,6 +48,12 @@ _MAX_MARKETS    = 10           # top N markets evaluated per cycle
 _STOP_FILE      = Path("STOP")
 _START_FILE     = Path("START")  # must exist for live trading; absent = analysis-only (off mode)
 
+# Per-asset bet size multipliers (applied on top of time/streak multipliers)
+# SOL at 50% — WFA showed lower OOS efficiency (0.77) vs other assets
+_ASSET_SIZE_OVERRIDES: dict[str, float] = {
+    "SOL": 0.50,
+}
+
 
 # ---------------------------------------------------------------------------
 # TradingBot
@@ -347,6 +353,14 @@ class TradingBot:
             )
             all_markets_found.extend(markets)
 
+            # Apply per-asset size override on top of time/streak multiplier
+            asset_size_mult = size_mult * _ASSET_SIZE_OVERRIDES.get(asset, 1.0)
+            if asset in _ASSET_SIZE_OVERRIDES:
+                log.debug(
+                    "%s size multiplier: %.2f (base=%.2f × override=%.2f)",
+                    asset, asset_size_mult, size_mult, _ASSET_SIZE_OVERRIDES[asset],
+                )
+
             # Re-evaluate waited markets for this asset first
             market_by_ticker = {m["ticker"]: m for m in markets}
             waited_tickers   = set(self._wait_list.keys())
@@ -362,7 +376,7 @@ class TradingBot:
                 log.info("Re-evaluating waited market %s", ticker)
                 await self._evaluate_market(
                     market_by_ticker[ticker], asset_price, asset_momentum,
-                    asset_ohlcv, open_tickers, size_mult, asset=asset,
+                    asset_ohlcv, open_tickers, asset_size_mult, asset=asset,
                 )
 
             # Evaluate remaining new markets for this asset
@@ -372,7 +386,7 @@ class TradingBot:
                     continue
                 await self._evaluate_market(
                     market, asset_price, asset_momentum, asset_ohlcv,
-                    open_tickers, size_mult, asset=asset,
+                    open_tickers, asset_size_mult, asset=asset,
                 )
 
         print(f"Total markets scanned: {len(all_markets_found)} across {len(supported_assets)} assets")
