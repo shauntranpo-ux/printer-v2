@@ -167,6 +167,39 @@ def _claude_prompt(symbol: str) -> str:
     )
 
 
+def _gemini_prompt(symbol: str) -> str:
+    """High-speed setup filter assigned to Gemini."""
+    return (
+        f"You are a high-speed trading filter for {symbol} 15-minute binary markets.\n\n"
+
+        f"Your job is to quickly classify setups — do not overanalyze.\n\n"
+
+        f"CLASSIFY THE SETUP AS ONE OF:\n"
+        f"  GOOD SETUP → clear momentum + move toward strike is achievable in remaining time\n"
+        f"  BAD SETUP  → weak, choppy, or unclear price action\n"
+        f"  NOISE      → random-looking movement with no directional conviction\n\n"
+
+        f"FAST RULES:\n"
+        f"- If unclear within seconds → NO TRADE\n"
+        f"- If choppy candles (alternating up/down, no consistent direction) → NO TRADE\n"
+        f"- If momentum is weak or fading → NO TRADE\n"
+        f"- If strong clean momentum toward strike and move is achievable → proceed\n"
+        f"- Default to rejection. Only approve setups that are unmistakably clear.\n\n"
+
+        f"BIAS: Reject fast. Approve slowly.\n\n"
+
+        f"DECISION LOGIC:\n"
+        f"  GOOD SETUP + price above strike → YES\n"
+        f"  GOOD SETUP + price below strike → NO\n"
+        f"  BAD SETUP or NOISE             → NO TRADE\n\n"
+
+        f"Use the same quantitative framework to fill probability_above and confidence,\n"
+        f"but let your setup classification drive the final decision.\n\n"
+
+        f"Respond in JSON only."
+    )
+
+
 def _adversarial_prompt(symbol: str) -> str:
     return (
         f"You are an adversarial quantitative analyst for {symbol} short-duration binary markets.\n\n"
@@ -610,7 +643,7 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
                     model=model,
                     contents=context,
                     config=types.GenerateContentConfig(
-                        system_instruction=_system_prompt(symbol),
+                        system_instruction=_gemini_prompt(symbol),
                         temperature=0.5,
                         thinking_config=types.ThinkingConfig(thinking_budget=0),
                     ),
