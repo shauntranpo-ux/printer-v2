@@ -226,22 +226,24 @@ class TradingBot:
                 if self._is_new_day():
                     await self._send_daily_summary()
 
-                # Within-window retry loop: keep re-evaluating every 2 min while
-                # we're still inside the current session's entry window (< 420s in).
-                # This handles both empty order books AND mid-session bot starts —
-                # the bot will keep trying until the window closes, then sleep to next.
-                _RETRY_INTERVAL = 120  # re-check every 2 minutes within same window
+                # Within-window retry loop: keep re-evaluating every 60s while
+                # still inside the entry window (< 660s in). Retry interval is
+                # capped to whatever time remains so we never sleep past the cutoff.
+                _MAX_TIME_IN     = 660   # 11 min in — still leaves 4 min before expiry
+                _RETRY_INTERVAL  = 60    # re-check every 60s within same window
                 while True:
-                    now_ts          = time.time()
-                    boundary        = int(now_ts // _CYCLE_SECONDS) * _CYCLE_SECONDS
+                    now_ts           = time.time()
+                    boundary         = int(now_ts // _CYCLE_SECONDS) * _CYCLE_SECONDS
                     time_into_window = now_ts - boundary
-                    if time_into_window >= 420 or self._cycle_signals:
+                    if time_into_window >= _MAX_TIME_IN or self._cycle_signals:
                         break   # past entry window, or already got a signal
+                    time_remaining = _MAX_TIME_IN - time_into_window
+                    sleep_for = min(_RETRY_INTERVAL, max(15, time_remaining - 10))
                     log.info(
-                        "Still in entry window (%.0fs/420s) — re-evaluating in %ds",
-                        time_into_window, _RETRY_INTERVAL,
+                        "Still in entry window (%.0fs/%ds) — re-evaluating in %.0fs",
+                        time_into_window, _MAX_TIME_IN, sleep_for,
                     )
-                    await asyncio.sleep(_RETRY_INTERVAL)
+                    await asyncio.sleep(sleep_for)
                     await self.run_cycle()
                     if self._is_new_day():
                         await self._send_daily_summary()
@@ -493,9 +495,9 @@ class TradingBot:
                 "Market %s too new (%.0fs in, need 30s) — skipping", ticker, time_in
             )
             return
-        if time_in > 420:
+        if time_in > 660:
             log.info(
-                "Market %s too far into session (%.0fs in, max 420s) — skipping", ticker, time_in
+                "Market %s too far into session (%.0fs in, max 660s) — skipping", ticker, time_in
             )
             return
         if time_left < 180:
