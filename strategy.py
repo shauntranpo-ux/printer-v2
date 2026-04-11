@@ -137,8 +137,8 @@ class Strategy:
         # Use `or 50` so that explicit 0 from the API also falls back to 50¢
         ask_cents = market.get("yes_ask" if direction == "yes" else "no_ask") or 0
         if ask_cents == 0:
-            log.info("Skipping %s — %s ask price unknown (0¢), can't size position", ticker, direction.upper())
-            return None
+            ask_cents = 50
+            log.info("%s: ask unknown — using 50¢ midpoint for sizing", ticker)
         market_price = ask_cents / 100.0
 
         # Price cap: refuse to buy a contract priced ≥ 77¢ — too expensive, minimal upside

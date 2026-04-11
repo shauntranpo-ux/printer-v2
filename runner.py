@@ -500,16 +500,6 @@ class TradingBot:
             )
             return
 
-        # Pre-flight liquidity check — both ask prices still 0 after order book refresh.
-        # This happens on brand-new markets (first ~2 min) before liquidity providers
-        # have posted any bids. Skip without calling the ensemble (saves AI API tokens).
-        if not market.get("yes_ask") and not market.get("no_ask"):
-            log.info(
-                "Market %s: ask prices unavailable (new market, empty order book) — skipping",
-                ticker,
-            )
-            return
-
         btc_data   = BtcData(
             price          = btc_price,
             momentum       = momentum,
