@@ -136,6 +136,37 @@ _JSON_SCHEMA_HINT = (
 )
 
 
+def _claude_prompt(symbol: str) -> str:
+    """Base prompt + realism refinement layer applied only to Claude."""
+    return _system_prompt(symbol) + (
+        "\n\n---\n\n"
+        "REFINEMENT LAYER — apply after your initial estimate:\n\n"
+
+        "Step R1 — PHYSICAL ACHIEVABILITY CHECK:\n"
+        "  a. Convert distance to strike into required % move.\n"
+        "  b. Estimate average move per minute from recent candles"
+        " (total range of last 3 candles ÷ 45 minutes).\n"
+        "  c. If required move > 2× average move/min → heavy downward adjustment.\n"
+        "  d. If required move > 1× average move/min → moderate downward adjustment.\n\n"
+
+        "Step R2 — MANDATORY PENALTIES (apply each that fits):\n"
+        "  • Time remaining < 3 min  → subtract 15 from probability_above\n"
+        "  • Time remaining 3–6 min  → subtract 8 from probability_above\n"
+        "  • Strike gap > 0.5%       → subtract 10 from probability_above\n"
+        "  • Strike gap > 1.0%       → subtract an additional 10\n"
+        "  • Momentum score < 0.1 (weak) → subtract 5 from probability_above\n\n"
+
+        "Step R3 — FINAL SANITY CHECK:\n"
+        "  Your final probability_above must reflect what is PHYSICALLY ACHIEVABLE"
+        " given distance and time — not just theoretical direction.\n"
+        "  If the required move cannot realistically occur → probability_above must"
+        " converge toward 50 (coin-flip), not stay at your directional estimate.\n\n"
+
+        "Do NOT change your reasoning style. Only use this layer to refine the"
+        " final probability_above number for accuracy."
+    )
+
+
 def _adversarial_prompt(symbol: str) -> str:
     return (
         f"You are an adversarial quantitative analyst for {symbol} short-duration binary markets.\n\n"
@@ -524,7 +555,7 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
             model      = settings.CLAUDE_MODEL,
             max_tokens = 300,
             temperature= 0.5,
-            system     = _system_prompt(symbol),
+            system     = _claude_prompt(symbol),
             messages   = [{"role": "user", "content": context}],
         )
         text = msg.content[0].text
