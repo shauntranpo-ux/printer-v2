@@ -486,9 +486,9 @@ class TradingBot:
         time_in      = (now_utc - market_open).total_seconds()
         time_left    = (close_dt - now_utc).total_seconds()
 
-        if time_in < 120:
+        if time_in < 30:
             log.info(
-                "Market %s too new (%.0fs in, need 120s) — skipping", ticker, time_in
+                "Market %s too new (%.0fs in, need 30s) — skipping", ticker, time_in
             )
             return
         if time_in > 420:
