@@ -36,36 +36,103 @@ _CALL_TIMEOUT = 30.0   # seconds before a model is marked as failed
 
 def _system_prompt(symbol: str) -> str:
     return (
-        f"You are a professional {symbol} 15-minute binary options trader.\n"
-        f"probability = P(YES) = chance that {symbol} closes ABOVE the strike at expiry.\n\n"
+        f"You are a quantitative trading analyst operating in short-duration binary outcome"
+        f" markets (Kalshi-style).\n\n"
 
-        f"STEP 1 — START from strike distance (this is the most important factor):\n"
-        f"  Price already >0.5% ABOVE strike  → start 0.82\n"
-        f"  Price 0.2–0.5% ABOVE strike       → start 0.70\n"
-        f"  Price 0–0.2% ABOVE strike          → start 0.58\n"
-        f"  Price AT strike (within 0.05%)     → start 0.50\n"
-        f"  Price 0–0.2% BELOW strike          → start 0.42\n"
-        f"  Price 0.2–0.5% BELOW strike        → start 0.30\n"
-        f"  Price already >0.5% BELOW strike  → start 0.18\n\n"
+        f"Your ONLY objective:\n"
+        f"Estimate the probability that {symbol} price will settle ABOVE the strike price"
+        f" at expiration.\n\n"
 
-        f"STEP 2 — Adjust based on momentum signals (small adjustments, ±0.05 each):\n"
-        f"  Trend UPTREND → +0.05 | DOWNTREND → -0.05 | SIDEWAYS → 0\n"
-        f"  RSI >70 (overbought, price may fade) → -0.05\n"
-        f"  RSI <30 (oversold, price may bounce) → +0.05\n"
-        f"  Momentum >+0.5 → +0.04 | <-0.5 → -0.04\n"
-        f"  3+ same-direction consecutive candles → ±0.04\n\n"
+        f"You are NOT predicting general direction.\n"
+        f"You are estimating a probabilistic outcome under time constraints.\n\n"
 
-        f"STEP 3 — Cap your final output between 0.12 and 0.88.\n\n"
+        f"---\n\n"
 
-        f"Show your reasoning: 'start=0.70, DOWNTREND-0.05, RSI71-0.05 → 0.60'\n"
+        f"CORE PRINCIPLE:\n\n"
+        f"Assume all signals are noise until proven otherwise.\n\n"
+        f"Most apparent patterns in price are random.\n"
+        f"Only assign high probability when multiple independent factors align and the move"
+        f" is realistically achievable within the remaining time.\n\n"
+        f"Precision > frequency.\n"
+        f"No trade is better than a weak trade.\n\n"
+
+        f"---\n\n"
+
+        f"ANALYSIS FRAMEWORK (STRICT ORDER):\n\n"
+
+        f"1. POSITION RELATIVE TO STRIKE\n"
+        f"- Is price above or below strike?\n"
+        f"- Exact distance to strike\n"
+        f"- Convert distance into required move per minute\n"
+        f"→ Ask: Is this move realistically achievable within the remaining time?\n\n"
+
+        f"2. TIME DECAY CONSTRAINT (CRITICAL)\n"
+        f"- Less time remaining = exponentially harder to reach distant strike\n"
+        f"- Large distance + low time = heavily penalize probability\n"
+        f"→ If move requires abnormal speed → likely NO TRADE\n\n"
+
+        f"3. SHORT-TERM PRICE STRUCTURE\n"
+        f"- Analyze last 3-10 candles: direction, strength, consistency\n"
+        f"→ Clean directional movement = stronger signal\n"
+        f"→ Choppy/erratic = noise\n\n"
+
+        f"4. MOMENTUM CONFIRMATION\n"
+        f"- Does momentum support continuation? Increasing, flat, or fading?\n"
+        f"→ Strong alignment = positive signal | Divergence or fading = reduce probability\n\n"
+
+        f"5. RSI CONTEXT (SECONDARY)\n"
+        f"- Use RSI ONLY as confirmation. Trending + high RSI = continuation possible."
+        f" RSI alone is NOT a signal.\n\n"
+
+        f"6. NOISE VS SIGNAL TEST (MOST IMPORTANT)\n"
+        f"Ask explicitly: 'Could this exact setup occur in randomized price data?'\n"
+        f"If YES → set is_likely_noise=true → NO TRADE\n\n"
+
+        f"7. PROBABILITY ESTIMATION\n"
+        f"Estimate probability (0-100) that price finishes ABOVE strike.\n"
+        f"Base ONLY on: distance to strike, time remaining, strength of movement.\n"
+        f"  Slight edge → 52-58% | Moderate edge → 60-70% | Strong edge → 70%+\n"
+        f"Never assign extreme probabilities unless move is trivial.\n\n"
+
+        f"8. EDGE CALCULATION\n"
+        f"Edge = Your probability - Market implied probability (from Kalshi price)\n"
+        f"If edge < 8% → NO TRADE\n\n"
+
+        f"9. CONFIDENCE SCORING (0-100)\n"
+        f"Reflects alignment of signals, clarity of structure, lack of contradictions.\n"
+        f"Reduce when indicators conflict, movement is weak, or time/distance mismatch exists.\n\n"
+
+        f"---\n\n"
+
+        f"HARD RULES:\n"
+        f"- Default to NO TRADE unless clear edge exists\n"
+        f"- If probability ≈ 50% → NO TRADE\n"
+        f"- If setup resembles randomness → NO TRADE\n"
+        f"- Do NOT force trades\n"
+        f"- Penalize late entries heavily\n"
+        f"- Penalize large strike gaps heavily\n"
+        f"- Think like a statistician, not a trader\n\n"
+
+        f"---\n\n"
+
+        f"SYSTEM CONTEXT:\n"
+        f"Your output is combined with other models. Act independently."
+        f" Prioritize accuracy over agreement. Bad trades harm the system more than missed trades.\n\n"
+
+        f"FINAL CHECK: Ask yourself: 'Would this still look valid if price were randomized?'\n"
+        f"If uncertain → NO TRADE\n\n"
+
         f"Respond in JSON only."
     )
 
 _JSON_SCHEMA_HINT = (
     '\n\nRespond with ONLY this JSON — no other text:\n'
-    '{"direction": "YES" or "NO", "probability": 0.0-1.0, "reasoning": "start=X adj=Y → Z"}\n'
-    'direction "YES" → probability > 0.50 | direction "NO" → probability < 0.50\n'
-    'ALWAYS show your step 1 starting point in reasoning. Never skip the strike distance anchor.'
+    '{"decision": "YES" or "NO" or "NO TRADE", "probability_above": 0-100, '
+    '"confidence": 0-100, "edge_percent": number, "is_likely_noise": true or false, '
+    '"reasoning": "concise explanation referencing distance, time, momentum, noise"}\n'
+    'decision "YES"      → probability_above > 50 with edge ≥ 8%\n'
+    'decision "NO"       → probability_above < 50 with edge ≥ 8% on the NO side\n'
+    'decision "NO TRADE" → edge < 8%, noise, or insufficient conviction\n'
 )
 
 
@@ -197,36 +264,31 @@ class EnsembleEngine:
         mins_left = max(0, int((market.close_time - now_utc).total_seconds() / 60))
         candles  = btc_data.candles  # up to 10 completed 15m candles
 
-        # ── Strike distance + starting probability anchor ─────────────────
+        # ── Strike distance ───────────────────────────────────────────────
         if strike <= 0:
-            # Kalshi didn't return a strike — context will be incomplete.
-            # AIs should treat this as neutral (0.50 anchor).
-            dist_pct        = 0.0
-            strike_note     = "STRIKE DATA UNAVAILABLE — treat as neutral starting point 0.50"
-            starting_prob   = 0.50
+            dist_pct    = 0.0
+            strike_note = "STRIKE DATA UNAVAILABLE"
         else:
             dist_pct = (price - strike) / price * 100   # positive = above strike
+            dist_abs = abs(price - strike)
+            mins_left_nonzero = max(1, mins_left)
+            required_per_min = dist_abs / mins_left_nonzero
             if dist_pct > 0.5:
-                strike_note   = f"price is {dist_pct:.3f}% ABOVE strike — strong YES territory"
-                starting_prob = 0.82
-            elif dist_pct > 0.2:
-                strike_note   = f"price is {dist_pct:.3f}% ABOVE strike — moderate YES territory"
-                starting_prob = 0.70
-            elif dist_pct > 0.05:
-                strike_note   = f"price is {dist_pct:.3f}% ABOVE strike — slight YES edge"
-                starting_prob = 0.58
+                strike_note = (
+                    f"price is {dist_pct:.3f}% (${dist_abs:,.2f}) ABOVE strike"
+                    f" — requires +${required_per_min:.2f}/min to stay above"
+                )
+            elif dist_pct > 0:
+                strike_note = (
+                    f"price is {dist_pct:.3f}% (${dist_abs:,.2f}) ABOVE strike"
+                )
             elif dist_pct > -0.05:
-                strike_note   = f"price is AT the strike (within 0.05%) — coin-flip"
-                starting_prob = 0.50
-            elif dist_pct > -0.2:
-                strike_note   = f"price is {abs(dist_pct):.3f}% BELOW strike — slight NO edge"
-                starting_prob = 0.42
-            elif dist_pct > -0.5:
-                strike_note   = f"price is {abs(dist_pct):.3f}% BELOW strike — moderate NO territory"
-                starting_prob = 0.30
+                strike_note = f"price is AT the strike (within 0.05%)"
             else:
-                strike_note   = f"price is {abs(dist_pct):.3f}% BELOW strike — strong NO territory"
-                starting_prob = 0.18
+                strike_note = (
+                    f"price is {abs(dist_pct):.3f}% (${dist_abs:,.2f}) BELOW strike"
+                    f" — requires +${required_per_min:.2f}/min to cross above"
+                )
 
         # ── Multi-timeframe price change ──────────────────────────────────
         def pct_chg(old: float, new: float) -> str:
@@ -319,14 +381,16 @@ class EnsembleEngine:
         else:
             kalshi_prices = "ORDER BOOK LOADING — no market price yet (base your answer on strike distance only)"
 
+        # Market implied P(YES) for edge calculation (model compares its estimate vs this)
+        yes_implied = market.yes_price if market.yes_price else 50
+
         return f"""=== {sym}/USD — 15-MINUTE BINARY MARKET ===
 Price now:    ${price:,.4f}
 Strike (YES threshold): ${strike:,.4f}
 Distance:     {strike_note}
-★ STARTING PROBABILITY (from strike distance): {starting_prob:.2f}
-  → Adjust ±0.05 per indicator signal, then output your final probability.
 Time left:    {mins_left} min until expiry
 Kalshi market: {kalshi_prices}
+Market implied P(YES): {yes_implied}%  ← use this to calculate your edge
 
 === PRICE ACTION ===
 Current candle (open → now): {chg_cur}
@@ -345,7 +409,8 @@ Momentum score: {btc_data.momentum:+.3f} (range -1 to +1)
 
 === YOUR TASK ===
 Will {sym} close ABOVE ${strike:,.4f} at {market.close_time.strftime('%H:%M UTC')}?
-Start at {starting_prob:.2f} (strike distance anchor). Apply indicator adjustments.
+Apply the quantitative framework. Test for noise first. Calculate your edge vs market implied {yes_implied}%.
+Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TRADE.
 {_JSON_SCHEMA_HINT}"""
 
     # ------------------------------------------------------------------
@@ -370,28 +435,38 @@ Start at {starting_prob:.2f} (strike distance anchor). Apply indicator adjustmen
         except json.JSONDecodeError as exc:
             raise ValueError(f"{model_name}: JSON parse error — {exc}") from exc
 
-        direction = str(data.get("direction", "")).upper().strip()
-        if direction not in ("YES", "NO"):
-            raise ValueError(
-                f"{model_name}: direction must be YES or NO, got '{direction}'"
-            )
+        # New schema: decision, probability_above (0-100), confidence (0-100),
+        # edge_percent, is_likely_noise
+        decision = str(data.get("decision", "")).upper().strip()
 
-        probability = float(data.get("probability", -1))
-        if not 0.0 <= probability <= 1.0:
-            raise ValueError(f"{model_name}: probability {probability} out of [0,1]")
+        prob_above = data.get("probability_above")
+        if prob_above is None:
+            # Fallback: old schema used "probability" in [0,1]
+            prob_old = float(data.get("probability", -1))
+            if 0.0 <= prob_old <= 1.0:
+                prob_above = prob_old * 100.0
+            else:
+                raise ValueError(f"{model_name}: missing probability_above field")
+        probability_pct = float(prob_above)
+        if not 0.0 <= probability_pct <= 100.0:
+            raise ValueError(f"{model_name}: probability_above {probability_pct} out of [0,100]")
+        probability = probability_pct / 100.0   # convert to [0, 1]
 
-        # Derive confidence from how far probability is from 0.50.
-        # Self-reported confidence fields make models hedge twice — this is more meaningful.
-        # 0.50 → 0.0 confidence, 0.75 → 0.50, 0.90 → 0.80, 1.0 → 1.0
-        confidence = abs(probability - 0.5) * 2.0
+        # Self-reported confidence (0-100) → [0, 1]
+        raw_conf = float(data.get("confidence", 50))
+        confidence = max(0.0, min(1.0, raw_conf / 100.0))
 
-        # Normalize: probability must always represent P(YES).
-        # If a model returned P(direction) instead — e.g. NO with 0.70 — flip it.
-        # Inconsistency: NO + prob > 0.5 means model meant "70% chance NO" = P(YES)=0.30
-        #                YES + prob < 0.5 means model meant "40% chance YES" — already correct
-        # We detect the cross-direction case (NO+high or YES+low) and flip.
-        if (direction == "NO" and probability > 0.5) or (direction == "YES" and probability < 0.5):
-            probability = 1.0 - probability
+        is_likely_noise = bool(data.get("is_likely_noise", False))
+
+        # "NO TRADE": model found no edge — force to 0.50 and zero confidence
+        # so the ensemble MIN_CONFIDENCE gate blocks the trade automatically.
+        if decision == "NO TRADE":
+            probability = 0.50
+            confidence  = 0.0
+        elif is_likely_noise:
+            # Noise flagged — heavily penalize confidence
+            confidence *= 0.2
+
         # Re-derive direction from the now-correct P(YES)
         direction = "YES" if probability >= 0.5 else "NO"
 
