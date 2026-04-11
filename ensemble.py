@@ -234,16 +234,22 @@ class EnsembleEngine:
                 return "n/a"
             return f"{(new - old) / old * 100:+.3f}%"
 
-        chg_15m = pct_chg(candles[-2].close, candles[-1].close) if len(candles) >= 2 else "n/a"
-        chg_60m = pct_chg(candles[-5].close, candles[-1].close) if len(candles) >= 5 else "n/a"
-        chg_2h  = pct_chg(candles[-9].close, candles[-1].close) if len(candles) >= 9 else "n/a"
+        # Current candle: compare open → live price (most relevant for this 15m expiry)
+        cc = btc_data.current_candle
+        cur_open = cc.get("open", 0) if cc else 0
+        chg_cur  = pct_chg(cur_open, price) if cur_open > 0 else "n/a"
+        # Historical: last completed candle vs candle before it
+        chg_prev = pct_chg(candles[-2].close, candles[-1].close) if len(candles) >= 2 else "n/a"
+        chg_60m  = pct_chg(candles[-5].close, price) if len(candles) >= 5 else "n/a"
+        chg_2h   = pct_chg(candles[-9].close, price) if len(candles) >= 9 else "n/a"
 
-        # ── RSI (14-period approx on available candles) ───────────────────
+        # ── RSI (close-to-close, standard calculation) ────────────────────
         rsi_str = "n/a"
         if len(candles) >= 3:
-            moves = [(c.close - c.open) for c in candles]
-            gains  = [m for m in moves if m > 0]
-            losses = [-m for m in moves if m < 0]
+            closes = [c.close for c in candles]
+            changes = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+            gains  = [c for c in changes if c > 0]
+            losses = [-c for c in changes if c < 0]
             avg_g = sum(gains)  / len(gains)  if gains  else 0.0
             avg_l = sum(losses) / len(losses) if losses else 1e-9
             rsi   = 100 - (100 / (1 + avg_g / avg_l))
@@ -277,31 +283,32 @@ class EnsembleEngine:
             f"{imb:.2f}x — balanced contract demand"
         )
 
-        # ── Completed candles table ───────────────────────────────────────
+        # ── Completed candles table (all available, oldest → newest) ────────
         if candles:
             candle_rows = []
-            for c in candles[-6:]:   # last 6 for readability
+            for c in candles:
                 body_pct = (c.close - c.open) / c.open * 100 if c.open > 0 else 0
                 arrow    = "▲" if c.close >= c.open else "▼"
                 candle_rows.append(
                     f"  {c.timestamp.strftime('%H:%M')} {arrow} "
                     f"O={c.open:.2f} H={c.high:.2f} L={c.low:.2f} C={c.close:.2f} "
-                    f"({body_pct:+.2f}%) vol={c.volume:.2f}"
+                    f"({body_pct:+.2f}%) vol={c.volume:.0f}"
                 )
             candles_str = "\n".join(candle_rows)
         else:
             candles_str = "  (no history — candles loading)"
 
         # ── Current (live) candle ─────────────────────────────────────────
-        cc = btc_data.current_candle
         if cc and cc.get("open", 0) > 0:
             live_pct = (price - cc["open"]) / cc["open"] * 100
+            live_hi  = cc.get("high", price)
+            live_lo  = cc.get("low", price)
             live_str = (
-                f"  LIVE O={cc['open']:.2f} H={cc['high']:.2f} "
-                f"L={cc['low']:.2f} C={price:.2f} ({live_pct:+.2f}%) ← current candle"
+                f"  LIVE O={cc['open']:.2f} H={live_hi:.2f} "
+                f"L={live_lo:.2f} C={price:.2f} ({live_pct:+.2f}%) ← THIS IS THE ACTIVE CANDLE"
             )
         else:
-            live_str = "  (live candle data pending)"
+            live_str = "  (live candle building — use historical data above)"
 
         return f"""=== {sym}/USD — 15-MINUTE BINARY MARKET ===
 Price now:    ${price:,.4f}
@@ -313,16 +320,17 @@ Time left:    {mins_left} min until expiry
 Kalshi market: YES={market.yes_price}¢  NO={market.no_price}¢
 
 === PRICE ACTION ===
-15-min change: {chg_15m}
-60-min change: {chg_60m}
-2-hour change: {chg_2h}
+Current candle (open → now): {chg_cur}
+Prev completed candle:        {chg_prev}
+Last 60 min (vs now):         {chg_60m}
+Last 2 hours (vs now):        {chg_2h}
 Trend (last 4 candles): {trend}
 Candle bias:   {candle_bias}
-RSI (approx):  {rsi_str}
+RSI (close-to-close): {rsi_str}
 Contract order book: {ob_signal}
 Momentum score: {btc_data.momentum:+.3f} (range -1 to +1)
 
-=== CANDLE HISTORY (15m, oldest → newest) ===
+=== COINBASE 15m CANDLE HISTORY (oldest → newest) ===
 {candles_str}
 {live_str}
 
