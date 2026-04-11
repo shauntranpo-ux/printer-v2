@@ -27,7 +27,9 @@ from coinbase_feed import Candle
 
 log = logging.getLogger(__name__)
 
-_CALL_TIMEOUT = 30.0   # seconds before a model is marked as failed
+_CALL_TIMEOUT        = 30.0   # seconds before a model is marked as failed
+_STREAK_BEFORE_PAUSE = 3      # consecutive failures before pausing a model
+_PAUSE_CYCLES        = 5      # debate() calls to skip before auto-retrying
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +658,14 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
     # Models confirmed dead (404) this session — skip without API call
     _GEMINI_DEAD: set[str] = set()
 
+    # Per-model failure tracking (class-level — survives across debate() calls)
+    # After _STREAK_BEFORE_PAUSE consecutive failures a model is paused for
+    # _PAUSE_CYCLES cycles, then auto-retried. Minimum required models is
+    # dynamically lowered so the ensemble keeps running on fewer active models.
+    _MODEL_FAIL_STREAK:  dict[str, int] = {"claude": 0, "gpt": 0, "gemini": 0, "deepseek": 0}
+    _MODEL_PAUSED_UNTIL: dict[str, int] = {}   # model → _DEBATE_CYCLE value to resume at
+    _DEBATE_CYCLE: int = 0
+
     async def _call_gemini(self, context: str, symbol: str = "BTC") -> ModelResult:
         t0 = time.monotonic()
 
@@ -729,11 +739,34 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
         self, coro: Any, model_name: str
     ) -> ModelResult | None:
         """
-        Run one model call with a timeout. Returns None (never raises) so
-        asyncio.gather can still collect the other results.
+        Run one model call with timeout and automatic failure tracking.
+
+        After _STREAK_BEFORE_PAUSE consecutive failures the model is paused for
+        _PAUSE_CYCLES debate() calls (no API request made). It is then silently
+        retried; on success the pause is cleared. This mirrors the _GEMINI_DEAD
+        mechanism but works for all 4 models and is self-healing.
         """
+        # Skip paused models — no API call, no timeout wait
+        resume_at = EnsembleEngine._MODEL_PAUSED_UNTIL.get(model_name, 0)
+        if EnsembleEngine._DEBATE_CYCLE <= resume_at:
+            log.info(
+                "%s: paused after repeated failures — skipping "
+                "(resumes at cycle %d, current=%d)",
+                model_name, resume_at, EnsembleEngine._DEBATE_CYCLE,
+            )
+            return None
+
         try:
-            return await asyncio.wait_for(coro, timeout=_CALL_TIMEOUT)
+            result = await asyncio.wait_for(coro, timeout=_CALL_TIMEOUT)
+            # Success — reset failure tracking
+            prev_streak = EnsembleEngine._MODEL_FAIL_STREAK.get(model_name, 0)
+            EnsembleEngine._MODEL_FAIL_STREAK[model_name] = 0
+            if model_name in EnsembleEngine._MODEL_PAUSED_UNTIL:
+                del EnsembleEngine._MODEL_PAUSED_UNTIL[model_name]
+                log.info("%s: recovered — re-enabled after pause", model_name)
+            elif prev_streak > 0:
+                log.info("%s: recovered after %d consecutive failure(s)", model_name, prev_streak)
+            return result
         except asyncio.TimeoutError:
             log.warning(
                 "%s timed out after %.0fs — excluded from consensus",
@@ -744,6 +777,18 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
                 "%s failed (%s: %s) — excluded from consensus",
                 model_name, type(exc).__name__, exc,
             )
+
+        # Failure — update streak and maybe pause
+        streak = EnsembleEngine._MODEL_FAIL_STREAK.get(model_name, 0) + 1
+        EnsembleEngine._MODEL_FAIL_STREAK[model_name] = streak
+        if streak >= _STREAK_BEFORE_PAUSE:
+            resume_at = EnsembleEngine._DEBATE_CYCLE + _PAUSE_CYCLES
+            EnsembleEngine._MODEL_PAUSED_UNTIL[model_name] = resume_at
+            log.warning(
+                "%s: %d consecutive failures — pausing for %d cycles "
+                "(will auto-retry at debate cycle %d)",
+                model_name, streak, _PAUSE_CYCLES, resume_at,
+            )
         return None
 
     # ------------------------------------------------------------------
@@ -753,9 +798,40 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
     async def debate(self, btc_data: BtcData, market: Market) -> EnsembleResult:
         """
         Run all 4 models in parallel and aggregate into an EnsembleResult.
-        Requires at least 2 successful model responses.
+
+        Minimum required models scales down automatically as models are paused
+        due to repeated failures — the ensemble keeps running on as few as 1
+        active model rather than crashing.
         """
         self._init_clients()
+
+        # Advance the debate cycle counter — used by the pause/resume logic
+        EnsembleEngine._DEBATE_CYCLE += 1
+
+        # Determine which models are currently paused and set the minimum threshold.
+        # With ≥3 active: need 2 (tolerate 1 transient failure).
+        # With ≤2 active: need 1 (can't afford to be strict).
+        _all_models = ("claude", "gpt", "gemini", "deepseek")
+        paused_now = {
+            m for m in _all_models
+            if EnsembleEngine._DEBATE_CYCLE <= EnsembleEngine._MODEL_PAUSED_UNTIL.get(m, 0)
+        }
+        active_count = len(_all_models) - len(paused_now)
+        min_required = 2 if active_count >= 3 else 1
+
+        if active_count == 0:
+            raise RuntimeError(
+                "All 4 models are paused due to repeated failures — "
+                "check API keys and redeploy."
+            )
+
+        if paused_now:
+            log.warning(
+                "Models paused this cycle: %s — running with %d active model(s), "
+                "need ≥ %d response(s)",
+                sorted(paused_now), active_count, min_required,
+            )
+
         context = self._build_context(btc_data, market)
 
         symbol = btc_data.symbol
@@ -767,25 +843,28 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
             market.yes_price, market.no_price,
         )
 
-        # Step 1 — run all 4 models in parallel
+        # Step 1 — run all 4 models in parallel (paused models return None instantly)
         claude_r, gpt_r, gemini_r, deepseek_r = await asyncio.gather(
-            self._safe_call(self._call_claude(context, symbol),   "claude"),
-            self._safe_call(self._call_gpt(context, symbol),     "gpt"),
-            self._safe_call(self._call_gemini(context, symbol),  "gemini"),
-            self._safe_call(self._call_deepseek(context, symbol),"deepseek"),
+            self._safe_call(self._call_claude(context, symbol),    "claude"),
+            self._safe_call(self._call_gpt(context, symbol),      "gpt"),
+            self._safe_call(self._call_gemini(context, symbol),   "gemini"),
+            self._safe_call(self._call_deepseek(context, symbol), "deepseek"),
         )
 
-        # Step 2 — require minimum 2 successful models
+        # Step 2 — require at least min_required successful models
         valid = [r for r in (claude_r, gpt_r, gemini_r, deepseek_r) if r is not None]
-        if len(valid) < 2:
+        if len(valid) < min_required:
             failed = [
                 name for name, r in [("claude", claude_r), ("gpt", gpt_r),
                                       ("gemini", gemini_r), ("deepseek", deepseek_r)]
-                if r is None
+                if r is None and name not in paused_now
             ]
             raise RuntimeError(
-                f"Only {len(valid)}/4 models responded — need ≥ 2. "
-                f"Failed: {', '.join(failed)}. Check API keys."
+                f"Only {len(valid)}/{active_count} active models responded "
+                f"(need ≥ {min_required}). "
+                f"Failed this cycle: {', '.join(failed) or 'none'}. "
+                + (f"Paused: {', '.join(sorted(paused_now))}. " if paused_now else "")
+                + "Check API keys."
             )
 
         # Step 3 — weighted consensus probability (re-normalised to survivors)
