@@ -187,9 +187,7 @@ class RiskGates:
 
     async def _gate_drawdown(self) -> tuple[bool, str]:
         """
-        Two sub-checks:
-          1. Daily loss used must be below DAILY_LOSS_LIMIT.
-          2. Open position exposure must be < 40% of current bankroll.
+        Daily loss used must be below DAILY_LOSS_LIMIT.
         """
         daily_stats     = await self._db.get_daily_stats()
         daily_loss_used = daily_stats.daily_loss_used
@@ -202,29 +200,6 @@ class RiskGates:
             )
             log.info("Gate [drawdown]: FAIL — %s", reason)
             return False, reason
-
-        # Bankroll exposure sub-check
-        try:
-            balance_dollars = await self._kalshi.get_balance()
-        except Exception as exc:
-            reason = f"Balance fetch failed: {exc}"
-            log.warning("Gate [drawdown]: FAIL — %s", reason)
-            return False, reason
-
-        open_trades = await self._db.get_open_trades()
-        open_exposure_dollars = sum(
-            t.entry_price * t.contracts / 100 for t in open_trades
-        )
-
-        if balance_dollars > 0:
-            max_exposure = balance_dollars * 0.40
-            if open_exposure_dollars >= max_exposure:
-                reason = (
-                    f"Exposure: ${open_exposure_dollars:.2f} >= 40% of "
-                    f"bankroll ${balance_dollars:.2f}"
-                )
-                log.info("Gate [drawdown]: FAIL — %s", reason)
-                return False, reason
 
         reason = f"Daily loss: ${daily_loss_used:.2f} / ${loss_limit:.0f}"
         log.info("Gate [drawdown]: PASS — %s", reason)

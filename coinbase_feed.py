@@ -373,6 +373,55 @@ class CoinbaseFeed:
             except Exception as exc:
                 log.warning("Candle prefetch failed for %s: %s", asset, exc)
 
+        # Pre-populate candle history for Binance assets (BNB, HYPE)
+        for asset, symbol in self._binance_assets.items():
+            try:
+                url = (
+                    f"https://api.binance.com/api/v3/klines"
+                    f"?symbol={symbol}&interval=15m&limit={n}"
+                )
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status != 200:
+                            log.warning(
+                                "Binance candle prefetch failed for %s: HTTP %d", asset, resp.status
+                            )
+                            continue
+                        raw = await resp.json()
+
+                # Binance klines: [[open_time_ms, open, high, low, close, volume, ...], ...]
+                if not isinstance(raw, list) or not raw:
+                    log.warning("Binance candle prefetch: empty response for %s", asset)
+                    continue
+
+                state = self._state[asset]
+                state.candles.clear()
+                for entry in raw:
+                    try:
+                        ts = datetime.fromtimestamp(entry[0] / 1000, tz=timezone.utc)
+                        candle = Candle(
+                            open      = float(entry[1]),
+                            high      = float(entry[2]),
+                            low       = float(entry[3]),
+                            close     = float(entry[4]),
+                            volume    = float(entry[5]),
+                            timestamp = ts,
+                        )
+                        state.candles.append(candle)
+                    except (IndexError, ValueError, TypeError):
+                        continue
+
+                log.info(
+                    "Binance candle prefetch [%s]: loaded %d candles (latest close=$%.4f)",
+                    asset, len(state.candles),
+                    state.candles[-1].close if state.candles else 0,
+                )
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("Binance candle prefetch failed for %s: %s", asset, exc)
+
     def get_current_candle_for(self, asset: str) -> dict | None:
         """Return the in-progress (incomplete) candle for an asset, or None."""
         state = self._state.get(asset)

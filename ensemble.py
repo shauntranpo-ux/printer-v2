@@ -341,8 +341,8 @@ Start at {starting_prob:.2f} (strike distance anchor). Apply indicator adjustmen
         cleaned = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE)
         cleaned = cleaned.strip("`").strip()
 
-        # Find the first complete JSON object (handles extra prose around it)
-        match = re.search(r"\{.*?\}", cleaned, re.DOTALL)
+        # Find the outermost JSON object (greedy — avoids stopping at {} inside reasoning)
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if not match:
             raise ValueError(
                 f"{model_name}: no JSON object found in response: {text[:300]!r}"
@@ -454,11 +454,12 @@ Start at {starting_prob:.2f} (strike distance anchor). Apply indicator adjustmen
                     config=types.GenerateContentConfig(
                         system_instruction=_system_prompt(symbol),
                         temperature=0.5,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
                     ),
                 )
                 if model != settings.GEMINI_MODEL and model not in EnsembleEngine._GEMINI_DEAD:
                     log.info("Gemini: fell back to model '%s'", model)
-                text = response.text
+                text = response.text or ""
                 return self._parse_result(text, "gemini", (time.monotonic() - t0) * 1000)
             except Exception as exc:
                 msg = str(exc)
