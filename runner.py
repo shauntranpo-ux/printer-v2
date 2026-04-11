@@ -409,18 +409,25 @@ class TradingBot:
         imbalance = bid_vol / (ask_vol + 1e-9)
 
         # Refresh market ask prices from the live order book.
-        # The markets API often returns yes_ask/no_ask=0 when there are no
-        # resting limit orders; the order book has the real best ask.
+        # Kalshi only exposes bids; asks are derived from the opposite side's best bid.
+        # yes_ask = 100 - best NO bid, no_ask = 100 - best YES bid (already done in client).
         yes_asks = ob.get("yes_asks", [])
         no_asks  = ob.get("no_asks",  [])
+        yes_bids = ob.get("yes_bids", [])
+        no_bids  = ob.get("no_bids",  [])
         if yes_asks:
             market["yes_ask"] = yes_asks[0]["price"]
+        elif no_bids:
+            market["yes_ask"] = 100 - no_bids[0]["price"]
         if no_asks:
             market["no_ask"] = no_asks[0]["price"]
-
-        # If no ask liquidity, warn but continue — ensemble will use the 50¢ default
-        if not yes_asks and not no_asks:
-            log.debug("No ask liquidity for %s — using 50¢ default price, proceeding to ensemble", ticker)
+        elif yes_bids:
+            market["no_ask"] = 100 - yes_bids[0]["price"]
+        # Derive the other side if still missing
+        if market.get("yes_ask", 0) and not market.get("no_ask", 0):
+            market["no_ask"] = 100 - market["yes_ask"]
+        if market.get("no_ask", 0) and not market.get("yes_ask", 0):
+            market["yes_ask"] = 100 - market["no_ask"]
 
         try:
             close_dt = datetime.fromisoformat(

@@ -271,14 +271,30 @@ class KalshiClient:
         markets.sort(key=lambda m: m.get("close_time", ""))
         result = []
         for m in markets:
+            yes_ask = m.get("yes_ask") or 0
+            no_ask  = m.get("no_ask")  or 0
+            yes_bid = m.get("yes_bid") or 0
+            no_bid  = m.get("no_bid")  or 0
+            # Derive missing ask from opposite bid if the API returned 0
+            if yes_ask == 0 and no_bid > 0:
+                yes_ask = 100 - no_bid
+            if no_ask == 0 and yes_bid > 0:
+                no_ask = 100 - yes_bid
+            # Last resort: use last_price as a mid-market estimate
+            last = m.get("last_price") or 0
+            if yes_ask == 0 and last > 0:
+                yes_ask = last
+            if no_ask == 0 and yes_ask > 0:
+                no_ask = 100 - yes_ask
+            volume = m.get("volume") or m.get("volume_24h") or 0
             result.append({
                 "ticker":        m.get("ticker", ""),
                 "title":         m.get("title", ""),
-                "yes_ask":       m.get("yes_ask", 0),
-                "yes_bid":       m.get("yes_bid", 0),
-                "no_ask":        m.get("no_ask", 0),
-                "no_bid":        m.get("no_bid", 0),
-                "volume":        m.get("volume", 0),
+                "yes_ask":       yes_ask,
+                "yes_bid":       yes_bid,
+                "no_ask":        no_ask,
+                "no_bid":        no_bid,
+                "volume":        volume,
                 "open_interest": m.get("open_interest", 0),
                 "close_time":    m.get("close_time", ""),
                 "strike_price":  m.get("floor_strike") or m.get("cap_strike") or 0,
@@ -381,11 +397,21 @@ class KalshiClient:
                     continue
             return out
 
+        yes_bids = _parse(book.get("yes") or book.get("yes_bids") or [])
+        no_bids  = _parse(book.get("no")  or book.get("no_bids")  or [])
+
+        # Kalshi order books only expose bids for each side.
+        # Asks are derived from the opposite side's best bid:
+        #   YES ask = 100 - best NO bid  (cheapest YES you can buy)
+        #   NO  ask = 100 - best YES bid (cheapest NO  you can buy)
+        yes_asks = [{"price": 100 - e["price"], "size": e["size"]} for e in no_bids]
+        no_asks  = [{"price": 100 - e["price"], "size": e["size"]} for e in yes_bids]
+
         return {
-            "yes_bids": _parse(book.get("yes") or book.get("yes_bids") or []),
-            "yes_asks": _parse(book.get("yes_asks") or []),
-            "no_bids":  _parse(book.get("no") or book.get("no_bids") or []),
-            "no_asks":  _parse(book.get("no_asks") or []),
+            "yes_bids": yes_bids,
+            "yes_asks": yes_asks,
+            "no_bids":  no_bids,
+            "no_asks":  no_asks,
         }
 
     # ------------------------------------------------------------------
