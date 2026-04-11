@@ -1,0 +1,144 @@
+{
+  "meta": {
+    "source": "synthetic_trades.json",
+    "total_trades": 500,
+    "total_contracts": 682,
+    "spread_model": "parametric price-dependent half-spread (no order-book data)",
+    "model_schedule": "3\u00a2 near 50\u00a2 | 2\u00a2 mid-range | 1.5\u00a2 far | 1\u00a2 extreme",
+    "note": "entry_price = actual ask fill; exit_price  = actual bid fill (or 100/0 for expired, zero exit spread). base scenario (1\u00d7) reproduces actual_pnl exactly."
+  },
+  "actual": {
+    "total_pnl": 114.449,
+    "avg_pnl": 0.2289,
+    "win_rate_pct": 56.0
+  },
+  "slippage_summary": {
+    "total_base_slippage": 24.77,
+    "avg_slippage_per_trade": 0.0495,
+    "slippage_pct_of_gross_wins": 12.2,
+    "mid_total_pnl": 139.219,
+    "avg_entry_half_spread_cents": 2.86
+  },
+  "scenarios": {
+    "optimistic": {
+      "spread_multiplier": 0.5,
+      "total_slippage": 12.385,
+      "avg_slippage_per_trade": 0.0248,
+      "total_pnl": 126.834,
+      "avg_pnl": 0.2537,
+      "win_rate_pct": 56.0,
+      "profit_factor": 2.5021,
+      "sharpe": 0.3313,
+      "is_profitable": true
+    },
+    "base": {
+      "spread_multiplier": 1.0,
+      "total_slippage": 24.77,
+      "avg_slippage_per_trade": 0.0495,
+      "total_pnl": 114.449,
+      "avg_pnl": 0.2289,
+      "win_rate_pct": 56.0,
+      "profit_factor": 2.2916,
+      "sharpe": 0.3023,
+      "is_profitable": true
+    },
+    "conservative": {
+      "spread_multiplier": 2.0,
+      "total_slippage": 49.54,
+      "avg_slippage_per_trade": 0.0991,
+      "total_pnl": 89.679,
+      "avg_pnl": 0.1794,
+      "win_rate_pct": 56.0,
+      "profit_factor": 1.925,
+      "sharpe": 0.2419,
+      "is_profitable": true
+    }
+  },
+  "break_even": {
+    "multiplier_at_zero_pnl": 5.62,
+    "approx_half_spread_cents": 16.07,
+    "verdict": "Very robust: strategy remains profitable up to 5.6\u00d7 the modeled spread (approx 16.07\u00a2 half-spread). Conservative scenario passes."
+  },
+  "by_exit_type": {
+    "confidence_decay": {
+      "n": 43,
+      "avg_entry_hs_cents": 2.79,
+      "avg_exit_hs_cents": 1.5,
+      "avg_slippage": 0.0453,
+      "total_slippage": 1.95,
+      "actual_total_pnl": -13.485,
+      "mid_total_pnl": -11.535,
+      "win_rate_pct": 0.0
+    },
+    "expired": {
+      "n": 257,
+      "avg_entry_hs_cents": 2.89,
+      "avg_exit_hs_cents": 0.0,
+      "avg_slippage": 0.0406,
+      "total_slippage": 10.43,
+      "actual_total_pnl": 113.941,
+      "mid_total_pnl": 124.371,
+      "win_rate_pct": 64.98
+    },
+    "stop_loss": {
+      "n": 87,
+      "avg_entry_hs_cents": 2.82,
+      "avg_exit_hs_cents": 1.48,
+      "avg_slippage": 0.043,
+      "total_slippage": 3.74,
+      "actual_total_pnl": -30.623,
+      "mid_total_pnl": -26.883,
+      "win_rate_pct": 0.0
+    },
+    "take_profit": {
+      "n": 85,
+      "avg_entry_hs_cents": 2.85,
+      "avg_exit_hs_cents": 1.66,
+      "avg_slippage": 0.0768,
+      "total_slippage": 6.525,
+      "actual_total_pnl": 37.933,
+      "mid_total_pnl": 44.458,
+      "win_rate_pct": 100.0
+    },
+    "trailing_stop": {
+      "n": 28,
+      "avg_entry_hs_cents": 2.89,
+      "avg_exit_hs_cents": 2.12,
+      "avg_slippage": 0.0759,
+      "total_slippage": 2.125,
+      "actual_total_pnl": 6.683,
+      "mid_total_pnl": 8.808,
+      "win_rate_pct": 100.0
+    }
+  },
+  "by_entry_price": {
+    "20\u201334\u00a2": {
+      "n": 35,
+      "avg_entry_hs_cents": 2.0,
+      "total_slippage": 3.08,
+      "actual_total_pnl": 42.049,
+      "win_rate_pct": 60.0
+    },
+    "35\u201349\u00a2": {
+      "n": 229,
+      "avg_entry_hs_cents": 2.98,
+      "total_slippage": 13.135,
+      "actual_total_pnl": 69.441,
+      "win_rate_pct": 53.71
+    },
+    "50\u201364\u00a2": {
+      "n": 205,
+      "avg_entry_hs_cents": 3.0,
+      "total_slippage": 7.615,
+      "actual_total_pnl": 6.78,
+      "win_rate_pct": 59.02
+    },
+    "65\u201379\u00a2": {
+      "n": 31,
+      "avg_entry_hs_cents": 2.0,
+      "total_slippage": 0.94,
+      "actual_total_pnl": -3.821,
+      "win_rate_pct": 48.39
+    }
+  }
+}

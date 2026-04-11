@@ -1,0 +1,293 @@
+{
+  "meta": {
+    "source": "synthetic_trades.json",
+    "total_trades": 500,
+    "window_seconds": 900,
+    "max_entry_seconds": 660,
+    "outside_window_n": 0,
+    "note": "window_start = floor(trade_timestamp, 900s), matching runner.py boundary = int(now_ts // 900) * 900. Retry interval ~60s; bucket '0-120s' = 1st-2nd attempt, '480-660s' = 7th-8th attempt."
+  },
+  "overall": {
+    "n": 500,
+    "win_rate_pct": 56.0,
+    "total_pnl": 114.449,
+    "avg_pnl": 0.2289,
+    "avg_win": 0.7252,
+    "avg_loss": -0.4028,
+    "profit_factor": 2.2916,
+    "sharpe": 0.3023,
+    "avg_entry_price": 49.73,
+    "avg_edge": 0.1031,
+    "avg_confidence": 0.5801,
+    "exit_reasons": {
+      "take_profit": 85,
+      "expired": 257,
+      "stop_loss": 87,
+      "trailing_stop": 28,
+      "confidence_decay": 43
+    },
+    "direction_split": {
+      "YES": 300,
+      "NO": 200
+    }
+  },
+  "buckets": {
+    "0-120s": {
+      "n": 101,
+      "win_rate_pct": 60.4,
+      "total_pnl": 35.95,
+      "avg_pnl": 0.3559,
+      "avg_win": 0.8704,
+      "avg_loss": -0.4285,
+      "profit_factor": 3.0972,
+      "sharpe": 0.4138,
+      "avg_entry_price": 49.23,
+      "avg_edge": 0.1204,
+      "avg_confidence": 0.5846,
+      "exit_reasons": {
+        "stop_loss": 12,
+        "expired": 57,
+        "take_profit": 20,
+        "confidence_decay": 8,
+        "trailing_stop": 4
+      },
+      "direction_split": {
+        "NO": 38,
+        "YES": 63
+      },
+      "entry_attempt": "1st-2nd",
+      "secs_remaining_at_mid": 840,
+      "avg_secs_into_window": 74.4
+    },
+    "120-300s": {
+      "n": 200,
+      "win_rate_pct": 58.0,
+      "total_pnl": 45.447,
+      "avg_pnl": 0.2272,
+      "avg_win": 0.6892,
+      "avg_loss": -0.4107,
+      "profit_factor": 2.3175,
+      "sharpe": 0.3073,
+      "avg_entry_price": 50.02,
+      "avg_edge": 0.1012,
+      "avg_confidence": 0.5849,
+      "exit_reasons": {
+        "take_profit": 31,
+        "expired": 111,
+        "trailing_stop": 12,
+        "confidence_decay": 14,
+        "stop_loss": 32
+      },
+      "direction_split": {
+        "YES": 120,
+        "NO": 80
+      },
+      "entry_attempt": "2nd-4th",
+      "secs_remaining_at_mid": 690,
+      "avg_secs_into_window": 205.5
+    },
+    "300-480s": {
+      "n": 103,
+      "win_rate_pct": 61.17,
+      "total_pnl": 27.76,
+      "avg_pnl": 0.2695,
+      "avg_win": 0.6864,
+      "avg_loss": -0.387,
+      "profit_factor": 2.7932,
+      "sharpe": 0.3676,
+      "avg_entry_price": 49.32,
+      "avg_edge": 0.1063,
+      "avg_confidence": 0.5837,
+      "exit_reasons": {
+        "take_profit": 20,
+        "expired": 48,
+        "trailing_stop": 11,
+        "confidence_decay": 13,
+        "stop_loss": 11
+      },
+      "direction_split": {
+        "YES": 63,
+        "NO": 40
+      },
+      "entry_attempt": "5th-6th",
+      "secs_remaining_at_mid": 510,
+      "avg_secs_into_window": 391.2
+    },
+    "480-660s": {
+      "n": 96,
+      "win_rate_pct": 41.67,
+      "total_pnl": 5.292,
+      "avg_pnl": 0.0551,
+      "avg_win": 0.6696,
+      "avg_loss": -0.3838,
+      "profit_factor": 1.2462,
+      "sharpe": 0.0812,
+      "avg_entry_price": 50.12,
+      "avg_edge": 0.0855,
+      "avg_confidence": 0.5615,
+      "exit_reasons": {
+        "expired": 41,
+        "stop_loss": 32,
+        "take_profit": 14,
+        "confidence_decay": 8,
+        "trailing_stop": 1
+      },
+      "direction_split": {
+        "YES": 54,
+        "NO": 42
+      },
+      "entry_attempt": "7th-8th",
+      "secs_remaining_at_mid": 330,
+      "avg_secs_into_window": 561.3
+    }
+  },
+  "bucket_ranking": [
+    {
+      "bucket": "300-480s",
+      "win_rate_pct": 61.17,
+      "n": 103,
+      "avg_pnl": 0.2695,
+      "total_pnl": 27.76
+    },
+    {
+      "bucket": "0-120s",
+      "win_rate_pct": 60.4,
+      "n": 101,
+      "avg_pnl": 0.3559,
+      "total_pnl": 35.95
+    },
+    {
+      "bucket": "120-300s",
+      "win_rate_pct": 58.0,
+      "n": 200,
+      "avg_pnl": 0.2272,
+      "total_pnl": 45.447
+    },
+    {
+      "bucket": "480-660s",
+      "win_rate_pct": 41.67,
+      "n": 96,
+      "avg_pnl": 0.0551,
+      "total_pnl": 5.292
+    }
+  ],
+  "histogram_60s": {
+    "0-59s": 31,
+    "60-119s": 70,
+    "120-179s": 71,
+    "180-239s": 70,
+    "240-299s": 59,
+    "300-359s": 40,
+    "360-419s": 22,
+    "420-479s": 41,
+    "480-539s": 35,
+    "540-599s": 38,
+    "600-659s": 23
+  },
+  "by_asset": {
+    "BTC": {
+      "0-120s": {
+        "n": 19,
+        "win_rate_pct": 47.37,
+        "total_pnl": 5.714,
+        "avg_pnl": 0.3007
+      },
+      "120-300s": {
+        "n": 41,
+        "win_rate_pct": 51.22,
+        "total_pnl": 7.678,
+        "avg_pnl": 0.1873
+      },
+      "300-480s": {
+        "n": 19,
+        "win_rate_pct": 52.63,
+        "total_pnl": 3.429,
+        "avg_pnl": 0.1805
+      },
+      "480-660s": {
+        "n": 21,
+        "win_rate_pct": 33.33,
+        "total_pnl": -1.635,
+        "avg_pnl": -0.0779
+      }
+    },
+    "ETH": {
+      "0-120s": {
+        "n": 26,
+        "win_rate_pct": 61.54,
+        "total_pnl": 10.818,
+        "avg_pnl": 0.4161
+      },
+      "120-300s": {
+        "n": 50,
+        "win_rate_pct": 66.0,
+        "total_pnl": 19.341,
+        "avg_pnl": 0.3868
+      },
+      "300-480s": {
+        "n": 26,
+        "win_rate_pct": 57.69,
+        "total_pnl": 7.556,
+        "avg_pnl": 0.2906
+      },
+      "480-660s": {
+        "n": 28,
+        "win_rate_pct": 53.57,
+        "total_pnl": 8.633,
+        "avg_pnl": 0.3083
+      }
+    },
+    "SOL": {
+      "0-120s": {
+        "n": 31,
+        "win_rate_pct": 67.74,
+        "total_pnl": 11.885,
+        "avg_pnl": 0.3834
+      },
+      "120-300s": {
+        "n": 46,
+        "win_rate_pct": 58.7,
+        "total_pnl": 11.867,
+        "avg_pnl": 0.258
+      },
+      "300-480s": {
+        "n": 34,
+        "win_rate_pct": 73.53,
+        "total_pnl": 10.641,
+        "avg_pnl": 0.313
+      },
+      "480-660s": {
+        "n": 19,
+        "win_rate_pct": 42.11,
+        "total_pnl": 0.124,
+        "avg_pnl": 0.0065
+      }
+    },
+    "XRP": {
+      "0-120s": {
+        "n": 25,
+        "win_rate_pct": 60.0,
+        "total_pnl": 7.533,
+        "avg_pnl": 0.3013
+      },
+      "120-300s": {
+        "n": 63,
+        "win_rate_pct": 55.56,
+        "total_pnl": 6.561,
+        "avg_pnl": 0.1041
+      },
+      "300-480s": {
+        "n": 24,
+        "win_rate_pct": 54.17,
+        "total_pnl": 6.134,
+        "avg_pnl": 0.2556
+      },
+      "480-660s": {
+        "n": 28,
+        "win_rate_pct": 35.71,
+        "total_pnl": -1.83,
+        "avg_pnl": -0.0654
+      }
+    }
+  }
+}

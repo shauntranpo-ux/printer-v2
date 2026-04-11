@@ -323,6 +323,14 @@ def run(trades_raw: list, ensemble_raw: list, source: str = "local") -> dict:
 # ---------------------------------------------------------------------------
 
 def _load_data(args) -> tuple[list, list, str]:
+    if getattr(args, "synthetic", False):
+        p = Path(getattr(args, "synthetic_file", "synthetic_trades.json"))
+        if not p.exists():
+            raise FileNotFoundError(f"Synthetic data not found: {p}. Run generate_synthetic_trades.py first.")
+        data = json.loads(p.read_text())
+        trades   = data.get("trades", []) if isinstance(data, dict) else data
+        ensemble = data.get("ensemble_log", []) if isinstance(data, dict) else []
+        return trades, ensemble, str(p)
     if args.url:
         if not _HAS_REQUESTS:
             raise RuntimeError("pip install requests to use --url")
@@ -355,6 +363,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Per-model attribution from printer_v2.db")
     parser.add_argument("--db",  default="printer_v2.db", help="Path to SQLite database")
     parser.add_argument("--url", default=None, help="Live Railway URL (e.g. https://printerv2.up.railway.app)")
+    parser.add_argument("--synthetic", action="store_true", help="Load from synthetic_trades.json")
+    parser.add_argument("--synthetic-file", default="synthetic_trades.json", dest="synthetic_file")
     parser.add_argument("--out", default="backtest_model_attribution.json", help="Output file")
     args = parser.parse_args()
 
@@ -374,15 +384,15 @@ def main() -> None:
         return
 
     out_path.write_text(json.dumps(results, indent=2))
-    print(f"Saved → {out_path}")
+    print(f"Saved -> {out_path}")
 
     # ── Quick summary to stdout ──────────────────────────────────────────────
     p = results["portfolio"]
-    print(f"\n{'─'*55}")
+    print(f"\n{'-'*55}")
     print(f"  PORTFOLIO  trades={p['total_trades']}  "
           f"WR={p['win_rate_pct']}%  P&L=${p['total_pnl']:+.2f}  "
           f"PF={p['profit_factor']}")
-    print(f"{'─'*55}")
+    print(f"{'-'*55}")
     print(f"  MODEL RANKING (direction accuracy on placed trades)")
     for r in results["model_ranking"]:
         m   = results["models"][r["model"]]
@@ -390,16 +400,16 @@ def main() -> None:
         dis = m.get("disagreed", {})
         print(
             f"  {r['model']:>10}  acc={r['direction_accuracy_pct']:>5.1f}%  "
-            f"agreed_WR={agg.get('win_rate_pct') or '—':>5}%  "
-            f"disagreed_WR={dis.get('win_rate_pct') or '—':>5}%  "
+            f"agreed_WR={agg.get('win_rate_pct') or '-':>5}%  "
+            f"disagreed_WR={dis.get('win_rate_pct') or '-':>5}%  "
             f"disagreed_n={dis.get('n', 0)}"
         )
-    print(f"{'─'*55}")
+    print(f"{'-'*55}")
     sigs = results["ensemble_signals"]
     print(f"  SIGNALS  total={sigs['total']}  "
           f"traded={sigs['traded']}  wait={sigs['wait']}  "
           f"trade_rate={sigs['trade_rate_pct']}%")
-    print(f"{'─'*55}")
+    print(f"{'-'*55}")
 
 
 if __name__ == "__main__":

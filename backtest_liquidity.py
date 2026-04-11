@@ -286,6 +286,13 @@ def run(trades_raw: list, source: str = "local") -> dict:
 # ---------------------------------------------------------------------------
 
 def _load_trades(args) -> tuple[list, str]:
+    if getattr(args, "synthetic", False):
+        p = Path(getattr(args, "synthetic_file", "synthetic_trades.json"))
+        if not p.exists():
+            raise FileNotFoundError(f"Synthetic data not found: {p}. Run generate_synthetic_trades.py first.")
+        data = json.loads(p.read_text())
+        trades = data if isinstance(data, list) else data.get("trades", [])
+        return trades, str(p)
     if args.url:
         if not _HAS_REQUESTS:
             raise RuntimeError("pip install requests to use --url")
@@ -312,6 +319,8 @@ def main() -> None:
     )
     parser.add_argument("--db",  default="printer_v2.db", help="Path to SQLite database")
     parser.add_argument("--url", default=None, help="Live Railway URL (e.g. https://printerv2.up.railway.app)")
+    parser.add_argument("--synthetic", action="store_true", help="Load from synthetic_trades.json")
+    parser.add_argument("--synthetic-file", default="synthetic_trades.json", dest="synthetic_file")
     parser.add_argument("--out", default="backtest_liquidity.json", help="Output JSON path")
     args = parser.parse_args()
 
@@ -340,14 +349,14 @@ def main() -> None:
     sc = results["scenarios"]
     W  = 62
 
-    print(f"\n{'─'*W}")
+    print(f"\n{'-'*W}")
     print(f"  ACTUAL   trades={results['meta']['total_trades']}  "
           f"WR={a['win_rate_pct']}%  P&L=${a['total_pnl']:+.2f}")
     print(f"  SLIPPAGE base=${sl['total_base_slippage']:+.2f}  "
           f"avg/trade=${sl['avg_slippage_per_trade']:.4f}  "
           f"avg_entry_hs={sl['avg_entry_half_spread_cents']}c")
     print(f"  MID P&L  ${sl['mid_total_pnl']:+.2f}  (theoretical at midpoint)")
-    print(f"{'─'*W}")
+    print(f"{'-'*W}")
     for sc_name, _ in SCENARIOS:
         s    = sc[sc_name]
         mark = "OK" if s["is_profitable"] else "--"
@@ -355,11 +364,11 @@ def main() -> None:
               f"P&L=${s['total_pnl']:+.2f}  "
               f"WR={s['win_rate_pct']}%  "
               f"slip=${s['total_slippage']:.2f}  [{mark}]")
-    print(f"{'─'*W}")
+    print(f"{'-'*W}")
     print(f"  BREAK-EVEN  mult={be['multiplier_at_zero_pnl']}x  "
           f"hs~={be['approx_half_spread_cents']}c")
     print(f"  {be['verdict']}")
-    print(f"{'─'*W}")
+    print(f"{'-'*W}")
 
     print(f"\n  BY EXIT TYPE")
     for reason, stats in results["by_exit_type"].items():

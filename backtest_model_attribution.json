@@ -1,0 +1,379 @@
+{
+  "meta": {
+    "source": "synthetic_trades.json",
+    "total_closed_trades": 500,
+    "total_ensemble_signals": 1500
+  },
+  "portfolio": {
+    "total_trades": 500,
+    "wins": 280,
+    "losses": 220,
+    "win_rate_pct": 56.0,
+    "total_pnl": 114.449,
+    "avg_pnl": 0.2289,
+    "avg_win": 0.7252,
+    "avg_loss": -0.4028,
+    "profit_factor": 2.2916,
+    "sharpe": 0.3023,
+    "exit_reasons": {
+      "take_profit": 85,
+      "expired": 257,
+      "stop_loss": 87,
+      "trailing_stop": 28,
+      "confidence_decay": 43
+    }
+  },
+  "model_ranking": [
+    {
+      "model": "claude",
+      "direction_accuracy_pct": 95.0
+    },
+    {
+      "model": "gpt",
+      "direction_accuracy_pct": 93.0
+    },
+    {
+      "model": "gemini",
+      "direction_accuracy_pct": 87.2
+    },
+    {
+      "model": "deepseek",
+      "direction_accuracy_pct": 80.4
+    }
+  ],
+  "models": {
+    "claude": {
+      "trades_with_data": 500,
+      "direction_accuracy_pct": 95.0,
+      "agreed": {
+        "n": 291,
+        "pct_of_trades": 58.2,
+        "win_rate_pct": 93.81,
+        "total_pnl": 191.968,
+        "avg_pnl": 0.6597,
+        "sharpe": 0.9245
+      },
+      "disagreed": {
+        "n": 209,
+        "pct_of_trades": 41.8,
+        "win_rate_pct": 3.35,
+        "total_pnl": -77.519,
+        "avg_pnl": -0.3709,
+        "sharpe": -1.7579
+      },
+      "calibration_bins": [
+        {
+          "bucket": "10\u201319%",
+          "predicted_pct": 15,
+          "actual_pct": 0.0,
+          "n": 1
+        },
+        {
+          "bucket": "20\u201329%",
+          "predicted_pct": 25,
+          "actual_pct": 0.0,
+          "n": 5
+        },
+        {
+          "bucket": "30\u201339%",
+          "predicted_pct": 35,
+          "actual_pct": 0.0,
+          "n": 67
+        },
+        {
+          "bucket": "40\u201349%",
+          "predicted_pct": 45,
+          "actual_pct": 5.15,
+          "n": 136
+        },
+        {
+          "bucket": "50\u201359%",
+          "predicted_pct": 55,
+          "actual_pct": 83.33,
+          "n": 108
+        },
+        {
+          "bucket": "60\u201369%",
+          "predicted_pct": 65,
+          "actual_pct": 100.0,
+          "n": 148
+        },
+        {
+          "bucket": "70\u201379%",
+          "predicted_pct": 75,
+          "actual_pct": 100.0,
+          "n": 35
+        }
+      ],
+      "avg_prob_on_correct_calls": 0.6248,
+      "avg_prob_on_wrong_calls": 0.4239
+    },
+    "gpt": {
+      "trades_with_data": 500,
+      "direction_accuracy_pct": 93.0,
+      "agreed": {
+        "n": 297,
+        "pct_of_trades": 59.4,
+        "win_rate_pct": 91.25,
+        "total_pnl": 187.163,
+        "avg_pnl": 0.6302,
+        "sharpe": 0.8643
+      },
+      "disagreed": {
+        "n": 203,
+        "pct_of_trades": 40.6,
+        "win_rate_pct": 4.43,
+        "total_pnl": -72.714,
+        "avg_pnl": -0.3582,
+        "sharpe": -1.538
+      },
+      "calibration_bins": [
+        {
+          "bucket": "20\u201329%",
+          "predicted_pct": 25,
+          "actual_pct": 0.0,
+          "n": 8
+        },
+        {
+          "bucket": "30\u201339%",
+          "predicted_pct": 35,
+          "actual_pct": 0.0,
+          "n": 71
+        },
+        {
+          "bucket": "40\u201349%",
+          "predicted_pct": 45,
+          "actual_pct": 7.26,
+          "n": 124
+        },
+        {
+          "bucket": "50\u201359%",
+          "predicted_pct": 55,
+          "actual_pct": 78.99,
+          "n": 119
+        },
+        {
+          "bucket": "60\u201369%",
+          "predicted_pct": 65,
+          "actual_pct": 99.29,
+          "n": 140
+        },
+        {
+          "bucket": "70\u201379%",
+          "predicted_pct": 75,
+          "actual_pct": 100.0,
+          "n": 36
+        },
+        {
+          "bucket": "80\u201389%",
+          "predicted_pct": 85,
+          "actual_pct": 100.0,
+          "n": 2
+        }
+      ],
+      "avg_prob_on_correct_calls": 0.623,
+      "avg_prob_on_wrong_calls": 0.4213
+    },
+    "gemini": {
+      "trades_with_data": 500,
+      "direction_accuracy_pct": 87.2,
+      "agreed": {
+        "n": 288,
+        "pct_of_trades": 57.6,
+        "win_rate_pct": 87.5,
+        "total_pnl": 170.139,
+        "avg_pnl": 0.5908,
+        "sharpe": 0.7929
+      },
+      "disagreed": {
+        "n": 212,
+        "pct_of_trades": 42.4,
+        "win_rate_pct": 13.21,
+        "total_pnl": -55.69,
+        "avg_pnl": -0.2627,
+        "sharpe": -0.6201
+      },
+      "calibration_bins": [
+        {
+          "bucket": "10\u201319%",
+          "predicted_pct": 15,
+          "actual_pct": 0.0,
+          "n": 1
+        },
+        {
+          "bucket": "20\u201329%",
+          "predicted_pct": 25,
+          "actual_pct": 0.0,
+          "n": 30
+        },
+        {
+          "bucket": "30\u201339%",
+          "predicted_pct": 35,
+          "actual_pct": 3.28,
+          "n": 61
+        },
+        {
+          "bucket": "40\u201349%",
+          "predicted_pct": 45,
+          "actual_pct": 21.67,
+          "n": 120
+        },
+        {
+          "bucket": "50\u201359%",
+          "predicted_pct": 55,
+          "actual_pct": 73.98,
+          "n": 123
+        },
+        {
+          "bucket": "60\u201369%",
+          "predicted_pct": 65,
+          "actual_pct": 97.37,
+          "n": 114
+        },
+        {
+          "bucket": "70\u201379%",
+          "predicted_pct": 75,
+          "actual_pct": 97.78,
+          "n": 45
+        },
+        {
+          "bucket": "80\u201389%",
+          "predicted_pct": 85,
+          "actual_pct": 100.0,
+          "n": 6
+        }
+      ],
+      "avg_prob_on_correct_calls": 0.62,
+      "avg_prob_on_wrong_calls": 0.4125
+    },
+    "deepseek": {
+      "trades_with_data": 500,
+      "direction_accuracy_pct": 80.4,
+      "agreed": {
+        "n": 286,
+        "pct_of_trades": 57.2,
+        "win_rate_pct": 81.82,
+        "total_pnl": 157.912,
+        "avg_pnl": 0.5521,
+        "sharpe": 0.7052
+      },
+      "disagreed": {
+        "n": 214,
+        "pct_of_trades": 42.8,
+        "win_rate_pct": 21.5,
+        "total_pnl": -43.463,
+        "avg_pnl": -0.2031,
+        "sharpe": -0.4597
+      },
+      "calibration_bins": [
+        {
+          "bucket": "0\u20139%",
+          "predicted_pct": 5,
+          "actual_pct": 0.0,
+          "n": 1
+        },
+        {
+          "bucket": "10\u201319%",
+          "predicted_pct": 15,
+          "actual_pct": 0.0,
+          "n": 2
+        },
+        {
+          "bucket": "20\u201329%",
+          "predicted_pct": 25,
+          "actual_pct": 7.14,
+          "n": 28
+        },
+        {
+          "bucket": "30\u201339%",
+          "predicted_pct": 35,
+          "actual_pct": 6.85,
+          "n": 73
+        },
+        {
+          "bucket": "40\u201349%",
+          "predicted_pct": 45,
+          "actual_pct": 35.45,
+          "n": 110
+        },
+        {
+          "bucket": "50\u201359%",
+          "predicted_pct": 55,
+          "actual_pct": 64.89,
+          "n": 131
+        },
+        {
+          "bucket": "60\u201369%",
+          "predicted_pct": 65,
+          "actual_pct": 94.74,
+          "n": 95
+        },
+        {
+          "bucket": "70\u201379%",
+          "predicted_pct": 75,
+          "actual_pct": 97.73,
+          "n": 44
+        },
+        {
+          "bucket": "80\u201389%",
+          "predicted_pct": 85,
+          "actual_pct": 100.0,
+          "n": 13
+        },
+        {
+          "bucket": "90\u201399%",
+          "predicted_pct": 95,
+          "actual_pct": 100.0,
+          "n": 3
+        }
+      ],
+      "avg_prob_on_correct_calls": 0.6104,
+      "avg_prob_on_wrong_calls": 0.4175
+    }
+  },
+  "ensemble_signals": {
+    "total": 1500,
+    "traded": 500,
+    "wait": 570,
+    "skip": 430,
+    "trade_rate_pct": 33.33,
+    "per_model": {
+      "claude": {
+        "total_signals": 1500,
+        "yes_votes": 771,
+        "no_votes": 729,
+        "yes_vote_pct": 51.4,
+        "avg_probability": 0.507,
+        "avg_conviction": 20.54,
+        "disagreed_with_consensus_pct": 17.93
+      },
+      "gpt": {
+        "total_signals": 1500,
+        "yes_votes": 777,
+        "no_votes": 723,
+        "yes_vote_pct": 51.8,
+        "avg_probability": 0.5044,
+        "avg_conviction": 20.37,
+        "disagreed_with_consensus_pct": 24.07
+      },
+      "gemini": {
+        "total_signals": 1500,
+        "yes_votes": 740,
+        "no_votes": 760,
+        "yes_vote_pct": 49.33,
+        "avg_probability": 0.4973,
+        "avg_conviction": 21.08,
+        "disagreed_with_consensus_pct": 26.4
+      },
+      "deepseek": {
+        "total_signals": 1500,
+        "yes_votes": 691,
+        "no_votes": 809,
+        "yes_vote_pct": 46.07,
+        "avg_probability": 0.4853,
+        "avg_conviction": 21.29,
+        "disagreed_with_consensus_pct": 31.53
+      }
+    }
+  }
+}

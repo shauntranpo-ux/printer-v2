@@ -255,7 +255,7 @@ class TradingBot:
                 # Within-window retry loop: keep re-evaluating every 60s while
                 # still inside the entry window (< 660s in). Retry interval is
                 # capped to whatever time remains so we never sleep past the cutoff.
-                _MAX_TIME_IN     = 660   # 11 min in — still leaves 4 min before expiry
+                _MAX_TIME_IN     = 480   # 8 min in — backtest shows 480-660s has only 41.7% WR
                 _RETRY_INTERVAL  = 60    # re-check every 60s within same window
                 while True:
                     now_ts           = time.time()
@@ -522,9 +522,9 @@ class TradingBot:
                 "Market %s too new (%.0fs in, need 30s) — skipping", ticker, time_in
             )
             return
-        if time_in > 660:
+        if time_in > 480:
             log.info(
-                "Market %s too far into session (%.0fs in, max 660s) — skipping", ticker, time_in
+                "Market %s too far into session (%.0fs in, max 480s) — skipping", ticker, time_in
             )
             return
         if time_left < 180:
@@ -533,6 +533,18 @@ class TradingBot:
                 ticker, time_left,
             )
             return
+
+        # BTC knife-edge filter: skip markets where BTC is within 0.5% of strike.
+        # Backtest shows <0.5% distance has 43.3% WR — negative EV, models can't
+        # predict coin-flip outcomes at knife-edge strikes.
+        if asset == "BTC":
+            strike = float(market.get("strike_price") or 0)
+            if strike > 0 and abs(btc_price - strike) / strike < 0.005:
+                log.info(
+                    "Market %s: BTC knife-edge (price=%.0f strike=%.0f dist=%.3f%%) — skipping",
+                    ticker, btc_price, strike, abs(btc_price - strike) / strike * 100,
+                )
+                return
 
         # Market passed all timing checks — count it as evaluated
         self._cycle_markets_evaluated += 1

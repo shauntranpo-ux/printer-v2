@@ -1,0 +1,168 @@
+{
+  "meta": {
+    "n_trades": 500,
+    "n_permutations": 5000,
+    "rng_seed": 42,
+    "alpha": 0.05
+  },
+  "verdict": "EDGE IS STATISTICALLY SIGNIFICANT",
+  "tests_significant": "7/7",
+  "portfolio": {
+    "win_rate": {
+      "observed": 56.0,
+      "null_mean": 49.9959,
+      "null_std": 2.2441,
+      "null_95ci_pct": [
+        45.6,
+        54.4
+      ],
+      "p_value": 0.004,
+      "significant": true,
+      "unit": "%"
+    },
+    "total_pnl": {
+      "observed": 114.449,
+      "null_mean": 0.2234,
+      "null_std": 17.5904,
+      "null_95ci": [
+        -33.48,
+        35.23
+      ],
+      "p_value": 0.0,
+      "significant": true,
+      "unit": "USD"
+    },
+    "sharpe": {
+      "observed": 0.3023,
+      "null_mean": 0.0006,
+      "null_std": 0.0446,
+      "null_95ci": [
+        -0.085,
+        0.0894
+      ],
+      "p_value": 0.0,
+      "significant": true
+    },
+    "profit_factor": {
+      "observed": 2.2916,
+      "null_mean": 1.0089,
+      "null_std": 0.1227,
+      "null_95ci": [
+        0.794,
+        1.2747
+      ],
+      "p_value": 0.0,
+      "significant": true
+    }
+  },
+  "models": {
+    "claude": {
+      "trades_with_data": 500,
+      "accuracy": {
+        "observed_pct": 95.0,
+        "null_mean_pct": 50.01,
+        "null_95ci_pct": [
+          45.6,
+          54.4
+        ],
+        "p_value": 0.0,
+        "significant": true
+      },
+      "agreement_delta": {
+        "agreed_n": 291,
+        "disagreed_n": 209,
+        "agreed_wr_pct": 93.81,
+        "disagreed_wr_pct": 3.35,
+        "observed_delta_pct": 90.47,
+        "null_95ci_pct": [
+          -9.01,
+          9.08
+        ],
+        "p_value": 0.0,
+        "significant": true,
+        "interpretation": "Model agreement with ensemble is associated with significantly higher WR"
+      }
+    },
+    "gpt": {
+      "trades_with_data": 500,
+      "accuracy": {
+        "observed_pct": 93.0,
+        "null_mean_pct": 50.01,
+        "null_95ci_pct": [
+          45.6,
+          54.4
+        ],
+        "p_value": 0.0,
+        "significant": true
+      },
+      "agreement_delta": {
+        "agreed_n": 297,
+        "disagreed_n": 203,
+        "agreed_wr_pct": 91.25,
+        "disagreed_wr_pct": 4.43,
+        "observed_delta_pct": 86.81,
+        "null_95ci_pct": [
+          -9.39,
+          8.86
+        ],
+        "p_value": 0.0,
+        "significant": true,
+        "interpretation": "Model agreement with ensemble is associated with significantly higher WR"
+      }
+    },
+    "gemini": {
+      "trades_with_data": 500,
+      "accuracy": {
+        "observed_pct": 87.2,
+        "null_mean_pct": 50.05,
+        "null_95ci_pct": [
+          45.6,
+          54.4
+        ],
+        "p_value": 0.0,
+        "significant": true
+      },
+      "agreement_delta": {
+        "agreed_n": 288,
+        "disagreed_n": 212,
+        "agreed_wr_pct": 87.5,
+        "disagreed_wr_pct": 13.21,
+        "observed_delta_pct": 74.29,
+        "null_95ci_pct": [
+          -8.42,
+          8.78
+        ],
+        "p_value": 0.0,
+        "significant": true,
+        "interpretation": "Model agreement with ensemble is associated with significantly higher WR"
+      }
+    },
+    "deepseek": {
+      "trades_with_data": 500,
+      "accuracy": {
+        "observed_pct": 80.4,
+        "null_mean_pct": 49.96,
+        "null_95ci_pct": [
+          45.6,
+          54.2
+        ],
+        "p_value": 0.0,
+        "significant": true
+      },
+      "agreement_delta": {
+        "agreed_n": 286,
+        "disagreed_n": 214,
+        "agreed_wr_pct": 81.82,
+        "disagreed_wr_pct": 21.5,
+        "observed_delta_pct": 60.32,
+        "null_95ci_pct": [
+          -9.12,
+          8.86
+        ],
+        "p_value": 0.0,
+        "significant": true,
+        "interpretation": "Model agreement with ensemble is associated with significantly higher WR"
+      }
+    }
+  }
+}

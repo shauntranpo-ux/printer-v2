@@ -424,6 +424,13 @@ def _print_summary(results: dict) -> None:
 
 
 def _load_trades(args) -> tuple[list, str]:
+    if getattr(args, "synthetic", False):
+        p = Path(getattr(args, "synthetic_file", "synthetic_trades.json"))
+        if not p.exists():
+            raise FileNotFoundError(f"Synthetic data not found: {p}. Run generate_synthetic_trades.py first.")
+        data = json.loads(p.read_text())
+        trades = data if isinstance(data, list) else data.get("trades", [])
+        return trades, str(p)
     if args.url:
         if not _HAS_REQUESTS:
             raise RuntimeError("pip install requests to use --url")
@@ -450,6 +457,8 @@ def main() -> None:
     )
     parser.add_argument("--db",  default="printer_v2.db")
     parser.add_argument("--url", default=None, help="Live Railway URL (e.g. https://printerv2.up.railway.app)")
+    parser.add_argument("--synthetic", action="store_true", help="Load from synthetic_trades.json")
+    parser.add_argument("--synthetic-file", default="synthetic_trades.json", dest="synthetic_file")
     parser.add_argument("--out", default="backtest_strike_distance.json")
     args = parser.parse_args()
 

@@ -286,14 +286,116 @@ def _by_regime(records: list[dict], regime_key: str = "regime") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Synthetic / precomputed-regime fast path
+# ---------------------------------------------------------------------------
+
+def _run_precomputed(raw: list[dict], source: str) -> dict:
+    """
+    Synthetic mode: use regime_own / regime_btc fields baked into the trade dict
+    instead of fetching price data from Binance. Produces identical output
+    structure to the normal run() so all downstream code works unchanged.
+    """
+    records = [
+        {
+            "id":          r.get("id"),
+            "ticker":      r.get("market_ticker", ""),
+            "asset":       r.get("asset_symbol", "BTC"),
+            "timestamp":   r.get("timestamp", ""),
+            "pnl":         r["pnl_dollars"],
+            "direction":   r.get("direction", ""),
+            "entry_price": r.get("entry_price"),
+            "exit_reason": r.get("exit_reason"),
+            "regime_own":  r.get("regime_own", "unknown"),
+            "regime_btc":  r.get("regime_btc", "unknown"),
+        }
+        for r in raw
+    ]
+
+    all_dt = []
+    for r in raw:
+        try:
+            ts = datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00"))
+            all_dt.append(ts)
+        except Exception:
+            pass
+    min_dt = min(all_dt) if all_dt else datetime(2025, 10, 1, tzinfo=timezone.utc)
+    max_dt = max(all_dt) if all_dt else datetime(2026, 4, 10, tzinfo=timezone.utc)
+
+    assets_seen = sorted({r["asset"] for r in records} - {"OTHER"})
+
+    # Overall BTC-regime breakdown
+    for r in records:
+        r["regime"] = r["regime_btc"]
+    summary_btc_regime = _by_regime(records)
+
+    # Per-asset breakdown
+    by_asset_raw: dict[str, list] = defaultdict(list)
+    for r in records:
+        by_asset_raw[r["asset"]].append(r)
+
+    by_asset: dict[str, dict] = {}
+    for asset in sorted(by_asset_raw):
+        recs = by_asset_raw[asset]
+        for r in recs:
+            r["regime"] = r["regime_own"]
+        by_asset[asset] = {
+            "n":             len(recs),
+            "price_source":  "synthetic (precomputed)",
+            "by_own_regime": _by_regime(recs, "regime_own"),
+            "by_btc_regime": _by_regime(recs, "regime_btc"),
+        }
+
+    combos = []
+    for asset, stats in by_asset.items():
+        for regime, agg in stats["by_own_regime"].items():
+            if agg["n"] >= 3 and regime not in ("unknown",):
+                combos.append({
+                    "asset":        asset,
+                    "regime":       regime,
+                    "n":            agg["n"],
+                    "win_rate_pct": agg["win_rate_pct"],
+                    "total_pnl":    agg["total_pnl"],
+                    "avg_pnl":      agg["avg_pnl"],
+                    "sharpe":       agg.get("sharpe"),
+                })
+    combos.sort(key=lambda x: (x["win_rate_pct"] or 0), reverse=True)
+
+    return {
+        "meta": {
+            "source":        source,
+            "total_trades":  len(records),
+            "trade_period":  f"{min_dt.date()} to {max_dt.date()}",
+            "assets_traded": assets_seen,
+            "price_sources": {a: "synthetic" for a in assets_seen},
+            "regime_params": {
+                "ema_fast": EMA_FAST, "ema_slow": EMA_SLOW,
+                "atr_period": ATR_PERIOD,
+                "note": "Regimes precomputed in synthetic data — no Binance fetch.",
+            },
+        },
+        "btc_regime_candle_distribution": {},
+        "all_trades_by_btc_regime":       summary_btc_regime,
+        "by_asset":                       by_asset,
+        "best_regime_asset_combos":       combos[:20],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def run(trades_raw: list, csv_dir: Path, source: str = "local") -> dict:
+def run(trades_raw: list, csv_dir: Path, source: str = "local",
+        use_precomputed_regimes: bool = False) -> dict:
     raw = list(trades_raw)
 
     if not raw:
         return {"error": "No closed trades in database."}
+
+    # Synthetic / precomputed-regime fast path
+    if use_precomputed_regimes and raw[0].get("regime_own") is not None:
+        return _run_precomputed(raw, source)
+
+
 
     # ── 1. Attach asset label to every trade ─────────────────────────────────
     records = [
@@ -467,6 +569,13 @@ def _print_summary(results: dict) -> None:
 
 
 def _load_trades(args) -> tuple[list, str]:
+    if getattr(args, "synthetic", False):
+        p = Path(getattr(args, "synthetic_file", "synthetic_trades.json"))
+        if not p.exists():
+            raise FileNotFoundError(f"Synthetic data not found: {p}. Run generate_synthetic_trades.py first.")
+        data = json.loads(p.read_text())
+        trades = data if isinstance(data, list) else data.get("trades", [])
+        return trades, str(p)
     if args.url:
         if not _HAS_REQUESTS:
             raise RuntimeError("pip install requests to use --url")
@@ -492,6 +601,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Regime backtest from printer_v2.db")
     parser.add_argument("--db",      default="printer_v2.db")
     parser.add_argument("--url",     default=None, help="Live Railway URL (e.g. https://printerv2.up.railway.app)")
+    parser.add_argument("--synthetic", action="store_true", help="Load from synthetic_trades.json (uses precomputed regimes)")
+    parser.add_argument("--synthetic-file", default="synthetic_trades.json", dest="synthetic_file")
     parser.add_argument("--out",     default="backtest_regimes.json")
     parser.add_argument("--csv-dir", default=".", help="Directory containing *USDT_1m.csv files")
     args = parser.parse_args()
@@ -506,7 +617,8 @@ def main() -> None:
         return
 
     print(f"Loaded {len(trades)} trades from {source}")
-    results = run(trades, csv_dir, source=source)
+    results = run(trades, csv_dir, source=source,
+                  use_precomputed_regimes=getattr(args, "synthetic", False))
 
     if "error" in results:
         print(f"[error] {results['error']}")

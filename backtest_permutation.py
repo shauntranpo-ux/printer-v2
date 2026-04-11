@@ -144,6 +144,15 @@ def load_trades_from_url(url: str) -> list[Trade]:
     return _rows_to_trades(resp.json())
 
 
+def load_trades_from_synthetic(path: str = "synthetic_trades.json") -> list[Trade]:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Synthetic data not found: {p}. Run generate_synthetic_trades.py first.")
+    data = json.loads(p.read_text())
+    rows = data if isinstance(data, list) else data.get("trades", [])
+    return _rows_to_trades(rows)
+
+
 # ---------------------------------------------------------------------------
 # Permutation core
 # ---------------------------------------------------------------------------
@@ -382,7 +391,7 @@ def run(trades: list[Trade], n_perm: int, seed: int = 42) -> dict:
             },
         }
 
-        sig_mark = "✓ SIGNIFICANT" if p_acc < 0.05 else "✗ not significant"
+        sig_mark = "[SIGNIFICANT]" if p_acc < 0.05 else "[not significant]"
         print(f"  {model:>10}  acc={obs_acc*100:.1f}%  p={p_acc:.4f}  {sig_mark}")
 
     # ── 3. Summary ────────────────────────────────────────────────────────────
@@ -425,6 +434,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Permutation significance test for printer-v2")
     parser.add_argument("--db",  default="printer_v2.db",            help="SQLite DB path")
     parser.add_argument("--url", default=None,                        help="Live Railway URL (e.g. https://printerv2.up.railway.app)")
+    parser.add_argument("--synthetic", action="store_true",           help="Load from synthetic_trades.json")
+    parser.add_argument("--synthetic-file", default="synthetic_trades.json", dest="synthetic_file")
     parser.add_argument("--n",   type=int, default=10_000,           help="Permutation count")
     parser.add_argument("--out", default="backtest_permutation.json", help="Output JSON path")
     parser.add_argument("--seed", type=int, default=42,              help="RNG seed (reproducibility)")
@@ -433,7 +444,9 @@ def main() -> None:
     out_path = Path(args.out)
 
     try:
-        if args.url:
+        if args.synthetic:
+            trades = load_trades_from_synthetic(args.synthetic_file)
+        elif args.url:
             trades = load_trades_from_url(args.url)
         else:
             db_path = Path(args.db)
@@ -457,13 +470,13 @@ def main() -> None:
     results = run(trades, n_perm=args.n, seed=args.seed)
 
     out_path.write_text(json.dumps(results, indent=2))
-    print(f"\nSaved → {out_path}")
+    print(f"\nSaved -> {out_path}")
 
     # ── Quick summary ────────────────────────────────────────────────────────
-    print(f"\n{'═'*60}")
+    print(f"\n{'='*60}")
     print(f"  VERDICT: {results['verdict']}")
     print(f"  Tests significant: {results['tests_significant']} (p < 0.05)")
-    print(f"{'─'*60}")
+    print(f"{'-'*60}")
     pt = results["portfolio"]
     for stat, label in [
         ("win_rate",     "Win Rate     "),
@@ -472,18 +485,18 @@ def main() -> None:
         ("profit_factor","Profit Factor"),
     ]:
         t = pt[stat]
-        sig = "✓" if t["significant"] else "✗"
+        sig = "[Y]" if t["significant"] else "[N]"
         print(f"  {sig} {label}  obs={t['observed']}  p={t['p_value']:.4f}")
-    print(f"{'─'*60}")
+    print(f"{'-'*60}")
     for model in MODELS:
         mt = results["models"].get(model, {})
         if "error" in mt:
-            print(f"  ? {model:>10}  {mt['error']}")
+            print(f"  [?] {model:>10}  {mt['error']}")
             continue
         acc = mt["accuracy"]
-        sig = "✓" if acc["significant"] else "✗"
+        sig = "[Y]" if acc["significant"] else "[N]"
         print(f"  {sig} {model:>10}  acc={acc['observed_pct']}%  p={acc['p_value']:.4f}")
-    print(f"{'═'*60}")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":

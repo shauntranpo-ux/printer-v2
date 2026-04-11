@@ -84,10 +84,10 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Ensemble weights (auto-normalized if they don't sum to 1.0)
     # ------------------------------------------------------------------
-    CLAUDE_WEIGHT: float = Field(default=0.30, description="Claude vote weight")
+    CLAUDE_WEIGHT: float = Field(default=0.40, description="Claude vote weight")
     GPT_WEIGHT: float = Field(default=0.25, description="GPT vote weight")
     GEMINI_WEIGHT: float = Field(default=0.25, description="Gemini vote weight")
-    DEEPSEEK_WEIGHT: float = Field(default=0.20, description="DeepSeek vote weight (adversarial/skeptical role)")
+    DEEPSEEK_WEIGHT: float = Field(default=0.10, description="DeepSeek vote weight (adversarial/skeptical role)")
 
     # ------------------------------------------------------------------
     # Telegram

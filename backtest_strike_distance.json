@@ -1,0 +1,674 @@
+{
+  "meta": {
+    "source": "synthetic_trades.json",
+    "total_trades": 500,
+    "btc_trades": 100,
+    "schema_note": "btc_price_at_entry present",
+    "strike_parsed_ok": 500,
+    "strike_parse_failed": 0,
+    "skipped_no_btc_price": 0,
+    "sample_tickers": [
+      "KXSOL15M-12OCT25-T125",
+      "KXSOL15M-25MAR26-T145",
+      "KXETH15M-01OCT25-T1950",
+      "KXXRP15M-29NOV25-T2p50",
+      "KXSOL15M-13MAR26-T135",
+      "KXXRP15M-09DEC25-T2p50",
+      "KXSOL15M-16MAR26-T140",
+      "KXBTC15M-19OCT25-T73000",
+      "KXXRP15M-11FEB26-T2p50",
+      "KXSOL15M-21FEB26-T160"
+    ],
+    "distance_formula": "|btc_price_at_entry - strike| / strike * 100",
+    "moneyness": {
+      "YES_ITM": "btc_price > strike (BTC already above target)",
+      "NO_ITM": "btc_price < strike (BTC already below target)"
+    }
+  },
+  "overall": {
+    "n": 500,
+    "win_rate_pct": 56.0,
+    "total_pnl": 114.449,
+    "avg_pnl": 0.2289,
+    "avg_win": 0.7252,
+    "avg_loss": -0.4028,
+    "profit_factor": 2.2916,
+    "sharpe": 0.3023,
+    "avg_entry_price": 49.73,
+    "avg_edge": 0.1031,
+    "avg_confidence": 0.5801,
+    "exit_reasons": {
+      "take_profit": 85,
+      "expired": 257,
+      "stop_loss": 87,
+      "trailing_stop": 28,
+      "confidence_decay": 43
+    }
+  },
+  "btc_trades_only": {
+    "n": 100,
+    "buckets": {
+      "0-0.5%": {
+        "n": 30,
+        "win_rate_pct": 43.33,
+        "total_pnl": 2.836,
+        "avg_pnl": 0.0945,
+        "avg_win": 0.6895,
+        "avg_loss": -0.3605,
+        "profit_factor": 1.4628,
+        "sharpe": 0.1537,
+        "avg_entry_price": 48.56,
+        "avg_edge": 0.0934,
+        "avg_confidence": 0.5973,
+        "exit_reasons": {
+          "expired": 17,
+          "take_profit": 3,
+          "confidence_decay": 3,
+          "stop_loss": 7
+        },
+        "in_the_money": {
+          "n": 14,
+          "win_rate_pct": 42.86,
+          "total_pnl": 0.695,
+          "avg_pnl": 0.0496,
+          "avg_win": 0.527,
+          "avg_loss": -0.3084,
+          "profit_factor": 1.2817,
+          "sharpe": 0.1038,
+          "avg_entry_price": 44.99,
+          "avg_edge": 0.0886,
+          "avg_confidence": 0.6065,
+          "exit_reasons": {
+            "expired": 8,
+            "take_profit": 2,
+            "confidence_decay": 3,
+            "stop_loss": 1
+          }
+        },
+        "out_of_the_money": {
+          "n": 16,
+          "win_rate_pct": 43.75,
+          "total_pnl": 2.141,
+          "avg_pnl": 0.1338,
+          "avg_win": 0.8289,
+          "avg_loss": -0.4068,
+          "profit_factor": 1.5848,
+          "sharpe": 0.1839,
+          "avg_entry_price": 51.69,
+          "avg_edge": 0.0975,
+          "avg_confidence": 0.5893,
+          "exit_reasons": {
+            "expired": 9,
+            "stop_loss": 6,
+            "take_profit": 1
+          }
+        },
+        "avg_distance_pct": 0.246
+      },
+      "0.5-1%": {
+        "n": 18,
+        "win_rate_pct": 55.56,
+        "total_pnl": 1.538,
+        "avg_pnl": 0.0854,
+        "avg_win": 0.4496,
+        "avg_loss": -0.3698,
+        "profit_factor": 1.5199,
+        "sharpe": 0.1867,
+        "avg_entry_price": 48.19,
+        "avg_edge": 0.102,
+        "avg_confidence": 0.5911,
+        "exit_reasons": {
+          "take_profit": 4,
+          "expired": 9,
+          "confidence_decay": 3,
+          "stop_loss": 1,
+          "trailing_stop": 1
+        },
+        "in_the_money": {
+          "n": 8,
+          "win_rate_pct": 62.5,
+          "total_pnl": 1.134,
+          "avg_pnl": 0.1417,
+          "avg_win": 0.408,
+          "avg_loss": -0.302,
+          "profit_factor": 2.2517,
+          "sharpe": 0.3741,
+          "avg_entry_price": 44.36,
+          "avg_edge": 0.1234,
+          "avg_confidence": 0.588,
+          "exit_reasons": {
+            "confidence_decay": 1,
+            "take_profit": 2,
+            "expired": 3,
+            "stop_loss": 1,
+            "trailing_stop": 1
+          }
+        },
+        "out_of_the_money": {
+          "n": 10,
+          "win_rate_pct": 50.0,
+          "total_pnl": 0.404,
+          "avg_pnl": 0.0404,
+          "avg_win": 0.4912,
+          "avg_loss": -0.4104,
+          "profit_factor": 1.1969,
+          "sharpe": 0.0765,
+          "avg_entry_price": 51.25,
+          "avg_edge": 0.0849,
+          "avg_confidence": 0.5936,
+          "exit_reasons": {
+            "take_profit": 2,
+            "expired": 6,
+            "confidence_decay": 2
+          }
+        },
+        "avg_distance_pct": 0.711
+      },
+      "1-2%": {
+        "n": 32,
+        "win_rate_pct": 46.88,
+        "total_pnl": 1.075,
+        "avg_pnl": 0.0336,
+        "avg_win": 0.5222,
+        "avg_loss": -0.3975,
+        "profit_factor": 1.1591,
+        "sharpe": 0.0624,
+        "avg_entry_price": 50.8,
+        "avg_edge": 0.0803,
+        "avg_confidence": 0.5887,
+        "exit_reasons": {
+          "expired": 14,
+          "take_profit": 5,
+          "confidence_decay": 2,
+          "stop_loss": 8,
+          "trailing_stop": 3
+        },
+        "in_the_money": {
+          "n": 17,
+          "win_rate_pct": 47.06,
+          "total_pnl": 0.828,
+          "avg_pnl": 0.0487,
+          "avg_win": 0.5405,
+          "avg_loss": -0.3884,
+          "profit_factor": 1.2368,
+          "sharpe": 0.0875,
+          "avg_entry_price": 52.32,
+          "avg_edge": 0.075,
+          "avg_confidence": 0.5877,
+          "exit_reasons": {
+            "expired": 7,
+            "take_profit": 2,
+            "confidence_decay": 2,
+            "stop_loss": 4,
+            "trailing_stop": 2
+          }
+        },
+        "out_of_the_money": {
+          "n": 15,
+          "win_rate_pct": 46.67,
+          "total_pnl": 0.247,
+          "avg_pnl": 0.0165,
+          "avg_win": 0.5013,
+          "avg_loss": -0.4078,
+          "profit_factor": 1.0757,
+          "sharpe": 0.0307,
+          "avg_entry_price": 49.08,
+          "avg_edge": 0.0862,
+          "avg_confidence": 0.5899,
+          "exit_reasons": {
+            "expired": 7,
+            "take_profit": 3,
+            "stop_loss": 4,
+            "trailing_stop": 1
+          }
+        },
+        "avg_distance_pct": 1.442
+      },
+      "2%+": {
+        "n": 20,
+        "win_rate_pct": 45.0,
+        "total_pnl": 9.737,
+        "avg_pnl": 0.4869,
+        "avg_win": 1.5797,
+        "avg_loss": -0.4073,
+        "profit_factor": 3.1734,
+        "sharpe": 0.3631,
+        "avg_entry_price": 46.23,
+        "avg_edge": 0.1392,
+        "avg_confidence": 0.5824,
+        "exit_reasons": {
+          "expired": 11,
+          "take_profit": 2,
+          "confidence_decay": 4,
+          "stop_loss": 3
+        },
+        "in_the_money": {
+          "n": 9,
+          "win_rate_pct": 55.56,
+          "total_pnl": 5.548,
+          "avg_pnl": 0.6164,
+          "avg_win": 1.4464,
+          "avg_loss": -0.421,
+          "profit_factor": 4.2945,
+          "sharpe": 0.4738,
+          "avg_entry_price": 45.47,
+          "avg_edge": 0.1791,
+          "avg_confidence": 0.5468,
+          "exit_reasons": {
+            "take_profit": 2,
+            "expired": 4,
+            "confidence_decay": 1,
+            "stop_loss": 2
+          }
+        },
+        "out_of_the_money": {
+          "n": 11,
+          "win_rate_pct": 36.36,
+          "total_pnl": 4.189,
+          "avg_pnl": 0.3808,
+          "avg_win": 1.7462,
+          "avg_loss": -0.3994,
+          "profit_factor": 2.4982,
+          "sharpe": 0.267,
+          "avg_entry_price": 46.86,
+          "avg_edge": 0.1065,
+          "avg_confidence": 0.6115,
+          "exit_reasons": {
+            "expired": 7,
+            "confidence_decay": 3,
+            "stop_loss": 1
+          }
+        },
+        "avg_distance_pct": 2.965
+      },
+      "unknown": {
+        "n": 0
+      }
+    },
+    "bucket_ranking": [
+      {
+        "bucket": "0.5-1%",
+        "n": 18,
+        "win_rate_pct": 55.56,
+        "avg_pnl": 0.0854,
+        "total_pnl": 1.538,
+        "avg_distance": 0.711
+      },
+      {
+        "bucket": "1-2%",
+        "n": 32,
+        "win_rate_pct": 46.88,
+        "avg_pnl": 0.0336,
+        "total_pnl": 1.075,
+        "avg_distance": 1.442
+      },
+      {
+        "bucket": "2%+",
+        "n": 20,
+        "win_rate_pct": 45.0,
+        "avg_pnl": 0.4869,
+        "total_pnl": 9.737,
+        "avg_distance": 2.965
+      },
+      {
+        "bucket": "0-0.5%",
+        "n": 30,
+        "win_rate_pct": 43.33,
+        "avg_pnl": 0.0945,
+        "total_pnl": 2.836,
+        "avg_distance": 0.246
+      }
+    ]
+  },
+  "all_trades": {
+    "buckets": {
+      "0-0.5%": {
+        "n": 30,
+        "win_rate_pct": 43.33,
+        "total_pnl": 2.836,
+        "avg_pnl": 0.0945,
+        "avg_win": 0.6895,
+        "avg_loss": -0.3605,
+        "profit_factor": 1.4628,
+        "sharpe": 0.1537,
+        "avg_entry_price": 48.56,
+        "avg_edge": 0.0934,
+        "avg_confidence": 0.5973,
+        "exit_reasons": {
+          "expired": 17,
+          "take_profit": 3,
+          "confidence_decay": 3,
+          "stop_loss": 7
+        },
+        "in_the_money": {
+          "n": 14,
+          "win_rate_pct": 42.86,
+          "total_pnl": 0.695,
+          "avg_pnl": 0.0496,
+          "avg_win": 0.527,
+          "avg_loss": -0.3084,
+          "profit_factor": 1.2817,
+          "sharpe": 0.1038,
+          "avg_entry_price": 44.99,
+          "avg_edge": 0.0886,
+          "avg_confidence": 0.6065,
+          "exit_reasons": {
+            "expired": 8,
+            "take_profit": 2,
+            "confidence_decay": 3,
+            "stop_loss": 1
+          }
+        },
+        "out_of_the_money": {
+          "n": 16,
+          "win_rate_pct": 43.75,
+          "total_pnl": 2.141,
+          "avg_pnl": 0.1338,
+          "avg_win": 0.8289,
+          "avg_loss": -0.4068,
+          "profit_factor": 1.5848,
+          "sharpe": 0.1839,
+          "avg_entry_price": 51.69,
+          "avg_edge": 0.0975,
+          "avg_confidence": 0.5893,
+          "exit_reasons": {
+            "expired": 9,
+            "stop_loss": 6,
+            "take_profit": 1
+          }
+        },
+        "avg_distance_pct": 0.246
+      },
+      "0.5-1%": {
+        "n": 18,
+        "win_rate_pct": 55.56,
+        "total_pnl": 1.538,
+        "avg_pnl": 0.0854,
+        "avg_win": 0.4496,
+        "avg_loss": -0.3698,
+        "profit_factor": 1.5199,
+        "sharpe": 0.1867,
+        "avg_entry_price": 48.19,
+        "avg_edge": 0.102,
+        "avg_confidence": 0.5911,
+        "exit_reasons": {
+          "take_profit": 4,
+          "expired": 9,
+          "confidence_decay": 3,
+          "stop_loss": 1,
+          "trailing_stop": 1
+        },
+        "in_the_money": {
+          "n": 8,
+          "win_rate_pct": 62.5,
+          "total_pnl": 1.134,
+          "avg_pnl": 0.1417,
+          "avg_win": 0.408,
+          "avg_loss": -0.302,
+          "profit_factor": 2.2517,
+          "sharpe": 0.3741,
+          "avg_entry_price": 44.36,
+          "avg_edge": 0.1234,
+          "avg_confidence": 0.588,
+          "exit_reasons": {
+            "confidence_decay": 1,
+            "take_profit": 2,
+            "expired": 3,
+            "stop_loss": 1,
+            "trailing_stop": 1
+          }
+        },
+        "out_of_the_money": {
+          "n": 10,
+          "win_rate_pct": 50.0,
+          "total_pnl": 0.404,
+          "avg_pnl": 0.0404,
+          "avg_win": 0.4912,
+          "avg_loss": -0.4104,
+          "profit_factor": 1.1969,
+          "sharpe": 0.0765,
+          "avg_entry_price": 51.25,
+          "avg_edge": 0.0849,
+          "avg_confidence": 0.5936,
+          "exit_reasons": {
+            "take_profit": 2,
+            "expired": 6,
+            "confidence_decay": 2
+          }
+        },
+        "avg_distance_pct": 0.711
+      },
+      "1-2%": {
+        "n": 32,
+        "win_rate_pct": 46.88,
+        "total_pnl": 1.075,
+        "avg_pnl": 0.0336,
+        "avg_win": 0.5222,
+        "avg_loss": -0.3975,
+        "profit_factor": 1.1591,
+        "sharpe": 0.0624,
+        "avg_entry_price": 50.8,
+        "avg_edge": 0.0803,
+        "avg_confidence": 0.5887,
+        "exit_reasons": {
+          "expired": 14,
+          "take_profit": 5,
+          "confidence_decay": 2,
+          "stop_loss": 8,
+          "trailing_stop": 3
+        },
+        "in_the_money": {
+          "n": 17,
+          "win_rate_pct": 47.06,
+          "total_pnl": 0.828,
+          "avg_pnl": 0.0487,
+          "avg_win": 0.5405,
+          "avg_loss": -0.3884,
+          "profit_factor": 1.2368,
+          "sharpe": 0.0875,
+          "avg_entry_price": 52.32,
+          "avg_edge": 0.075,
+          "avg_confidence": 0.5877,
+          "exit_reasons": {
+            "expired": 7,
+            "take_profit": 2,
+            "confidence_decay": 2,
+            "stop_loss": 4,
+            "trailing_stop": 2
+          }
+        },
+        "out_of_the_money": {
+          "n": 15,
+          "win_rate_pct": 46.67,
+          "total_pnl": 0.247,
+          "avg_pnl": 0.0165,
+          "avg_win": 0.5013,
+          "avg_loss": -0.4078,
+          "profit_factor": 1.0757,
+          "sharpe": 0.0307,
+          "avg_entry_price": 49.08,
+          "avg_edge": 0.0862,
+          "avg_confidence": 0.5899,
+          "exit_reasons": {
+            "expired": 7,
+            "take_profit": 3,
+            "stop_loss": 4,
+            "trailing_stop": 1
+          }
+        },
+        "avg_distance_pct": 1.442
+      },
+      "2%+": {
+        "n": 420,
+        "win_rate_pct": 57.62,
+        "total_pnl": 109.0,
+        "avg_pnl": 0.2595,
+        "avg_win": 0.7511,
+        "avg_loss": -0.4088,
+        "profit_factor": 2.498,
+        "sharpe": 0.3294,
+        "avg_entry_price": 49.8,
+        "avg_edge": 0.1056,
+        "avg_confidence": 0.5778,
+        "exit_reasons": {
+          "take_profit": 73,
+          "expired": 217,
+          "stop_loss": 71,
+          "trailing_stop": 24,
+          "confidence_decay": 35
+        },
+        "in_the_money": {
+          "n": 241,
+          "win_rate_pct": 56.02,
+          "total_pnl": 37.635,
+          "avg_pnl": 0.1562,
+          "avg_win": 0.6081,
+          "avg_loss": -0.4195,
+          "profit_factor": 1.8464,
+          "sharpe": 0.2408,
+          "avg_entry_price": 52.01,
+          "avg_edge": 0.0915,
+          "avg_confidence": 0.5797,
+          "exit_reasons": {
+            "take_profit": 46,
+            "expired": 118,
+            "trailing_stop": 13,
+            "confidence_decay": 22,
+            "stop_loss": 42
+          }
+        },
+        "out_of_the_money": {
+          "n": 179,
+          "win_rate_pct": 59.78,
+          "total_pnl": 71.365,
+          "avg_pnl": 0.3987,
+          "avg_win": 0.9315,
+          "avg_loss": -0.3931,
+          "profit_factor": 3.5215,
+          "sharpe": 0.43,
+          "avg_entry_price": 46.84,
+          "avg_edge": 0.1247,
+          "avg_confidence": 0.5752,
+          "exit_reasons": {
+            "stop_loss": 29,
+            "expired": 99,
+            "trailing_stop": 11,
+            "confidence_decay": 13,
+            "take_profit": 27
+          }
+        },
+        "avg_distance_pct": 1258396.981
+      },
+      "unknown": {
+        "n": 0
+      }
+    },
+    "bucket_ranking": [
+      {
+        "bucket": "2%+",
+        "n": 420,
+        "win_rate_pct": 57.62,
+        "avg_pnl": 0.2595,
+        "total_pnl": 109.0,
+        "avg_distance": 1258396.981
+      },
+      {
+        "bucket": "0.5-1%",
+        "n": 18,
+        "win_rate_pct": 55.56,
+        "avg_pnl": 0.0854,
+        "total_pnl": 1.538,
+        "avg_distance": 0.711
+      },
+      {
+        "bucket": "1-2%",
+        "n": 32,
+        "win_rate_pct": 46.88,
+        "avg_pnl": 0.0336,
+        "total_pnl": 1.075,
+        "avg_distance": 1.442
+      },
+      {
+        "bucket": "0-0.5%",
+        "n": 30,
+        "win_rate_pct": 43.33,
+        "avg_pnl": 0.0945,
+        "total_pnl": 2.836,
+        "avg_distance": 0.246
+      }
+    ],
+    "note": "Includes non-BTC trades where distance = |btc_price - asset_strike| (cross-asset, less interpretable than BTC-only view)."
+  },
+  "by_asset": {
+    "BTC": {
+      "n": 100,
+      "btc_distance_meaningful": true,
+      "note": null,
+      "buckets": {
+        "0-0.5%": {
+          "n": 30,
+          "win_rate_pct": 43.33,
+          "avg_pnl": 0.0945,
+          "avg_distance_pct": 0.246
+        },
+        "0.5-1%": {
+          "n": 18,
+          "win_rate_pct": 55.56,
+          "avg_pnl": 0.0854,
+          "avg_distance_pct": 0.711
+        },
+        "1-2%": {
+          "n": 32,
+          "win_rate_pct": 46.88,
+          "avg_pnl": 0.0336,
+          "avg_distance_pct": 1.442
+        },
+        "2%+": {
+          "n": 20,
+          "win_rate_pct": 45.0,
+          "avg_pnl": 0.4869,
+          "avg_distance_pct": 2.965
+        }
+      }
+    },
+    "ETH": {
+      "n": 130,
+      "btc_distance_meaningful": false,
+      "note": "Strike is ETH price, not BTC \u2014 distance is cross-asset",
+      "buckets": {
+        "2%+": {
+          "n": 130,
+          "win_rate_pct": 60.77,
+          "avg_pnl": 0.3565,
+          "avg_distance_pct": 3202.606
+        }
+      }
+    },
+    "SOL": {
+      "n": 130,
+      "btc_distance_meaningful": false,
+      "note": "Strike is SOL price, not BTC \u2014 distance is cross-asset",
+      "buckets": {
+        "2%+": {
+          "n": 130,
+          "win_rate_pct": 62.31,
+          "avg_pnl": 0.2655,
+          "avg_distance_pct": 54997.044
+        }
+      }
+    },
+    "XRP": {
+      "n": 140,
+      "btc_distance_meaningful": false,
+      "note": "Strike is XRP price, not BTC \u2014 distance is cross-asset",
+      "buckets": {
+        "2%+": {
+          "n": 140,
+          "win_rate_pct": 52.14,
+          "avg_pnl": 0.1314,
+          "avg_distance_pct": 3721147.986
+        }
+      }
+    }
+  }
+}

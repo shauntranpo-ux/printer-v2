@@ -1,0 +1,568 @@
+{
+  "meta": {
+    "source": "synthetic_trades.json",
+    "total_trades": 500,
+    "trade_period": "2025-10-01 to 2026-04-09",
+    "assets_traded": [
+      "BTC",
+      "ETH",
+      "SOL",
+      "XRP"
+    ],
+    "price_sources": {
+      "BTC": "synthetic",
+      "ETH": "synthetic",
+      "SOL": "synthetic",
+      "XRP": "synthetic"
+    },
+    "regime_params": {
+      "ema_fast": 20,
+      "ema_slow": 50,
+      "atr_period": 14,
+      "note": "Regimes precomputed in synthetic data \u2014 no Binance fetch."
+    }
+  },
+  "btc_regime_candle_distribution": {},
+  "all_trades_by_btc_regime": {
+    "bear": {
+      "n": 129,
+      "win_rate_pct": 49.61,
+      "total_pnl": 19.974,
+      "avg_pnl": 0.1548,
+      "avg_win": 0.7176,
+      "avg_loss": -0.3992,
+      "profit_factor": 1.7697,
+      "sharpe": 0.202
+    },
+    "bull": {
+      "n": 211,
+      "win_rate_pct": 62.56,
+      "total_pnl": 63.516,
+      "avg_pnl": 0.301,
+      "avg_win": 0.7201,
+      "avg_loss": -0.3991,
+      "profit_factor": 3.0144,
+      "sharpe": 0.3949
+    },
+    "high_vol": {
+      "n": 86,
+      "win_rate_pct": 50.0,
+      "total_pnl": 12.433,
+      "avg_pnl": 0.1446,
+      "avg_win": 0.725,
+      "avg_loss": -0.4358,
+      "profit_factor": 1.6634,
+      "sharpe": 0.2015
+    },
+    "sideways": {
+      "n": 74,
+      "win_rate_pct": 55.41,
+      "total_pnl": 18.526,
+      "avg_pnl": 0.2504,
+      "avg_win": 0.754,
+      "avg_loss": -0.3754,
+      "profit_factor": 2.4955,
+      "sharpe": 0.3273
+    }
+  },
+  "by_asset": {
+    "BTC": {
+      "n": 100,
+      "price_source": "synthetic (precomputed)",
+      "by_own_regime": {
+        "bear": {
+          "n": 21,
+          "win_rate_pct": 33.33,
+          "total_pnl": 1.632,
+          "avg_pnl": 0.0777,
+          "avg_win": 1.0157,
+          "avg_loss": -0.3913,
+          "profit_factor": 1.2979,
+          "sharpe": 0.0765
+        },
+        "bull": {
+          "n": 37,
+          "win_rate_pct": 59.46,
+          "total_pnl": 6.548,
+          "avg_pnl": 0.177,
+          "avg_win": 0.5541,
+          "avg_loss": -0.3761,
+          "profit_factor": 2.1606,
+          "sharpe": 0.3342
+        },
+        "high_vol": {
+          "n": 21,
+          "win_rate_pct": 28.57,
+          "total_pnl": -2.642,
+          "avg_pnl": -0.1258,
+          "avg_win": 0.5347,
+          "avg_loss": -0.39,
+          "profit_factor": 0.5484,
+          "sharpe": -0.2632
+        },
+        "sideways": {
+          "n": 21,
+          "win_rate_pct": 57.14,
+          "total_pnl": 9.648,
+          "avg_pnl": 0.4594,
+          "avg_win": 1.0835,
+          "avg_loss": -0.3727,
+          "profit_factor": 3.8766,
+          "sharpe": 0.4427
+        }
+      },
+      "by_btc_regime": {
+        "bear": {
+          "n": 25,
+          "win_rate_pct": 32.0,
+          "total_pnl": 1.79,
+          "avg_pnl": 0.0716,
+          "avg_win": 1.0427,
+          "avg_loss": -0.3854,
+          "profit_factor": 1.2732,
+          "sharpe": 0.0738
+        },
+        "bull": {
+          "n": 38,
+          "win_rate_pct": 63.16,
+          "total_pnl": 8.318,
+          "avg_pnl": 0.2189,
+          "avg_win": 0.5558,
+          "avg_loss": -0.3586,
+          "profit_factor": 2.6566,
+          "sharpe": 0.4017
+        },
+        "high_vol": {
+          "n": 17,
+          "win_rate_pct": 23.53,
+          "total_pnl": -3.242,
+          "avg_pnl": -0.1907,
+          "avg_win": 0.5387,
+          "avg_loss": -0.4152,
+          "profit_factor": 0.3993,
+          "sharpe": -0.4047
+        },
+        "sideways": {
+          "n": 20,
+          "win_rate_pct": 55.0,
+          "total_pnl": 8.32,
+          "avg_pnl": 0.416,
+          "avg_win": 1.0613,
+          "avg_loss": -0.3727,
+          "profit_factor": 3.4806,
+          "sharpe": 0.4087
+        }
+      }
+    },
+    "ETH": {
+      "n": 130,
+      "price_source": "synthetic (precomputed)",
+      "by_own_regime": {
+        "bear": {
+          "n": 44,
+          "win_rate_pct": 61.36,
+          "total_pnl": 9.985,
+          "avg_pnl": 0.2269,
+          "avg_win": 0.6169,
+          "avg_loss": -0.3925,
+          "profit_factor": 2.4966,
+          "sharpe": 0.3642
+        },
+        "bull": {
+          "n": 45,
+          "win_rate_pct": 75.56,
+          "total_pnl": 30.711,
+          "avg_pnl": 0.6825,
+          "avg_win": 1.0142,
+          "avg_loss": -0.3429,
+          "profit_factor": 9.1418,
+          "sharpe": 0.7026
+        },
+        "high_vol": {
+          "n": 22,
+          "win_rate_pct": 40.91,
+          "total_pnl": 3.882,
+          "avg_pnl": 0.1765,
+          "avg_win": 1.1032,
+          "avg_loss": -0.4652,
+          "profit_factor": 1.642,
+          "sharpe": 0.1678
+        },
+        "sideways": {
+          "n": 19,
+          "win_rate_pct": 47.37,
+          "total_pnl": 1.77,
+          "avg_pnl": 0.0932,
+          "avg_win": 0.6782,
+          "avg_loss": -0.4334,
+          "profit_factor": 1.4084,
+          "sharpe": 0.1384
+        }
+      },
+      "by_btc_regime": {
+        "bear": {
+          "n": 48,
+          "win_rate_pct": 60.42,
+          "total_pnl": 12.686,
+          "avg_pnl": 0.2643,
+          "avg_win": 0.6959,
+          "avg_loss": -0.3945,
+          "profit_factor": 2.6924,
+          "sharpe": 0.3473
+        },
+        "bull": {
+          "n": 47,
+          "win_rate_pct": 72.34,
+          "total_pnl": 29.115,
+          "avg_pnl": 0.6195,
+          "avg_win": 0.9992,
+          "avg_loss": -0.3736,
+          "profit_factor": 6.9944,
+          "sharpe": 0.6564
+        },
+        "high_vol": {
+          "n": 18,
+          "win_rate_pct": 38.89,
+          "total_pnl": 1.82,
+          "avg_pnl": 0.1011,
+          "avg_win": 0.9879,
+          "avg_loss": -0.4632,
+          "profit_factor": 1.3572,
+          "sharpe": 0.104
+        },
+        "sideways": {
+          "n": 17,
+          "win_rate_pct": 52.94,
+          "total_pnl": 2.727,
+          "avg_pnl": 0.1604,
+          "avg_win": 0.6782,
+          "avg_loss": -0.4221,
+          "profit_factor": 1.8075,
+          "sharpe": 0.2356
+        }
+      }
+    },
+    "SOL": {
+      "n": 130,
+      "price_source": "synthetic (precomputed)",
+      "by_own_regime": {
+        "bear": {
+          "n": 35,
+          "win_rate_pct": 57.14,
+          "total_pnl": 5.628,
+          "avg_pnl": 0.1608,
+          "avg_win": 0.5667,
+          "avg_loss": -0.3805,
+          "profit_factor": 1.9862,
+          "sharpe": 0.2971
+        },
+        "bull": {
+          "n": 49,
+          "win_rate_pct": 63.27,
+          "total_pnl": 12.759,
+          "avg_pnl": 0.2604,
+          "avg_win": 0.6579,
+          "avg_loss": -0.4242,
+          "profit_factor": 2.6711,
+          "sharpe": 0.3572
+        },
+        "high_vol": {
+          "n": 21,
+          "win_rate_pct": 66.67,
+          "total_pnl": 8.669,
+          "avg_pnl": 0.4128,
+          "avg_win": 0.8407,
+          "avg_loss": -0.443,
+          "profit_factor": 3.7955,
+          "sharpe": 0.5335
+        },
+        "sideways": {
+          "n": 25,
+          "win_rate_pct": 64.0,
+          "total_pnl": 7.461,
+          "avg_pnl": 0.2984,
+          "avg_win": 0.6474,
+          "avg_loss": -0.3219,
+          "profit_factor": 3.5754,
+          "sharpe": 0.4338
+        }
+      },
+      "by_btc_regime": {
+        "bear": {
+          "n": 31,
+          "win_rate_pct": 54.84,
+          "total_pnl": 4.307,
+          "avg_pnl": 0.1389,
+          "avg_win": 0.5615,
+          "avg_loss": -0.3742,
+          "profit_factor": 1.8221,
+          "sharpe": 0.2571
+        },
+        "bull": {
+          "n": 52,
+          "win_rate_pct": 63.46,
+          "total_pnl": 12.787,
+          "avg_pnl": 0.2459,
+          "avg_win": 0.631,
+          "avg_loss": -0.4229,
+          "profit_factor": 2.5914,
+          "sharpe": 0.3451
+        },
+        "high_vol": {
+          "n": 24,
+          "win_rate_pct": 70.83,
+          "total_pnl": 10.826,
+          "avg_pnl": 0.4511,
+          "avg_win": 0.8232,
+          "avg_loss": -0.4527,
+          "profit_factor": 4.4162,
+          "sharpe": 0.6099
+        },
+        "sideways": {
+          "n": 23,
+          "win_rate_pct": 60.87,
+          "total_pnl": 6.597,
+          "avg_pnl": 0.2868,
+          "avg_win": 0.6781,
+          "avg_loss": -0.3219,
+          "profit_factor": 3.2772,
+          "sharpe": 0.4042
+        }
+      }
+    },
+    "XRP": {
+      "n": 140,
+      "price_source": "synthetic (precomputed)",
+      "by_own_regime": {
+        "bear": {
+          "n": 26,
+          "win_rate_pct": 46.15,
+          "total_pnl": 2.061,
+          "avg_pnl": 0.0793,
+          "avg_win": 0.7322,
+          "avg_loss": -0.4804,
+          "profit_factor": 1.3065,
+          "sharpe": 0.0988
+        },
+        "bull": {
+          "n": 65,
+          "win_rate_pct": 56.92,
+          "total_pnl": 14.184,
+          "avg_pnl": 0.2182,
+          "avg_win": 0.6861,
+          "avg_loss": -0.4001,
+          "profit_factor": 2.2661,
+          "sharpe": 0.2938
+        },
+        "high_vol": {
+          "n": 28,
+          "win_rate_pct": 50.0,
+          "total_pnl": 1.385,
+          "avg_pnl": 0.0495,
+          "avg_win": 0.5359,
+          "avg_loss": -0.437,
+          "profit_factor": 1.2264,
+          "sharpe": 0.0916
+        },
+        "sideways": {
+          "n": 21,
+          "win_rate_pct": 47.62,
+          "total_pnl": 0.768,
+          "avg_pnl": 0.0366,
+          "avg_win": 0.4843,
+          "avg_loss": -0.3705,
+          "profit_factor": 1.1885,
+          "sharpe": 0.0788
+        }
+      },
+      "by_btc_regime": {
+        "bear": {
+          "n": 25,
+          "win_rate_pct": 40.0,
+          "total_pnl": 1.191,
+          "avg_pnl": 0.0476,
+          "avg_win": 0.7855,
+          "avg_loss": -0.4443,
+          "profit_factor": 1.1787,
+          "sharpe": 0.0591
+        },
+        "bull": {
+          "n": 74,
+          "win_rate_pct": 55.41,
+          "total_pnl": 13.296,
+          "avg_pnl": 0.1797,
+          "avg_win": 0.6564,
+          "avg_loss": -0.4127,
+          "profit_factor": 1.9764,
+          "sharpe": 0.2494
+        },
+        "high_vol": {
+          "n": 27,
+          "win_rate_pct": 55.56,
+          "total_pnl": 3.029,
+          "avg_pnl": 0.1122,
+          "avg_win": 0.5405,
+          "avg_loss": -0.4232,
+          "profit_factor": 1.5964,
+          "sharpe": 0.2114
+        },
+        "sideways": {
+          "n": 14,
+          "win_rate_pct": 50.0,
+          "total_pnl": 0.882,
+          "avg_pnl": 0.063,
+          "avg_win": 0.5203,
+          "avg_loss": -0.3943,
+          "profit_factor": 1.3196,
+          "sharpe": 0.1246
+        }
+      }
+    }
+  },
+  "best_regime_asset_combos": [
+    {
+      "asset": "ETH",
+      "regime": "bull",
+      "n": 45,
+      "win_rate_pct": 75.56,
+      "total_pnl": 30.711,
+      "avg_pnl": 0.6825,
+      "sharpe": 0.7026
+    },
+    {
+      "asset": "SOL",
+      "regime": "high_vol",
+      "n": 21,
+      "win_rate_pct": 66.67,
+      "total_pnl": 8.669,
+      "avg_pnl": 0.4128,
+      "sharpe": 0.5335
+    },
+    {
+      "asset": "SOL",
+      "regime": "sideways",
+      "n": 25,
+      "win_rate_pct": 64.0,
+      "total_pnl": 7.461,
+      "avg_pnl": 0.2984,
+      "sharpe": 0.4338
+    },
+    {
+      "asset": "SOL",
+      "regime": "bull",
+      "n": 49,
+      "win_rate_pct": 63.27,
+      "total_pnl": 12.759,
+      "avg_pnl": 0.2604,
+      "sharpe": 0.3572
+    },
+    {
+      "asset": "ETH",
+      "regime": "bear",
+      "n": 44,
+      "win_rate_pct": 61.36,
+      "total_pnl": 9.985,
+      "avg_pnl": 0.2269,
+      "sharpe": 0.3642
+    },
+    {
+      "asset": "BTC",
+      "regime": "bull",
+      "n": 37,
+      "win_rate_pct": 59.46,
+      "total_pnl": 6.548,
+      "avg_pnl": 0.177,
+      "sharpe": 0.3342
+    },
+    {
+      "asset": "BTC",
+      "regime": "sideways",
+      "n": 21,
+      "win_rate_pct": 57.14,
+      "total_pnl": 9.648,
+      "avg_pnl": 0.4594,
+      "sharpe": 0.4427
+    },
+    {
+      "asset": "SOL",
+      "regime": "bear",
+      "n": 35,
+      "win_rate_pct": 57.14,
+      "total_pnl": 5.628,
+      "avg_pnl": 0.1608,
+      "sharpe": 0.2971
+    },
+    {
+      "asset": "XRP",
+      "regime": "bull",
+      "n": 65,
+      "win_rate_pct": 56.92,
+      "total_pnl": 14.184,
+      "avg_pnl": 0.2182,
+      "sharpe": 0.2938
+    },
+    {
+      "asset": "XRP",
+      "regime": "high_vol",
+      "n": 28,
+      "win_rate_pct": 50.0,
+      "total_pnl": 1.385,
+      "avg_pnl": 0.0495,
+      "sharpe": 0.0916
+    },
+    {
+      "asset": "XRP",
+      "regime": "sideways",
+      "n": 21,
+      "win_rate_pct": 47.62,
+      "total_pnl": 0.768,
+      "avg_pnl": 0.0366,
+      "sharpe": 0.0788
+    },
+    {
+      "asset": "ETH",
+      "regime": "sideways",
+      "n": 19,
+      "win_rate_pct": 47.37,
+      "total_pnl": 1.77,
+      "avg_pnl": 0.0932,
+      "sharpe": 0.1384
+    },
+    {
+      "asset": "XRP",
+      "regime": "bear",
+      "n": 26,
+      "win_rate_pct": 46.15,
+      "total_pnl": 2.061,
+      "avg_pnl": 0.0793,
+      "sharpe": 0.0988
+    },
+    {
+      "asset": "ETH",
+      "regime": "high_vol",
+      "n": 22,
+      "win_rate_pct": 40.91,
+      "total_pnl": 3.882,
+      "avg_pnl": 0.1765,
+      "sharpe": 0.1678
+    },
+    {
+      "asset": "BTC",
+      "regime": "bear",
+      "n": 21,
+      "win_rate_pct": 33.33,
+      "total_pnl": 1.632,
+      "avg_pnl": 0.0777,
+      "sharpe": 0.0765
+    },
+    {
+      "asset": "BTC",
+      "regime": "high_vol",
+      "n": 21,
+      "win_rate_pct": 28.57,
+      "total_pnl": -2.642,
+      "avg_pnl": -0.1258,
+      "sharpe": -0.2632
+    }
+  ]
+}
