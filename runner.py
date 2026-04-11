@@ -43,7 +43,7 @@ logging.basicConfig(
 log = logging.getLogger("runner")
 
 _CYCLE_SECONDS  = 15 * 60     # 15-minute interval
-_CYCLE_BUFFER   = 120          # seconds after boundary before first tick (2-min price discovery)
+_CYCLE_BUFFER   = 180          # seconds after boundary before first tick (3-min buffer for order books to populate)
 _MAX_MARKETS    = 10           # top N markets evaluated per cycle
 _STOP_FILE      = Path("STOP")
 _START_FILE     = Path("START")  # must exist for live trading; absent = analysis-only (off mode)
@@ -467,15 +467,25 @@ class TradingBot:
                 "Market %s too new (%.0fs in, need 120s) — skipping", ticker, time_in
             )
             return
-        if time_in > 300:
+        if time_in > 420:
             log.info(
-                "Market %s too far into session (%.0fs in, max 300s) — skipping", ticker, time_in
+                "Market %s too far into session (%.0fs in, max 420s) — skipping", ticker, time_in
             )
             return
         if time_left < 180:
             log.info(
                 "Market %s too close to expiry (%.0fs left, need 180s) — skipping",
                 ticker, time_left,
+            )
+            return
+
+        # Pre-flight liquidity check — both ask prices still 0 after order book refresh.
+        # This happens on brand-new markets (first ~2 min) before liquidity providers
+        # have posted any bids. Skip without calling the ensemble (saves AI API tokens).
+        if not market.get("yes_ask") and not market.get("no_ask"):
+            log.info(
+                "Market %s: ask prices unavailable (new market, empty order book) — skipping",
+                ticker,
             )
             return
 
