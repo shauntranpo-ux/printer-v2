@@ -92,6 +92,8 @@ class TradingBot:
         self._last_day: str = ""
         # All signals produced this cycle — accumulated for the dashboard
         self._cycle_signals: list[dict] = []
+        # Markets found this cycle (non-zero = found but may have been empty)
+        self._cycle_markets_found: int = 0
 
     # ------------------------------------------------------------------
     # Startup sequence
@@ -221,6 +223,24 @@ class TradingBot:
                 # Daily summary at UTC midnight
                 if self._is_new_day():
                     await self._send_daily_summary()
+
+                # Short-cycle retry: when markets were found but ALL had empty order books,
+                # wait 90s and scan again instead of skipping the whole 15-min window.
+                # Kalshi late-night sessions can take 4-6 min for the first bids to appear.
+                _EMPTY_RETRY_WAIT = 90
+                _EMPTY_MAX_RETRIES = 3
+                for _attempt in range(_EMPTY_MAX_RETRIES):
+                    if self._cycle_signals or self._cycle_markets_found == 0:
+                        break   # signals generated, or genuinely no markets open
+                    log.info(
+                        "All %d markets had empty order books — retrying in %ds (%d/%d)",
+                        self._cycle_markets_found, _EMPTY_RETRY_WAIT,
+                        _attempt + 1, _EMPTY_MAX_RETRIES,
+                    )
+                    await asyncio.sleep(_EMPTY_RETRY_WAIT)
+                    await self.run_cycle()
+                    if self._is_new_day():
+                        await self._send_daily_summary()
 
                 # Sleep to next 15m boundary + buffer
                 await self._sleep_until_next_cycle()
@@ -366,6 +386,7 @@ class TradingBot:
                     asset=asset, current_candle=asset_cur_candle,
                 )
 
+        self._cycle_markets_found = len(all_markets_found)
         print(f"Total markets scanned: {len(all_markets_found)} across {len(supported_assets)} assets")
 
         # Persist market watch for dashboard — save all signals from this cycle
