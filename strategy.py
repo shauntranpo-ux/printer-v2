@@ -138,6 +138,14 @@ class Strategy:
         ask_cents    = market.get("yes_ask" if direction == "yes" else "no_ask") or 50
         market_price = ask_cents / 100.0
 
+        # Price cap: refuse to buy a contract priced ≥ 85¢ — too expensive, minimal upside
+        if ask_cents >= 85:
+            log.info(
+                "Skipping %s — %s ask is %d¢ (≥85¢ price cap)",
+                ticker, direction.upper(), ask_cents,
+            )
+            return None
+
         # P(win): YES trades use P(YES), NO trades use 1-P(YES)
         p_win = (ensemble_result.consensus_prob
                  if direction == "yes"

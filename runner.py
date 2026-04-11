@@ -83,9 +83,6 @@ class TradingBot:
         self._wait_list: dict[str, float] = {}
         # Current UTC date string — used to detect midnight for daily summary
         self._last_day: str = ""
-        # Streak protection: track last 5 trade outcomes (True=win)
-        self._recent_results: list[bool] = []
-        self._pause_cycles: int = 0        # cycles to skip after 5-loss streak
         # All signals produced this cycle — accumulated for the dashboard
         self._cycle_signals: list[dict] = []
 
@@ -242,29 +239,11 @@ class TradingBot:
         print(f"=== CYCLE START === {cycle_start.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         log.info("--- Cycle %s ---", cycle_start.strftime("%Y-%m-%d %H:%M:%S UTC"))
 
-        # Step 1 — exits (update streak from closed trades)
+        # Step 1 — exits
         open_trades = await self.db.get_open_trades()
         if open_trades:
-            closed = await self.strategy.check_exits(open_trades)
-            for t in closed:
-                if t.pnl_dollars is not None:
-                    self._recent_results.append(t.pnl_dollars > 0)
-                    if len(self._recent_results) > 5:
-                        self._recent_results.pop(0)
-                    if len(self._recent_results) == 5 and not any(self._recent_results):
-                        self._pause_cycles = 2
-                        log.warning("5 loss streak — pausing 2 cycles")
-                        await self.telegram.send_error(
-                            "5 consecutive losses detected — pausing trading for 2 cycles",
-                            "Loss streak protection",
-                        )
+            await self.strategy.check_exits(open_trades)
             open_trades = await self.db.get_open_trades()
-
-        # Streak hard pause
-        if self._pause_cycles > 0:
-            self._pause_cycles -= 1
-            log.info("Loss streak pause: %d cycles remaining", self._pause_cycles + 1)
-            return
 
         # Step 2 — position limit
         if not await self.strategy.can_open_position():
@@ -291,24 +270,7 @@ class TradingBot:
         print(f"Balance: ${balance:.2f}" if balance is not None else "Balance: unavailable")
         print(f"Open positions: {len(open_trades)}")
 
-        # ── Time-based size multiplier ────────────────────────────────────────
-        hour = cycle_start.hour
-        if settings.RESPECT_TIME_FILTERS:
-            if 13 <= hour < 21:   time_mult = 1.0
-            elif 0 <= hour < 4:   time_mult = 0.75
-            else:                 time_mult = 0.50
-        else:
-            time_mult = 1.0
-
-        # ── Streak soft multiplier ────────────────────────────────────────────
-        recent_losses = sum(1 for w in self._recent_results[-3:] if not w)
-        if recent_losses >= 3:
-            streak_mult = 0.25
-            log.warning("Loss streak protection: bet size at 25%%")
-        else:
-            streak_mult = 1.0
-
-        size_mult = time_mult * streak_mult
+        size_mult = 1.0
 
         # Quick-lookup set of tickers we already hold
         open_tickers = {t.market_ticker for t in open_trades}
@@ -468,7 +430,10 @@ class TradingBot:
             log.warning("Invalid close_time for %s — skipping", ticker)
             return
 
-        # Time window guard: don't trade in the first 2 min or last 3 min of the market
+        # Time window guard
+        # Only enter between 2 min and 5 min into the 15m window.
+        # This prevents stale mid-session entries (e.g. bot restarted at minute 8).
+        # Also blocks the last 3 min before expiry.
         now_utc      = datetime.now(timezone.utc)
         market_open  = close_dt - timedelta(minutes=15)
         time_in      = (now_utc - market_open).total_seconds()
@@ -477,6 +442,11 @@ class TradingBot:
         if time_in < 120:
             log.info(
                 "Market %s too new (%.0fs in, need 120s) — skipping", ticker, time_in
+            )
+            return
+        if time_in > 300:
+            log.info(
+                "Market %s too far into session (%.0fs in, max 300s) — skipping", ticker, time_in
             )
             return
         if time_left < 180:
