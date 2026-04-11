@@ -620,7 +620,7 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
         t0 = time.monotonic()
         msg = await self._anthropic_client.messages.create(  # type: ignore[union-attr]
             model      = settings.CLAUDE_MODEL,
-            max_tokens = 300,
+            max_tokens = 600,
             temperature= 0.5,
             system     = _claude_prompt(symbol),
             messages   = [{"role": "user", "content": context}],
@@ -633,7 +633,7 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
         resp = await self._openai_client.chat.completions.create(  # type: ignore[union-attr]
             model           = settings.GPT_MODEL,
             temperature     = 0.5,
-            max_tokens      = 300,
+            max_tokens      = 600,
             response_format = {"type": "json_object"},
             messages        = [
                 {"role": "system", "content": _gpt_prompt(symbol)},
