@@ -91,6 +91,8 @@ class TradingBot:
         self._last_day: str = ""
         # All signals produced this cycle — accumulated for the dashboard
         self._cycle_signals: list[dict] = []
+        # Trades actually placed this cycle
+        self._cycle_trades_placed: int = 0
         # Markets found this cycle (non-zero = found but may have been empty)
         self._cycle_markets_found: int = 0
         # Markets that passed timing checks and were actually evaluated
@@ -235,8 +237,8 @@ class TradingBot:
                     now_ts           = time.time()
                     boundary         = int(now_ts // _CYCLE_SECONDS) * _CYCLE_SECONDS
                     time_into_window = now_ts - boundary
-                    if time_into_window >= _MAX_TIME_IN or self._cycle_signals:
-                        break   # past entry window, or already got a signal
+                    if time_into_window >= _MAX_TIME_IN or self._cycle_trades_placed:
+                        break   # past entry window, or a trade was placed
                     time_remaining = _MAX_TIME_IN - time_into_window
                     sleep_for = min(_RETRY_INTERVAL, max(15, time_remaining - 10))
                     log.info(
@@ -272,6 +274,7 @@ class TradingBot:
         """
         cycle_start = datetime.now(timezone.utc)
         self._cycle_signals = []         # fresh slate for this cycle's dashboard signals
+        self._cycle_trades_placed = 0    # actual orders placed this cycle
         self._cycle_markets_evaluated = 0  # markets that passed timing checks this cycle
         self._wait_list.clear()          # clear stale wait entries from previous 15m window
         Path("heartbeat.txt").write_text(cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"))
@@ -567,10 +570,11 @@ class TradingBot:
 
         # Check 1: Direction (always has one based on consensus_prob)
         dir_label = "UP" if result.consensus_prob > 0.5 else "DOWN"
+        dir_pct   = result.consensus_prob * 100 if result.consensus_prob > 0.5 else (1 - result.consensus_prob) * 100
         checks.append({
             "id": "signal", "label": "Direction",
             "passed": True,
-            "detail": f"{dir_label} · {result.consensus_prob*100:.0f}%",
+            "detail": f"{dir_label} · {dir_pct:.0f}%",
         })
 
         # Check 2: Models agree (action != WAIT means spread is within MAX_MODEL_SPREAD)
@@ -675,26 +679,33 @@ class TradingBot:
                 "✅ Trade entered: %s %s $%.2f",
                 trade.market_ticker, trade.direction, trade.size_dollars,
             )
+            self._cycle_trades_placed += 1
             open_tickers.add(ticker)   # guard against double-entry this cycle
 
     async def _store_last_signal(
         self, ticker: str, result: Any, checks: list[dict]
     ) -> None:
         """Accumulate this market's signal into _cycle_signals for the dashboard."""
+        def _directional_prob(probability: float, direction: str) -> float:
+            """Convert raw P(YES) to probability of the predicted direction."""
+            p = probability * 100
+            return round(100 - p if direction == "NO" else p, 1)
+
         def _mdata(r: Any) -> dict | None:
             if r is None:
                 return None
             return {
-                "prob":      round(r.probability * 100, 1),
+                "prob":      _directional_prob(r.probability, r.direction),
                 "direction": r.direction,
                 "reasoning": r.reasoning[:120],
             }
 
+        consensus_dir = result.direction.upper() if result.direction != "flat" else "FLAT"
         signal = {
             "ticker":      ticker,
-            "direction":   result.direction.upper() if result.direction != "flat" else "FLAT",
+            "direction":   consensus_dir,
             "action":      result.action,
-            "prob":        round(result.raw_prob * 100, 1),
+            "prob":        _directional_prob(result.raw_prob, consensus_dir),
             "confidence":  round(result.confidence * 100, 1),
             "skip_reason": result.skip_reason,
             "checks":      checks,
