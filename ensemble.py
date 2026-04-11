@@ -36,23 +36,27 @@ _CALL_TIMEOUT = 30.0   # seconds before a model is marked as failed
 
 def _system_prompt(symbol: str) -> str:
     return (
-        f"You are an expert {symbol} short-term trader specializing in 15-minute binary outcomes. "
-        f"You analyze price action, momentum, RSI, candle patterns, and order flow to make "
-        f"high-conviction directional calls. "
-        f"You are NOT a hedge — you commit to a view. When data supports a direction, "
-        f"your probability should reflect that conviction (0.65–0.85 for strong signals, "
-        f"0.55–0.65 for moderate signals). "
-        f"Only return 0.45–0.55 when data is genuinely contradictory with no clear edge. "
+        f"You are a professional {symbol} scalper making 15-minute binary option calls. "
+        f"Your job is to read price action and output a probability — NOT to hedge. "
+        f"Use this scoring table to set your probability:\n\n"
+        f"  Score each signal: Trend UPTREND=+2, DOWNTREND=-2, SIDEWAYS=0\n"
+        f"                     Candle bias: bullish candles above 50% = +1, below 50% = -1\n"
+        f"                     RSI >65 = -1 (overbought, fading), RSI <35 = +1 (oversold, bouncing)\n"
+        f"                     Momentum >+0.4 = +2, +0.1 to +0.4 = +1, -0.1 to +0.1 = 0, -0.1 to -0.4 = -1, <-0.4 = -2\n"
+        f"                     Order book: strong BUY = +2, mild BUY = +1, balanced = 0, mild SELL = -1, strong SELL = -2\n\n"
+        f"  Map total score → P(YES):\n"
+        f"    ≥ +5 → 0.82   +3 to +4 → 0.72   +1 to +2 → 0.60   0 → 0.50\n"
+        f"    -1 to -2 → 0.40   -3 to -4 → 0.28   ≤ -5 → 0.18\n\n"
+        f"Apply this framework literally. Do not soften outputs toward 0.50. "
         f"Respond in JSON only."
     )
 
 _JSON_SCHEMA_HINT = (
     '\n\nRespond with ONLY this JSON — no other text:\n'
-    '{"direction": "YES" or "NO", "probability": 0.0-1.0, "confidence": 0.0-1.0, "reasoning": "one sentence"}\n'
+    '{"direction": "YES" or "NO", "probability": 0.0-1.0, "reasoning": "score: X — one sentence"}\n'
     'probability = P(YES) = probability price closes ABOVE strike.\n'
     'direction "YES" → probability > 0.50 | direction "NO" → probability < 0.50\n'
-    'COMMIT to a view. If trend/momentum is clear, show it: 0.68, 0.72, 0.30, 0.25 etc.\n'
-    'DO NOT default to 0.50 unless signals are genuinely mixed.'
+    'Use the scoring table. Show your score in reasoning. Do NOT output 0.50 unless score is exactly 0.'
 )
 
 
@@ -320,12 +324,13 @@ Analyze trend, RSI, candle bias, momentum, and order book. Make a DECISIVE call.
             )
 
         probability = float(data.get("probability", -1))
-        confidence  = float(data.get("confidence", -1))
-
         if not 0.0 <= probability <= 1.0:
             raise ValueError(f"{model_name}: probability {probability} out of [0,1]")
-        if not 0.0 <= confidence <= 1.0:
-            raise ValueError(f"{model_name}: confidence {confidence} out of [0,1]")
+
+        # Derive confidence from how far probability is from 0.50.
+        # Self-reported confidence fields make models hedge twice — this is more meaningful.
+        # 0.50 → 0.0 confidence, 0.75 → 0.50, 0.90 → 0.80, 1.0 → 1.0
+        confidence = abs(probability - 0.5) * 2.0
 
         # Normalize: probability must always represent P(YES).
         # If a model returned P(direction) instead — e.g. NO with 0.70 — flip it.
@@ -355,7 +360,7 @@ Analyze trend, RSI, candle bias, momentum, and order book. Make a DECISIVE call.
         msg = await self._anthropic_client.messages.create(  # type: ignore[union-attr]
             model      = settings.CLAUDE_MODEL,
             max_tokens = 300,
-            temperature= 0.3,
+            temperature= 0.5,
             system     = _system_prompt(symbol),
             messages   = [{"role": "user", "content": context}],
         )
@@ -366,7 +371,7 @@ Analyze trend, RSI, candle bias, momentum, and order book. Make a DECISIVE call.
         t0 = time.monotonic()
         resp = await self._openai_client.chat.completions.create(  # type: ignore[union-attr]
             model           = settings.GPT_MODEL,
-            temperature     = 0.3,
+            temperature     = 0.5,
             max_tokens      = 300,
             response_format = {"type": "json_object"},
             messages        = [
@@ -412,7 +417,7 @@ Analyze trend, RSI, candle bias, momentum, and order book. Make a DECISIVE call.
                     contents=context,
                     config=types.GenerateContentConfig(
                         system_instruction=_system_prompt(symbol),
-                        temperature=0.3,
+                        temperature=0.5,
                     ),
                 )
                 if model != settings.GEMINI_MODEL and model not in EnsembleEngine._GEMINI_DEAD:
@@ -440,7 +445,7 @@ Analyze trend, RSI, candle bias, momentum, and order book. Make a DECISIVE call.
         t0 = time.monotonic()
         resp = await self._deepseek_client.chat.completions.create(  # type: ignore[union-attr]
             model      = settings.DEEPSEEK_MODEL,
-            temperature= 0.3,
+            temperature= 0.5,
             max_tokens = 512,
             messages   = [
                 {"role": "system", "content": _system_prompt(symbol)},
