@@ -310,6 +310,15 @@ class EnsembleEngine:
         else:
             live_str = "  (live candle building — use historical data above)"
 
+        if market.yes_price and market.no_price:
+            kalshi_prices = f"YES={market.yes_price}¢  NO={market.no_price}¢"
+        elif market.yes_price:
+            kalshi_prices = f"YES={market.yes_price}¢  NO={100 - market.yes_price}¢ (derived)"
+        elif market.no_price:
+            kalshi_prices = f"YES={100 - market.no_price}¢ (derived)  NO={market.no_price}¢"
+        else:
+            kalshi_prices = "ORDER BOOK LOADING — no market price yet (base your answer on strike distance only)"
+
         return f"""=== {sym}/USD — 15-MINUTE BINARY MARKET ===
 Price now:    ${price:,.4f}
 Strike (YES threshold): ${strike:,.4f}
@@ -317,7 +326,7 @@ Distance:     {strike_note}
 ★ STARTING PROBABILITY (from strike distance): {starting_prob:.2f}
   → Adjust ±0.05 per indicator signal, then output your final probability.
 Time left:    {mins_left} min until expiry
-Kalshi market: YES={market.yes_price}¢  NO={market.no_price}¢
+Kalshi market: {kalshi_prices}
 
 === PRICE ACTION ===
 Current candle (open → now): {chg_cur}
