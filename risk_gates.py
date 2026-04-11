@@ -58,7 +58,7 @@ class RiskGates:
         asset:           str = "BTC",
     ) -> GateResult:
         """
-        Run all 5 gates in order. Short-circuits on the first failure.
+        Run all 3 gates in order. Short-circuits on the first failure.
         Returns GateResult with passed=True only when ALL gates pass.
         """
         gates = [
@@ -80,7 +80,7 @@ class RiskGates:
                     checked_at   = datetime.now(timezone.utc),
                 )
 
-        log.info("All 3 risk gates passed")
+        log.info("All 3 risk gates passed (drawdown / confidence / staleness)")
         return GateResult(
             passed       = True,
             failed_gate  = None,

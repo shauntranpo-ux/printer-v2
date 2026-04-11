@@ -299,9 +299,13 @@ class Database:
                         claude_prob         REAL,
                         gpt_prob            REAL,
                         gemini_prob         REAL,
-                        deepseek_prob       REAL
+                        deepseek_prob       REAL,
+                        asset_symbol        TEXT,
+                        tp_order_id         TEXT,
+                        sl_order_id         TEXT
                     )
                 """)
+                # Use COALESCE for newer columns that may not exist in old rows
                 await db.execute("""
                     INSERT INTO trades_migrated
                         SELECT id, timestamp, market_ticker, direction, entry_price,
@@ -309,7 +313,8 @@ class Database:
                                ensemble_confidence, model_spread, btc_price_at_entry,
                                btc_momentum, status, exit_price, exit_reason,
                                pnl_dollars, closed_at,
-                               peak_pnl_pct, claude_prob, gpt_prob, gemini_prob, deepseek_prob
+                               peak_pnl_pct, claude_prob, gpt_prob, gemini_prob, deepseek_prob,
+                               asset_symbol, tp_order_id, sl_order_id
                         FROM trades
                 """)
                 await db.execute("DROP TABLE trades")
@@ -438,6 +443,15 @@ class Database:
                 (tp_order_id, sl_order_id, trade_id),
             )
             await db.commit()
+
+    async def get_trade(self, trade_id: int) -> TradeRow | None:
+        """Fetch a single trade by id. Returns None if not found."""
+        async with self._conn() as db:
+            cursor = await db.execute(
+                "SELECT * FROM trades WHERE id = ?", (trade_id,)
+            )
+            row = await cursor.fetchone()
+            return TradeRow(**dict(row)) if row else None
 
     async def get_open_trades(self) -> list[TradeRow]:
         """All trades with status='open', ordered oldest first."""

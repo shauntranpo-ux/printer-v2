@@ -37,6 +37,10 @@ class Strategy:
         self._kalshi   = kalshi_client
         self._db       = database
         self._telegram = telegram
+        # In-memory set of trade IDs currently being closed.
+        # Prevents concurrent calls (main cycle + exit monitor) from both
+        # entering _close_trade for the same trade before either commits to DB.
+        self._closing_trades: set[int] = set()
 
     # ------------------------------------------------------------------
     # Kelly sizing
@@ -365,12 +369,12 @@ class Strategy:
         Evaluate every open trade for exit conditions.
 
         Triggers checked per trade (first match wins):
+          0. Resting TP limit order already filled by Kalshi → take_profit
           1. Market resolved → expired
           2. Close time < now + 2min → let expire naturally (skip)
-          3. pnl_pct >= TAKE_PROFIT_PCT (+55%) → take_profit
+          3. pnl_pct >= TAKE_PROFIT_PCT (+65%) → take_profit (polling fallback)
           4. Trailing stop activates at peak >= TRAILING_STOP_LOCK_PCT
-          5. pnl_pct <= -STOP_LOSS_PCT (80%) → stop_loss
-             e.g. entry 60¢ → triggers at 12¢ (60 × 0.20 = 12)
+          5. pnl_pct <= -STOP_LOSS_PCT (70%) → stop_loss
           6. current bid < CONFIDENCE_DECAY_EXIT × 100¢ (20¢) → decay
 
         Returns the list of trades closed this cycle.
@@ -524,38 +528,68 @@ class Strategy:
         skip_sell:   bool = False,  # True when resting order already filled (TP)
     ) -> TradeRow:
         """
-        Place a market sell order with up to 4 retries (1 s between attempts).
+        Close a trade: cancel resting TP order, place market sell (unless
+        already filled or expired), update DB, send Telegram alert.
+
         Uses actual fill price for P&L; falls back to current bid estimate.
         Sell failures are logged but never block the database update —
         the position resolves naturally at market expiry.
-        """
-        final_exit_price = exit_price   # updated to fill price if order confirms
 
-        # Cancel the resting TP order if we're closing for a different reason
-        # (SL/decay/expiry) to avoid a dangling resting order on Kalshi.
-        if not skip_sell and trade.tp_order_id and exit_reason != "take_profit":
+        skip_sell=True → resting TP was already filled by Kalshi; skip sell.
+        """
+        # ── Concurrency guard (in-memory) ──────────────────────────────────
+        # Python/asyncio is single-threaded: the check + add below are atomic
+        # (no await between them). This prevents the main cycle and exit monitor
+        # from both entering here for the same trade before either commits to DB.
+        if trade.id in self._closing_trades:
+            log.warning(
+                "Trade %d: close already in progress — skipping (concurrency guard)",
+                trade.id,
+            )
+            return trade
+        self._closing_trades.add(trade.id)
+
+        try:
+            return await self._do_close(trade, exit_price, exit_reason, skip_sell)
+        finally:
+            self._closing_trades.discard(trade.id)
+
+    async def _do_close(
+        self,
+        trade:       TradeRow,
+        exit_price:  int,
+        exit_reason: str,
+        skip_sell:   bool,
+    ) -> TradeRow:
+        final_exit_price = exit_price
+
+        # ── Cancel resting TP order ─────────────────────────────────────────
+        # Always cancel when we're about to do a market sell, so Kalshi doesn't
+        # auto-fill the resting order on top of our market sell (double-sell).
+        # skip_sell=True means the resting order was ALREADY filled — nothing to cancel.
+        if not skip_sell and trade.tp_order_id:
             try:
                 await self._kalshi.cancel_order(trade.tp_order_id)
                 log.info("Trade %d: cancelled resting TP order %s", trade.id, trade.tp_order_id[:8])
             except Exception as exc:
                 log.warning("Trade %d: failed to cancel TP order %s: %s", trade.id, trade.tp_order_id[:8], exc)
 
-        # Race condition guard: re-fetch from DB to ensure trade is still open.
-        # Both the main cycle and exit monitor call check_exits independently —
-        # without this check a trade could be sold twice if both calls race.
+        # ── DB race guard ───────────────────────────────────────────────────
+        # Belt-and-suspenders: verify the trade is still open in DB before
+        # placing any sell order (e.g. a prior cycle already closed it).
         fresh = await self._db.get_trade(trade.id)
         if fresh is None or fresh.status != "open":
             log.warning(
-                "Trade %d: already closed/expired in DB (status=%s) — aborting sell (race guard)",
+                "Trade %d: already closed/expired in DB (status=%s) — aborting (DB race guard)",
                 trade.id, fresh.status if fresh else "not found",
             )
             return trade
 
+        # ── Market sell ─────────────────────────────────────────────────────
         if not skip_sell and exit_reason != "expired":
-            # Retry up to 4 times only on API exception.
-            # YES and NO positions are symmetric: we always sell OUR side at market
-            # (yes_bids for YES trades, no_bids for NO trades). P&L = (fill - entry).
-            _MAX_ATTEMPTS = 5   # 1 initial + 4 retries on API exception
+            # Retry up to 4 times on API exception only.
+            # YES and NO positions are symmetric: we always sell OUR side at market.
+            _MAX_ATTEMPTS = 5
             for attempt in range(_MAX_ATTEMPTS):
                 if attempt > 0:
                     await asyncio.sleep(1.0)
@@ -617,6 +651,7 @@ class Strategy:
                 )
                 break  # record at estimated price and close in DB regardless
 
+        # ── Persist result ──────────────────────────────────────────────────
         pnl       = (final_exit_price - trade.entry_price) * trade.contracts / 100.0
         closed_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         db_status = "expired" if exit_reason == "expired" else "closed"

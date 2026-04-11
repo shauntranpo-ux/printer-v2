@@ -143,7 +143,7 @@ def _raise_for_response(resp: httpx.Response) -> None:
             f"Rate limited — retry after {retry_after}s", retry_after=retry_after
         )
 
-    if status in (400, 403):
+    if status == 400:
         lc = (code + message).lower()
         if "insufficient" in lc or "funds" in lc or "balance" in lc:
             raise KalshiInsufficientFundsError(
@@ -580,21 +580,38 @@ class KalshiClient:
             raise
 
     async def get_order(self, order_id: str) -> dict:
-        """Fetch the current state of a single order."""
+        """Fetch the current state of a single order, including actual fill price."""
         data  = await self._get(f"/portfolio/orders/{order_id}")
         order = data.get("order", data)
-        yes_p = order.get("yes_price", 0) or 0
-        no_p  = order.get("no_price",  0) or 0
+        status = order.get("status", "unknown")
+
+        # Try to get actual fill price from fills array first
+        fills   = order.get("fills", [])
+        fill_yes_p: int | None = None
+        fill_no_p:  int | None = None
+        if fills:
+            fill_yes_p = fills[0].get("yes_price")
+            fill_no_p  = fills[0].get("no_price")
+            # Derive missing side
+            if fill_yes_p and not fill_no_p:
+                fill_no_p = 100 - fill_yes_p
+            elif fill_no_p and not fill_yes_p:
+                fill_yes_p = 100 - fill_no_p
+
+        # Fall back to order-level price (limit price for resting orders)
+        yes_p = fill_yes_p or order.get("yes_price", 0) or 0
+        no_p  = fill_no_p  or order.get("no_price",  0) or 0
         # Derive missing side price if only one is present
         if yes_p and not no_p:
             no_p = 100 - yes_p
         elif no_p and not yes_p:
             yes_p = 100 - no_p
+
         return {
             "order_id":        order.get("order_id", ""),
             "ticker":          order.get("ticker", ""),
             "side":            order.get("side", ""),
-            "status":          order.get("status", "unknown"),
+            "status":          status,
             "count":           order.get("count", 0),
             "quantity_filled": order.get("quantity_filled", 0),
             "yes_price":       yes_p,

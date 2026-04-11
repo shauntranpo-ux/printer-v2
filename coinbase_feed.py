@@ -549,7 +549,6 @@ class CoinbaseFeed:
 
         import aiohttp   # optional import — only needed if REST assets configured
 
-        self._running = True
         while self._running:
             for asset, symbol in self._binance_assets.items():
                 try:
