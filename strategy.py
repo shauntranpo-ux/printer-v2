@@ -134,11 +134,13 @@ class Strategy:
             return None
 
         # Step 1 — edge check + flat bet sizing
-        # Use `or 50` so that explicit 0 from the API also falls back to 50¢
         ask_cents = market.get("yes_ask" if direction == "yes" else "no_ask") or 0
         if ask_cents == 0:
-            ask_cents = 50
-            log.info("%s: ask unknown — using 50¢ midpoint for sizing", ticker)
+            log.info(
+                "Skipping %s — no ask price yet (order book empty), can't calculate real edge",
+                ticker,
+            )
+            return None
         market_price = ask_cents / 100.0
 
         # Price cap: refuse to buy a contract priced ≥ 77¢ — too expensive, minimal upside
