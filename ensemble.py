@@ -689,7 +689,6 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
                     config=types.GenerateContentConfig(
                         system_instruction=_gemini_prompt(symbol),
                         temperature=0.5,
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
                     ),
                 )
                 if model != settings.GEMINI_MODEL and model not in EnsembleEngine._GEMINI_DEAD:
@@ -736,17 +735,22 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
     # ------------------------------------------------------------------
 
     async def _safe_call(
-        self, coro: Any, model_name: str
+        self, fn: Any, model_name: str
     ) -> ModelResult | None:
         """
         Run one model call with timeout and automatic failure tracking.
+
+        Accepts a zero-argument callable (lambda) rather than a pre-created
+        coroutine so that paused models never create an unawaited coroutine
+        (which triggers RuntimeWarning). The coroutine is created only when
+        the model is not paused.
 
         After _STREAK_BEFORE_PAUSE consecutive failures the model is paused for
         _PAUSE_CYCLES debate() calls (no API request made). It is then silently
         retried; on success the pause is cleared. This mirrors the _GEMINI_DEAD
         mechanism but works for all 4 models and is self-healing.
         """
-        # Skip paused models — no API call, no timeout wait
+        # Skip paused models — no API call, no coroutine created, no timeout wait
         resume_at = EnsembleEngine._MODEL_PAUSED_UNTIL.get(model_name, 0)
         if EnsembleEngine._DEBATE_CYCLE <= resume_at:
             log.info(
@@ -757,7 +761,7 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
             return None
 
         try:
-            result = await asyncio.wait_for(coro, timeout=_CALL_TIMEOUT)
+            result = await asyncio.wait_for(fn(), timeout=_CALL_TIMEOUT)
             # Success — reset failure tracking
             prev_streak = EnsembleEngine._MODEL_FAIL_STREAK.get(model_name, 0)
             EnsembleEngine._MODEL_FAIL_STREAK[model_name] = 0
@@ -844,11 +848,13 @@ Only output YES or NO if edge ≥ 8% and signals are NOT noise. Otherwise: NO TR
         )
 
         # Step 1 — run all 4 models in parallel (paused models return None instantly)
+        # Lambdas defer coroutine creation until inside _safe_call so paused models
+        # never create an unawaited coroutine (avoids RuntimeWarning).
         claude_r, gpt_r, gemini_r, deepseek_r = await asyncio.gather(
-            self._safe_call(self._call_claude(context, symbol),    "claude"),
-            self._safe_call(self._call_gpt(context, symbol),      "gpt"),
-            self._safe_call(self._call_gemini(context, symbol),   "gemini"),
-            self._safe_call(self._call_deepseek(context, symbol), "deepseek"),
+            self._safe_call(lambda: self._call_claude(context, symbol),    "claude"),
+            self._safe_call(lambda: self._call_gpt(context, symbol),      "gpt"),
+            self._safe_call(lambda: self._call_gemini(context, symbol),   "gemini"),
+            self._safe_call(lambda: self._call_deepseek(context, symbol), "deepseek"),
         )
 
         # Step 2 — require at least min_required successful models
