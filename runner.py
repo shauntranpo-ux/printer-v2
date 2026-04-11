@@ -169,9 +169,9 @@ class TradingBot:
 
         # Initialise day tracker so we don't send a summary on first cycle
         self._last_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        bot_enabled  = await self.db.get_bot_enabled()
-        trading_mode = "LIVE TRADING" if bot_enabled else "OFF MODE (analysis only — press START on dashboard to enable trading)"
-        log.info("Startup complete — entering main loop  [%s]", trading_mode)
+        # Always start in OFF mode after a deploy — user must press START
+        await self.db.set_bot_enabled(False)
+        log.info("Startup complete — entering main loop  [OFF MODE (press START on dashboard to enable trading)]")
 
     # ------------------------------------------------------------------
     # Shutdown
