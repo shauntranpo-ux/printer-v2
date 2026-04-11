@@ -43,7 +43,7 @@ logging.basicConfig(
 log = logging.getLogger("runner")
 
 _CYCLE_SECONDS  = 15 * 60     # 15-minute interval
-_CYCLE_BUFFER   = 180          # seconds after boundary before first tick (3-min buffer for order books to populate)
+_CYCLE_BUFFER   = 60           # seconds after boundary before first tick
 _MAX_MARKETS    = 10           # top N markets evaluated per cycle
 _STOP_FILE      = Path("STOP")
 
