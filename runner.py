@@ -54,6 +54,13 @@ _ASSET_SIZE_OVERRIDES: dict[str, float] = {
     "SOL": 0.50,
 }
 
+# Per-asset minimum confidence thresholds (overrides global MIN_CONFIDENCE).
+# SOL and XRP are highly choppy — require much stronger AI conviction before entering.
+_ASSET_MIN_CONFIDENCE: dict[str, float] = {
+    "SOL": 0.45,
+    "XRP": 0.45,
+}
+
 
 # ---------------------------------------------------------------------------
 # TradingBot
@@ -532,11 +539,12 @@ class TradingBot:
             "detail": f"spread {result.spread:.2f}",
         })
 
-        # Check 3: Confidence (action == TRADE means >= MIN_CONFIDENCE; SKIP means failed)
-        conf_ok = result.action == "TRADE"
+        # Check 3: Confidence — use asset-specific threshold for choppy assets
+        asset_min_conf = _ASSET_MIN_CONFIDENCE.get(asset, settings.MIN_CONFIDENCE)
+        conf_ok = result.action == "TRADE" and result.confidence >= asset_min_conf
         checks.append({
             "id": "confidence",
-            "label": f"Confidence \u2265{settings.MIN_CONFIDENCE*100:.0f}%",
+            "label": f"Confidence \u2265{asset_min_conf*100:.0f}%",
             "passed": conf_ok,
             "detail": f"{result.confidence*100:.0f}%",
         })
@@ -555,6 +563,17 @@ class TradingBot:
                 self._wait_list[ticker] = time.time()
             else:
                 log.info("Skipping %s: %s", ticker, result.skip_reason)
+            return
+
+        # Asset-specific confidence gate (SOL/XRP require higher conviction)
+        if not conf_ok:
+            for cid, clabel in _pending:
+                checks.append({"id": cid, "label": clabel, "passed": None, "detail": "—"})
+            await self._store_last_signal(ticker, result, checks)
+            log.info(
+                "Skipping %s [%s] — confidence %.3f below asset minimum %.2f (choppy asset)",
+                ticker, asset, result.confidence, asset_min_conf,
+            )
             return
 
         # --- Risk gates ---
