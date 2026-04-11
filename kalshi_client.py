@@ -583,14 +583,22 @@ class KalshiClient:
         """Fetch the current state of a single order."""
         data  = await self._get(f"/portfolio/orders/{order_id}")
         order = data.get("order", data)
+        yes_p = order.get("yes_price", 0) or 0
+        no_p  = order.get("no_price",  0) or 0
+        # Derive missing side price if only one is present
+        if yes_p and not no_p:
+            no_p = 100 - yes_p
+        elif no_p and not yes_p:
+            yes_p = 100 - no_p
         return {
-            "order_id":         order.get("order_id", ""),
-            "ticker":           order.get("ticker", ""),
-            "side":             order.get("side", ""),
-            "status":           order.get("status", "unknown"),
-            "count":            order.get("count", 0),
-            "quantity_filled":  order.get("quantity_filled", 0),
-            "yes_price":        order.get("yes_price", 0),
+            "order_id":        order.get("order_id", ""),
+            "ticker":          order.get("ticker", ""),
+            "side":            order.get("side", ""),
+            "status":          order.get("status", "unknown"),
+            "count":           order.get("count", 0),
+            "quantity_filled": order.get("quantity_filled", 0),
+            "yes_price":       yes_p,
+            "no_price":        no_p,
         }
 
     # ------------------------------------------------------------------

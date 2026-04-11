@@ -388,10 +388,14 @@ class Strategy:
         # --- Trigger 0: check if resting TP limit order has already been filled ---
         if trade.tp_order_id:
             try:
-                tp_order = await self._kalshi.get_order(trade.tp_order_id)
+                tp_order  = await self._kalshi.get_order(trade.tp_order_id)
                 tp_status = tp_order.get("status", "unknown")
                 if tp_status in ("filled", "executed"):
-                    tp_price = tp_order.get("yes_price") or int(trade.entry_price)
+                    # Use the price for OUR side of the trade
+                    if trade.direction == "YES":
+                        tp_price = tp_order.get("yes_price") or int(trade.entry_price)
+                    else:
+                        tp_price = tp_order.get("no_price") or int(trade.entry_price)
                     log.info(
                         "Trade %d: TP resting order %s filled at %d¢",
                         trade.id, trade.tp_order_id[:8], tp_price,
@@ -473,23 +477,12 @@ class Strategy:
             pass    # don't block other checks if market fetch fails
 
         # --- Trigger 3: take profit ---
-        # When TP is hit, prefer expiry over selling if the market is pricing
-        # a strong win (bid ≥ 75¢ = 75%+ implied win probability).
-        # Expected expiry payout = bid¢ by market pricing, but at 75¢+ the
-        # contract is likely to expire at 100¢ — a better outcome than exiting now.
         if pnl_pct >= settings.TAKE_PROFIT_PCT:
-            if current_bid >= 75:
-                log.info(
-                    "Trade %d: TP hit but bid=%d¢ (≥75¢ — likely to expire ITM) "
-                    "— holding to expiry  pnl=%.1f%%",
-                    trade.id, current_bid, pnl_pct * 100,
-                )
-            else:
-                log.info(
-                    "Trade %d: take profit — pnl_pct=%.1f%% (bid=%d¢ entry=%.0f¢)",
-                    trade.id, pnl_pct * 100, current_bid, entry,
-                )
-                return await self._close_trade(trade, current_bid, "take_profit")
+            log.info(
+                "Trade %d: take profit — pnl_pct=%.1f%% (bid=%d¢ entry=%.0f¢)",
+                trade.id, pnl_pct * 100, current_bid, entry,
+            )
+            return await self._close_trade(trade, current_bid, "take_profit")
 
         # --- Trigger 4: trailing stop ---
         # Activates once peak reaches +TRAILING_STOP_LOCK_PCT;
