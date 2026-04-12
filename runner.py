@@ -584,47 +584,15 @@ class TradingBot:
 
         yes_ask = market.get("yes_ask") or 0
         no_ask  = market.get("no_ask")  or 0
-        # Order book must have prices before we run the ensemble.
-        # Without YES/NO prices the models see "market implied P(YES): 0%" which is
-        # meaningless — they all return 50%/NO TRADE, burn API credits, and keep the
-        # dashboard stuck on WAITING. Retry once after 10s before giving up.
+        # Empty order book is fine — we use market orders, not limit orders.
+        # ensemble._build_context already handles yes_price=0 ("ORDER BOOK LOADING")
+        # and defaults implied P(YES) to 50%. enter_trade() uses 50¢ fallback for
+        # sizing when ask_cents=0. No need to block evaluation here.
         if not yes_ask and not no_ask:
-            if time_in + 15 > 570:
-                log.info(
-                    "Market %s: order book empty — no time for retry (%.0fs in) — skipping",
-                    ticker, time_in,
-                )
-                return
-            log.info("Market %s: order book empty — retrying once in 10s", ticker)
-            await asyncio.sleep(10)
-            try:
-                ob2      = await self.kalshi.get_order_book(ticker)
-                ya2      = ob2.get("yes_asks", [])
-                na2      = ob2.get("no_asks",  [])
-                yb2      = ob2.get("yes_bids", [])
-                nb2      = ob2.get("no_bids",  [])
-                if ya2:
-                    market["yes_ask"] = ya2[0]["price"]
-                elif nb2:
-                    market["yes_ask"] = 100 - nb2[0]["price"]
-                if na2:
-                    market["no_ask"] = na2[0]["price"]
-                elif yb2:
-                    market["no_ask"] = 100 - yb2[0]["price"]
-                if market.get("yes_ask") and not market.get("no_ask"):
-                    market["no_ask"] = 100 - market["yes_ask"]
-                if market.get("no_ask") and not market.get("yes_ask"):
-                    market["yes_ask"] = 100 - market["no_ask"]
-            except Exception as exc:
-                log.debug("Order book retry failed for %s: %s", ticker, exc)
-            yes_ask = market.get("yes_ask") or 0
-            no_ask  = market.get("no_ask")  or 0
-            if not yes_ask and not no_ask:
-                log.info(
-                    "Market %s: order book still empty after retry — low liquidity asset, skipping",
-                    ticker,
-                )
-                return
+            log.info(
+                "Market %s: order book empty — proceeding with 50¢ implied price",
+                ticker,
+            )
 
         # --- Bot enabled gate (before ensemble to avoid burning API credits when OFF) ---
         if not await self.db.get_bot_enabled():
