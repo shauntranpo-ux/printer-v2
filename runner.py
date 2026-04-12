@@ -255,9 +255,9 @@ class TradingBot:
                     await self._send_daily_summary()
 
                 # Within-window retry loop: keep re-evaluating every 30s while
-                # still inside the entry window (< 600s in). Retry interval is
+                # still inside the entry window (< 120s in). Retry interval is
                 # capped to whatever time remains so we never sleep past the cutoff.
-                _MAX_TIME_IN     = 600   # 10 min in — empirically tuned from live cycle timing
+                _MAX_TIME_IN     = 120   # 2 min in
                 _RETRY_INTERVAL  = 30    # re-check every 30s within same window
                 while True:
                     now_ts           = time.time()
@@ -520,23 +520,23 @@ class TradingBot:
             log.warning("Invalid close_time for %s — skipping", ticker)
             return
 
-        # Time window guard: only enter between 120s and 600s into the 15m window.
-        # Below 120s: market still opening, price discovery incomplete.
-        # Above 600s: backtest shows late entries have lower win rates.
+        # Time window guard: only enter between 30s and 120s into the 15m window.
+        # Below 30s: market still opening, price discovery incomplete.
+        # Above 120s: entry window closed (2 min max).
         # Below 240s remaining: too close to expiry, time-decay risk.
         now_utc      = datetime.now(timezone.utc)
         market_open  = close_dt - timedelta(minutes=15)
         time_in      = (now_utc - market_open).total_seconds()
         time_left    = (close_dt - now_utc).total_seconds()
 
-        if time_in < 120:
+        if time_in < 30:
             log.info(
-                "Market %s too new (%.0fs in, need 120s) — skipping", ticker, time_in
+                "Market %s too new (%.0fs in, need 30s) — skipping", ticker, time_in
             )
             return
-        if time_in > 600:
+        if time_in > 120:
             log.info(
-                "Market %s too far into session (%.0fs in, max 600s) — skipping", ticker, time_in
+                "Market %s too far into session (%.0fs in, max 120s) — skipping", ticker, time_in
             )
             return
         if time_left < 240:
