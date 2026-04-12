@@ -255,7 +255,7 @@ class TradingBot:
                 # Within-window retry loop: keep re-evaluating every 60s while
                 # still inside the entry window (< 660s in). Retry interval is
                 # capped to whatever time remains so we never sleep past the cutoff.
-                _MAX_TIME_IN     = 480   # 8 min in — backtest shows 480-660s has only 41.7% WR
+                _MAX_TIME_IN     = 600   # 10 min in — empirically tuned from live cycle timing
                 _RETRY_INTERVAL  = 60    # re-check every 60s within same window
                 while True:
                     now_ts           = time.time()
@@ -522,9 +522,9 @@ class TradingBot:
                 "Market %s too new (%.0fs in, need 30s) — skipping", ticker, time_in
             )
             return
-        if time_in > 480:
+        if time_in > 600:
             log.info(
-                "Market %s too far into session (%.0fs in, max 480s) — skipping", ticker, time_in
+                "Market %s too far into session (%.0fs in, max 600s) — skipping", ticker, time_in
             )
             return
         if time_left < 180:
