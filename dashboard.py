@@ -812,6 +812,12 @@ function renderWatchSection(w, positions) {
     return { name: asset || ticker, sub: ticker };
   }
 
+  // Render the market name big + the time-window small inside a panel title
+  function mktHeadHtml(lbl) {
+    return '<span style="color:var(--blue);font-size:18px;font-weight:800;letter-spacing:.4px">' + lbl.name + '</span>' +
+      (lbl.sub ? '<span style="color:var(--muted);font-size:11px;font-weight:400;margin-left:5px">&middot;&nbsp;' + lbl.sub + '</span>' : '');
+  }
+
   const rows = w.markets.map(m => {
     const strike = m.strike ? '$' + m.strike.toLocaleString('en-US', {maximumFractionDigits:4}) : '—';
     const yesAsk = m.yes_ask > 0 ? m.yes_ask + '¢' : '—';
@@ -914,7 +920,7 @@ function renderWatchSection(w, positions) {
 
     return `<div class="consensus-panel">
       <div class="consensus-title" style="display:flex;align-items:center;justify-content:space-between">
-        <span>AI Bot Votes &mdash; <span style="color:var(--blue)">${sLabel}</span></span>
+        <span><span style="font-size:10px;color:var(--muted);letter-spacing:1.2px;text-transform:uppercase">AI Bot Votes &mdash;</span> ${mktHeadHtml(sLbl)}</span>
         <span class="${actCls}" style="font-size:11px">${sig.action}</span>
       </div>
       <div class="bot-vote-cards">${voteCards}</div>
@@ -958,7 +964,7 @@ function renderWatchSection(w, positions) {
     const costStr = trade.size_dollars != null ? '$' + trade.size_dollars.toFixed(2) : '—';
     return `<div class="consensus-panel">
       <div class="consensus-title" style="display:flex;align-items:center;justify-content:space-between">
-        <span>Order Filled &mdash; <span style="color:var(--blue)">${sLabel}</span></span>
+        <span><span style="font-size:10px;color:var(--muted);letter-spacing:1.2px;text-transform:uppercase">Order Filled &mdash;</span> ${mktHeadHtml(sLbl)}</span>
         <span class="ens-action action-TRADE" style="font-size:11px">FILLED</span>
       </div>
       <div style="display:flex;align-items:center;gap:18px;padding:14px 0 8px;flex-wrap:wrap">
@@ -1000,7 +1006,7 @@ function renderWatchSection(w, positions) {
         }
         return `<div class="consensus-panel">
           <div class="consensus-title" style="display:flex;align-items:center;justify-content:space-between">
-            <span>AI Bot Votes &mdash; <span style="color:var(--blue)">${sLabel}</span></span>
+            <span><span style="font-size:10px;color:var(--muted);letter-spacing:1.2px;text-transform:uppercase">AI Bot Votes &mdash;</span> ${mktHeadHtml(lbl)}</span>
             <span class="ens-action action-WAIT" style="font-size:11px">WAITING</span>
           </div>
           <div class="bot-vote-cards">${waitingCards()}</div>
@@ -1032,7 +1038,7 @@ function renderWatchSection(w, positions) {
         const sLabel  = sLbl.name + (sLbl.sub ? ' &middot; ' + sLbl.sub : '');
         const minsToNext = Math.max(0, Math.round(16 - ageMins));
         return `<div class="consensus-panel" style="opacity:.7">
-          <div class="consensus-title">AI Bot Votes &mdash; <span style="color:var(--blue)">${sLabel}</span></div>
+          <div class="consensus-title"><span style="font-size:10px;color:var(--muted);letter-spacing:1.2px;text-transform:uppercase">AI Bot Votes &mdash;</span> ${mktHeadHtml(sLbl)}</div>
           <div class="bot-vote-cards">${waitingCards()}</div>
           <div class="consensus-banner cbanner-split" style="opacity:.7">
             &#8213; Sleeping between cycles &mdash; next evaluation in ~${minsToNext} min
