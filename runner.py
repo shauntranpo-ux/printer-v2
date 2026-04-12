@@ -595,10 +595,15 @@ class TradingBot:
             ticker, yes_ask, yes_bid, no_ask, no_bid,
         )
 
-        # Skip markets with no price data at all — nothing to evaluate.
-        if yes_ask == 0 and no_ask == 0:
-            log.info("Market %s: no ask prices from API or order book — skipping (thin market)", ticker)
-            return
+        # If no real prices found, use a 50¢ neutral estimate so the AI ensemble
+        # still runs and results show on the dashboard. Order placement is blocked
+        # below when no_real_price=True — AIs always evaluate to learn and adapt.
+        no_real_price = (yes_ask == 0 and no_ask == 0)
+        if no_real_price:
+            yes_ask = 50
+            no_ask  = 50
+            log.info("Market %s: no real prices — running AI analysis at 50\u00a2 estimate (no order will be placed)", ticker)
+            market = {**market, "yes_ask": 50, "no_ask": 50}
 
         btc_data   = BtcData(
             price          = btc_price,
@@ -735,6 +740,10 @@ class TradingBot:
                     gate_result.reason,
                     f"Gate [{gate_result.failed_gate}]",
                 )
+            return
+
+        if no_real_price:
+            log.info("Market %s: AI analysis done but no real market prices — skipping order", ticker)
             return
 
         trade = await self.strategy.enter_trade(
