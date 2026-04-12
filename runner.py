@@ -708,7 +708,7 @@ class TradingBot:
         if _ev is None:
             _ev_detail = "no ask price"
         else:
-            _ev_detail = f"{_ev*100:.1f}\u00a2 / need \u2265{settings.MIN_EV*100:.0f}\u00a2"
+            _ev_detail = f"{_ev:.2f} / need \u2265{settings.MIN_EV:.2f}"
         checks.append({
             "id": "ev",
             "label": "EV",
