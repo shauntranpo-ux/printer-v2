@@ -254,11 +254,11 @@ class TradingBot:
                 if self._is_new_day():
                     await self._send_daily_summary()
 
-                # Within-window retry loop: keep re-evaluating every 60s while
-                # still inside the entry window (< 660s in). Retry interval is
+                # Within-window retry loop: keep re-evaluating every 30s while
+                # still inside the entry window (< 600s in). Retry interval is
                 # capped to whatever time remains so we never sleep past the cutoff.
                 _MAX_TIME_IN     = 600   # 10 min in — empirically tuned from live cycle timing
-                _RETRY_INTERVAL  = 60    # re-check every 60s within same window
+                _RETRY_INTERVAL  = 30    # re-check every 30s within same window
                 while True:
                     now_ts           = time.time()
                     boundary         = int(now_ts // _CYCLE_SECONDS) * _CYCLE_SECONDS
@@ -633,9 +633,9 @@ class TradingBot:
         ev_ok = result.action == "TRADE" and _ev >= settings.MIN_EV
         checks.append({
             "id": "ev",
-            "label": f"EV \u2265{settings.MIN_EV*100:.0f}\u00a2",
+            "label": "EV",
             "passed": ev_ok,
-            "detail": f"{_ev*100:.1f}\u00a2",
+            "detail": f"{_ev*100:.1f}\u00a2 / need \u2265{settings.MIN_EV*100:.0f}\u00a2",
         })
 
         # If WAIT, fill remaining checks as not-evaluated and store
