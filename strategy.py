@@ -16,6 +16,7 @@ from typing import Any
 
 from config import settings
 from database import TradeRow
+from kalshi_client import KalshiMarketClosedError
 
 log = logging.getLogger(__name__)
 
@@ -368,8 +369,6 @@ class Strategy:
         try:
             ob = await self._kalshi.get_order_book(ticker)
         except Exception as exc:
-            # Lazy import avoids a circular reference at module level
-            from kalshi_client import KalshiMarketClosedError
             if isinstance(exc, KalshiMarketClosedError):
                 log.info(
                     "Trade %d: %s resolved — fetching settlement result", trade.id, ticker

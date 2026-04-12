@@ -99,7 +99,7 @@ def _system_prompt(symbol: str) -> str:
         f"RULES:\n"
         f"- Always give YES or NO. Never skip.\n"
         f"- Accuracy over conviction: a 52% probability is still a valid YES.\n"
-        f"- Penalize late entries and large strike gaps by pulling probability toward 50.\n"
+        f"- Penalize unreachable strikes and large gaps by pulling probability toward 50.\n"
         f"- Your output is weighted with 3 other models — be independent and honest.\n\n"
 
         f"Respond in JSON only."

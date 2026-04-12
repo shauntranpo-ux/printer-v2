@@ -382,7 +382,9 @@ class Database:
                 ),
             )
             await db.commit()
-            row_id: int = cursor.lastrowid  # type: ignore[assignment]
+            if cursor.lastrowid is None:
+                raise RuntimeError("log_trade: INSERT returned no row ID")
+            row_id: int = cursor.lastrowid
             log.info(
                 "Trade logged: id=%d %s %s x%d @ %.2f  edge=%.3f  conf=%.3f",
                 row_id, direction, market_ticker, contracts, entry_price,

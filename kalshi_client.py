@@ -71,11 +71,11 @@ class _RateLimiter:
 
     async def acquire(self) -> None:
         async with self._lock:
-            now  = asyncio.get_event_loop().time()
+            now  = asyncio.get_running_loop().time()
             wait = self._interval - (now - self._last_ts)
             if wait > 0:
                 await asyncio.sleep(wait)
-            self._last_ts = asyncio.get_event_loop().time()
+            self._last_ts = asyncio.get_running_loop().time()
 
 
 # ---------------------------------------------------------------------------
@@ -228,12 +228,10 @@ class KalshiClient:
 
     # Kalshi series ticker prefixes per asset  (tries 15M variant first, then base)
     _SERIES_MAP: dict[str, list[str]] = {
-        "BTC":  ["KXBTC15M", "KXBTC"],
-        "ETH":  ["KXETH15M", "KXETH"],
-        "SOL":  ["KXSOL15M", "KXSOL"],
-        "XRP":  ["KXXRP15M", "KXXRP"],
-        "DOGE": ["KXDOGE15M", "KXDOGE"],
-        "HYPE": ["KXHYPE15M", "KXHYPE"],
+        "BTC": ["KXBTC15M", "KXBTC"],
+        "ETH": ["KXETH15M", "KXETH"],
+        "SOL": ["KXSOL15M", "KXSOL"],
+        "XRP": ["KXXRP15M", "KXXRP"],
     }
 
     async def get_crypto_15m_markets(self, asset: str = "BTC") -> list[dict]:

@@ -7,7 +7,7 @@ Maintains per-asset candles, momentum, and staleness state.
 Backward-compatible: all existing methods (get_current_price, get_momentum,
 is_stale, etc.) still work and default to BTC.
 
-All supported assets (BTC, ETH, SOL, XRP, DOGE, HYPE) are on Coinbase.
+Active assets: BTC, ETH, SOL, XRP (set via SUPPORTED_ASSETS in config).
 """
 
 from __future__ import annotations
@@ -31,13 +31,12 @@ log = logging.getLogger(__name__)
 CANDLE_SECONDS = 15 * 60   # 900 s per candle
 
 # Assets available on Coinbase Advanced Trade
+# Add an asset here AND to config SUPPORTED_ASSETS to enable it.
 COINBASE_PRODUCT_MAP: dict[str, str] = {
-    "BTC":  "BTC-USD",
-    "ETH":  "ETH-USD",
-    "SOL":  "SOL-USD",
-    "XRP":  "XRP-USD",
-    "DOGE": "DOGE-USD",
-    "HYPE": "HYPE-USD",   # listed on Coinbase Jan 2025
+    "BTC": "BTC-USD",
+    "ETH": "ETH-USD",
+    "SOL": "SOL-USD",
+    "XRP": "XRP-USD",
 }
 
 
@@ -391,7 +390,7 @@ class CoinbaseFeed:
 
         while self._running:
             attempt += 1
-            connect_ts = asyncio.get_event_loop().time()
+            connect_ts = asyncio.get_running_loop().time()
             try:
                 await self._connect_once()
             except asyncio.CancelledError:
@@ -406,7 +405,7 @@ class CoinbaseFeed:
             if not self._running:
                 break
 
-            lived = asyncio.get_event_loop().time() - connect_ts
+            lived = asyncio.get_running_loop().time() - connect_ts
             if lived > 30.0:
                 delay = 1.0; attempt = 0
                 await asyncio.sleep(1.0)

@@ -508,10 +508,10 @@ class TradingBot:
             log.warning("Invalid close_time for %s — skipping", ticker)
             return
 
-        # Time window guard
-        # Only enter between 2 min and 5 min into the 15m window.
-        # This prevents stale mid-session entries (e.g. bot restarted at minute 8).
-        # Also blocks the last 3 min before expiry.
+        # Time window guard: only enter between 30s and 600s into the 15m window.
+        # Below 30s: order book may not be published yet.
+        # Above 600s: backtest shows late entries have lower win rates.
+        # Below 180s remaining: too close to expiry, time-decay risk.
         now_utc      = datetime.now(timezone.utc)
         market_open  = close_dt - timedelta(minutes=15)
         time_in      = (now_utc - market_open).total_seconds()
