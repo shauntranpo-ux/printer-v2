@@ -617,19 +617,17 @@ class TradingBot:
         )
 
         # No real prices found from any source — still run the ensemble so AIs
-        # appear on the dashboard ("learn and adapt").  Use neutral 50¢ as a
-        # fair-value reference.  EV will show (consensus_prob - 0.50).
-        # Trade is still blocked: bid stays 0 → spread gate sees a 50¢ spread
-        # and fails, preventing any order from firing.
+        # appear on the dashboard ("learn and adapt").  Pass 50¢ to the Market
+        # object only so ensemble has a neutral reference for context.
+        # The market dict stays at price=0, so EV shows "no ask price" and no
+        # trade fires.
         if yes_ask == 0 and no_ask == 0:
             log.info(
-                "Market %s: no ask price found — using neutral 50\u00a2 reference "
-                "(spread gate will block trading)",
+                "Market %s: no ask price found — running ensemble (signal display only, trading blocked)",
                 ticker,
             )
             yes_ask = 50
             no_ask  = 50
-            market  = {**market, "yes_ask": 50, "no_ask": 50}
 
         btc_data   = BtcData(
             price          = btc_price,
