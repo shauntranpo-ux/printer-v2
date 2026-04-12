@@ -189,12 +189,12 @@ class Strategy:
             if attempt > 0:
                 await asyncio.sleep(1.0)
                 log.info(
-                    "Market order retry %d/%d for %s (API failure)",
+                    "Limit order retry %d/%d for %s (API failure)",
                     attempt, _MAX_ATTEMPTS - 1, ticker,
                 )
 
             log.info(
-                "[ORDER ATTEMPT] ticker=%s dir=%s contracts=%d ask=%d¢ size=$%.2f (attempt %d/%d)",
+                "[ORDER ATTEMPT] ticker=%s dir=%s contracts=%d limit=%d¢ size=$%.2f (attempt %d/%d)",
                 ticker, direction.upper(), contracts, ask_cents, bet_size, attempt + 1, _MAX_ATTEMPTS,
             )
             try:
@@ -202,7 +202,8 @@ class Strategy:
                     ticker=ticker,
                     side=direction,
                     count=contracts,
-                    order_type="market",
+                    price=ask_cents,
+                    order_type="limit",
                 )
             except Exception as exc:
                 exc_str = str(exc).lower()
@@ -318,7 +319,7 @@ class Strategy:
         await self._telegram.send_trade_entry(trade)
 
         log.info(
-            "Trade entered: id=%d [%s] %s %s ×%d @ %d¢ (market) | "
+            "Trade entered: id=%d [%s] %s %s ×%d @ %d¢ (limit) | "
             "p_win=%.3f edge=%.3f conf=%.3f cost=$%.2f",
             trade_id, asset_symbol, direction.upper(), ticker, contracts,
             filled_cents, p_win, edge, ensemble_result.confidence, actual_cost,
@@ -513,71 +514,80 @@ class Strategy:
             )
             return trade
 
-        # ── Market sell ─────────────────────────────────────────────────────
+        # ── Limit sell ──────────────────────────────────────────────────────
         if exit_reason != "expired":
-            # Retry up to 4 times on API exception only.
-            # YES and NO positions are symmetric: we always sell OUR side at market.
-            _MAX_ATTEMPTS = 5
-            for attempt in range(_MAX_ATTEMPTS):
-                if attempt > 0:
-                    await asyncio.sleep(1.0)
-                    log.info(
-                        "Market sell retry %d/%d — trade %d (%s)",
-                        attempt, _MAX_ATTEMPTS - 1, trade.id, trade.market_ticker,
-                    )
-
-                try:
-                    sell_result = await self._kalshi.place_order(
-                        ticker=trade.market_ticker,
-                        side=trade.direction.lower(),
-                        count=trade.contracts,
-                        action="sell",
-                        order_type="market",
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "Trade %d: market sell attempt %d/%d failed (%s)",
-                        trade.id, attempt + 1, _MAX_ATTEMPTS, exc,
-                    )
-                    if attempt == _MAX_ATTEMPTS - 1:
-                        await self._telegram.send_error(
-                            f"Market sell failed for trade {trade.id} "
-                            f"({trade.market_ticker}): {exc}\n"
-                            f"Position may still be open on Kalshi — check manually.",
-                            "sell_order_failed",
+            if exit_price <= 0:
+                # No buyers in the book — placing any sell order is pointless.
+                # Record the loss at 0¢ and let the position expire naturally.
+                log.info(
+                    "Trade %d: bid is 0 for %s — no buyers, recording at 0¢ and letting expire",
+                    trade.id, trade.market_ticker,
+                )
+            else:
+                # Limit sell at the current best bid — fills immediately if buyers exist,
+                # rests otherwise. We cancel resting orders and record at estimated price.
+                _MAX_ATTEMPTS = 5
+                for attempt in range(_MAX_ATTEMPTS):
+                    if attempt > 0:
+                        await asyncio.sleep(1.0)
+                        log.info(
+                            "Limit sell retry %d/%d — trade %d (%s)",
+                            attempt, _MAX_ATTEMPTS - 1, trade.id, trade.market_ticker,
                         )
-                    continue
 
-                sell_status = sell_result.get("status", "unknown")
-                if sell_status in ("filled", "partially_filled", "executed"):
-                    fp = sell_result.get("filled_price")
-                    if fp:
-                        final_exit_price = fp
-                    log.info(
-                        "Trade %d: market sell filled — attempt %d/%d  fill=%d¢",
-                        trade.id, attempt + 1, _MAX_ATTEMPTS, final_exit_price,
-                    )
-                    break
-
-                # Order placed but no counterparty — cancel and stop, don't retry
-                order_id = sell_result.get("order_id", "")
-                if order_id:
                     try:
-                        await self._kalshi.cancel_order(order_id)
-                    except Exception as cancel_exc:
-                        log.warning("Failed to cancel sell order %s: %s", order_id, cancel_exc)
-                log.warning(
-                    "Trade %d: market sell for %s placed but unfilled (status: %s) "
-                    "— no counter-party, recording at estimated price",
-                    trade.id, trade.market_ticker, sell_status,
-                )
-                await self._telegram.send_error(
-                    f"Market sell for trade {trade.id} ({trade.market_ticker}) "
-                    f"could not fill (status: {sell_status}) — no counter-party. "
-                    f"Position may still be open on Kalshi. Check manually.",
-                    "sell_order_failed",
-                )
-                break  # record at estimated price and close in DB regardless
+                        sell_result = await self._kalshi.place_order(
+                            ticker=trade.market_ticker,
+                            side=trade.direction.lower(),
+                            count=trade.contracts,
+                            action="sell",
+                            price=exit_price,
+                            order_type="limit",
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "Trade %d: limit sell attempt %d/%d failed (%s)",
+                            trade.id, attempt + 1, _MAX_ATTEMPTS, exc,
+                        )
+                        if attempt == _MAX_ATTEMPTS - 1:
+                            await self._telegram.send_error(
+                                f"Limit sell failed for trade {trade.id} "
+                                f"({trade.market_ticker}): {exc}\n"
+                                f"Position may still be open on Kalshi — check manually.",
+                                "sell_order_failed",
+                            )
+                        continue
+
+                    sell_status = sell_result.get("status", "unknown")
+                    if sell_status in ("filled", "partially_filled", "executed"):
+                        fp = sell_result.get("filled_price")
+                        if fp:
+                            final_exit_price = fp
+                        log.info(
+                            "Trade %d: limit sell filled — attempt %d/%d  fill=%d¢",
+                            trade.id, attempt + 1, _MAX_ATTEMPTS, final_exit_price,
+                        )
+                        break
+
+                    # Order placed but resting (no counterparty) — cancel and stop
+                    order_id = sell_result.get("order_id", "")
+                    if order_id:
+                        try:
+                            await self._kalshi.cancel_order(order_id)
+                        except Exception as cancel_exc:
+                            log.warning("Failed to cancel sell order %s: %s", order_id, cancel_exc)
+                    log.warning(
+                        "Trade %d: limit sell for %s resting unfilled (status: %s) "
+                        "— no counter-party, recording at estimated price",
+                        trade.id, trade.market_ticker, sell_status,
+                    )
+                    await self._telegram.send_error(
+                        f"Limit sell for trade {trade.id} ({trade.market_ticker}) "
+                        f"resting unfilled (status: {sell_status}) — no counter-party. "
+                        f"Position may still be open on Kalshi. Check manually.",
+                        "sell_order_failed",
+                    )
+                    break  # record at estimated price and close in DB regardless
 
         # ── Persist result ──────────────────────────────────────────────────
         pnl       = (final_exit_price - trade.entry_price) * trade.contracts / 100.0
