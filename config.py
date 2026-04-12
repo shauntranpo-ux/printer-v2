@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     # Multi-asset trading
     # ------------------------------------------------------------------
     SUPPORTED_ASSETS: str = Field(
-        default="BTC",
+        default="BTC,ETH,SOL,XRP",
         description="Comma-separated crypto assets to trade 15m Kalshi markets for",
     )
 
