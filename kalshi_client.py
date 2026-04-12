@@ -228,10 +228,11 @@ class KalshiClient:
 
     # Kalshi series ticker prefixes per asset  (tries 15M variant first, then base)
     _SERIES_MAP: dict[str, list[str]] = {
-        "BTC": ["KXBTC15M", "KXBTC"],
-        "ETH": ["KXETH15M", "KXETH"],
-        "SOL": ["KXSOL15M", "KXSOL"],
-        "XRP": ["KXXRP15M", "KXXRP"],
+        "BTC":  ["KXBTC15M",  "KXBTC"],
+        "ETH":  ["KXETH15M",  "KXETH"],
+        "SOL":  ["KXSOL15M",  "KXSOL"],
+        "XRP":  ["KXXRP15M",  "KXXRP"],
+        "DOGE": ["KXDOGE15M", "KXDOGE"],
     }
 
     async def get_crypto_15m_markets(self, asset: str = "BTC") -> list[dict]:

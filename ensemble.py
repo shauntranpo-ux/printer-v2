@@ -31,7 +31,7 @@ _CALL_TIMEOUT        = 30.0   # seconds before a model is marked as failed
 _STREAK_BEFORE_PAUSE = 3      # consecutive failures before pausing a model
 _PAUSE_CYCLES        = 5      # debate() calls to skip before auto-retrying (transient errors)
 _PAUSE_CYCLES_HARD   = 70     # pause cycles for permanent errors (billing/auth/bad key)
-                               # ~70 debate calls ÷ 4 assets = ~17 main cycles ≈ ~17 min
+                               # ~70 debate calls ÷ 5 assets = ~14 main cycles ≈ ~14 min
 
 # Error substrings that signal a permanent/billing failure — long pause, no fast-retry
 _PERMANENT_ERROR_HINTS = (

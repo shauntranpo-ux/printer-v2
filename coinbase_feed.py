@@ -7,7 +7,7 @@ Maintains per-asset candles, momentum, and staleness state.
 Backward-compatible: all existing methods (get_current_price, get_momentum,
 is_stale, etc.) still work and default to BTC.
 
-Active assets: BTC, ETH, SOL, XRP (set via SUPPORTED_ASSETS in config).
+Active assets: BTC, ETH, SOL, XRP, DOGE (set via SUPPORTED_ASSETS in config).
 """
 
 from __future__ import annotations
@@ -33,10 +33,11 @@ CANDLE_SECONDS = 15 * 60   # 900 s per candle
 # Assets available on Coinbase Advanced Trade
 # Add an asset here AND to config SUPPORTED_ASSETS to enable it.
 COINBASE_PRODUCT_MAP: dict[str, str] = {
-    "BTC": "BTC-USD",
-    "ETH": "ETH-USD",
-    "SOL": "SOL-USD",
-    "XRP": "XRP-USD",
+    "BTC":  "BTC-USD",
+    "ETH":  "ETH-USD",
+    "SOL":  "SOL-USD",
+    "XRP":  "XRP-USD",
+    "DOGE": "DOGE-USD",
 }
 
 
@@ -172,7 +173,7 @@ class CoinbaseFeed:
     """
     Multi-asset price feed via Coinbase Advanced Trade WebSocket.
 
-    All supported assets (BTC, ETH, SOL, XRP) are subscribed
+    All supported assets (BTC, ETH, SOL, XRP, DOGE) are subscribed
     in a single connection.
 
     Backward-compatible: un-keyed methods (get_current_price, get_momentum,
