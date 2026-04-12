@@ -312,6 +312,30 @@ class KalshiClient:
                 yes_ask = last
             if no_ask == 0 and yes_ask > 0:
                 no_ask = 100 - yes_ask
+            # If list API returned all zeros, fetch the individual market endpoint
+            # which often has richer price data than the bulk list response
+            if yes_ask == 0 and no_ask == 0:
+                try:
+                    ind = await self._get(f"/markets/{m['ticker']}")
+                    mi  = ind.get("market", ind)
+                    yes_ask = mi.get("yes_ask") or 0
+                    no_ask  = mi.get("no_ask")  or 0
+                    yes_bid = mi.get("yes_bid") or 0
+                    no_bid  = mi.get("no_bid")  or 0
+                    last    = mi.get("last_price") or 0
+                    if yes_ask == 0 and no_bid > 0:
+                        yes_ask = 100 - no_bid
+                    if no_ask == 0 and yes_bid > 0:
+                        no_ask = 100 - yes_bid
+                    if yes_ask == 0 and last > 0:
+                        yes_ask = last
+                    if no_ask == 0 and yes_ask > 0:
+                        no_ask = 100 - yes_ask
+                    if yes_ask or no_ask:
+                        log.info("Prices from individual market fetch: %s YES=%d\u00a2 NO=%d\u00a2",
+                                 m["ticker"], yes_ask, no_ask)
+                except Exception as exc:
+                    log.debug("Individual market fetch failed for %s: %s", m.get("ticker"), exc)
             volume = m.get("volume") or m.get("volume_24h") or 0
             result.append({
                 "ticker":        m.get("ticker", ""),
