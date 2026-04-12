@@ -408,7 +408,7 @@ class EnsembleEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_context(btc_data: BtcData, market: Market) -> str:
+    def _build_context(btc_data: BtcData, market: Market) -> str | None:
         sym      = btc_data.symbol
         price    = btc_data.price
         strike   = market.strike_price
@@ -541,15 +541,19 @@ class EnsembleEngine:
 
         if market.yes_price and market.no_price:
             kalshi_prices = f"YES={market.yes_price}¢  NO={market.no_price}¢"
+            yes_implied   = market.yes_price
         elif market.yes_price:
             kalshi_prices = f"YES={market.yes_price}¢  NO={100 - market.yes_price}¢ (derived)"
+            yes_implied   = market.yes_price
         elif market.no_price:
             kalshi_prices = f"YES={100 - market.no_price}¢ (derived)  NO={market.no_price}¢"
+            yes_implied   = 100 - market.no_price
         else:
-            kalshi_prices = "ORDER BOOK LOADING — no market price yet (base your answer on strike distance only)"
+            # No real price — runner should have blocked this market before reaching ensemble.
+            # Return None so the caller skips this market rather than trading on no data.
+            log.warning("_build_context called with no market price for %s — aborting", market.ticker)
+            return None
 
-        # Market implied P(YES) for edge calculation (model compares its estimate vs this)
-        yes_implied = market.yes_price if market.yes_price else 50
         avg_vol_str = f"{avg_vol:.0f}" if avg_vol > 0 else "n/a"
 
         return f"""=== {sym}/USD — 15-MINUTE BINARY MARKET ===
@@ -873,6 +877,8 @@ Always output YES or NO — the EV gate will handle filtering weak signals.
             )
 
         context = self._build_context(btc_data, market)
+        if context is None:
+            raise RuntimeError(f"No real market price for {market.ticker} — ensemble aborted")
 
         symbol = btc_data.symbol
         log.info(

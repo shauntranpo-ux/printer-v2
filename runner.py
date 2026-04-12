@@ -681,11 +681,11 @@ class TradingBot:
 
         # Check 3: EV — expected value anchored to the live market ask price
         if result.direction == "yes":
-            _ask = (market.get("yes_ask") or 50) / 100.0
-            _ev  = result.consensus_prob - _ask
+            _ask_cents = market.get("yes_ask") or 0
+            _ev = (result.consensus_prob - _ask_cents / 100.0) if _ask_cents else 0.0
         elif result.direction == "no":
-            _ask = (market.get("no_ask") or 50) / 100.0
-            _ev  = (1.0 - result.consensus_prob) - _ask
+            _ask_cents = market.get("no_ask") or 0
+            _ev = ((1.0 - result.consensus_prob) - _ask_cents / 100.0) if _ask_cents else 0.0
         else:
             _ev = 0.0
         ev_ok = result.action == "TRADE" and _ev >= settings.MIN_EV
