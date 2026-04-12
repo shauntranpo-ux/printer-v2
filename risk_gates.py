@@ -230,17 +230,45 @@ class RiskGates:
         direction      = ensemble_result.direction   # "yes" | "no"
         consensus_prob = ensemble_result.consensus_prob
         asset          = market.get("asset", "")
+        ticker         = market.get("ticker", "")
 
         if direction == "yes":
             ask_cents = market.get("yes_ask") or 0
             bid_cents = market.get("yes_bid") or 0
-            raw_ev    = consensus_prob - ask_cents / 100.0
         else:
             ask_cents = market.get("no_ask")  or 0
             bid_cents = market.get("no_bid")  or 0
-            raw_ev    = (1.0 - consensus_prob) - ask_cents / 100.0
 
-        # Gate fails immediately if either side of the market is missing
+        # Kalshi's /markets list endpoint frequently returns bid=0 for actively
+        # traded markets.  When bid is missing, fetch the live order book to get
+        # real prices before deciding whether to reject.
+        if bid_cents == 0 and ticker:
+            try:
+                ob = await self._kalshi.get_order_book(ticker, depth=3)
+                if direction == "yes":
+                    live_bids = ob.get("yes_bids", [])
+                    live_asks = ob.get("yes_asks", [])
+                else:
+                    live_bids = ob.get("no_bids", [])
+                    live_asks = ob.get("no_asks", [])
+                if live_bids:
+                    bid_cents = live_bids[0]["price"]
+                if live_asks and ask_cents == 0:
+                    ask_cents = live_asks[0]["price"]
+                log.debug(
+                    "Gate [spread] %s %s: order book \u2192 bid=%d\u00a2 ask=%d\u00a2",
+                    ticker, direction.upper(), bid_cents, ask_cents,
+                )
+            except Exception as exc:
+                log.debug("Gate [spread]: order book fetch failed for %s: %s", ticker, exc)
+
+        # Compute raw_ev with (possibly refreshed) ask_cents
+        if direction == "yes":
+            raw_ev = consensus_prob - ask_cents / 100.0
+        else:
+            raw_ev = (1.0 - consensus_prob) - ask_cents / 100.0
+
+        # Gate fails immediately if either side of the market is still missing
         if ask_cents == 0 or bid_cents == 0:
             reason = (
                 f"Spread: bid or ask missing for {direction.upper()} "
