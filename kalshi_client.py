@@ -22,8 +22,9 @@ from config import settings
 
 log = logging.getLogger(__name__)
 
-_RATE_LIMIT_RPS = 10      # max requests per second
-_TIMEOUT        = 10.0    # seconds per request
+_RATE_LIMIT_RPS    = 10    # max requests per second
+_TIMEOUT           = 10.0  # seconds per request
+_RATE_LIMIT_BACKOFF = 20.0  # seconds to wait after a 429 before retrying
 
 
 # ---------------------------------------------------------------------------
@@ -202,25 +203,52 @@ class KalshiClient:
     # ------------------------------------------------------------------
 
     async def _get(self, path: str, params: dict | None = None) -> Any:
-        await self._limiter.acquire()
-        headers = await self.auth_headers("GET", path)
-        resp = await self._http.get(path, headers=headers, params=params)
-        _raise_for_response(resp)
-        return resp.json()
+        for attempt in range(2):
+            try:
+                await self._limiter.acquire()
+                headers = await self.auth_headers("GET", path)
+                resp = await self._http.get(path, headers=headers, params=params)
+                _raise_for_response(resp)
+                return resp.json()
+            except KalshiRateLimitError as exc:
+                if attempt == 0:
+                    wait = max(exc.retry_after, _RATE_LIMIT_BACKOFF)
+                    log.warning("Rate limited on GET %s — backing off %.0fs", path, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                raise
 
     async def _post(self, path: str, body: dict) -> Any:
-        await self._limiter.acquire()
-        headers = await self.auth_headers("POST", path)
-        resp = await self._http.post(path, headers=headers, json=body)
-        _raise_for_response(resp)
-        return resp.json()
+        for attempt in range(2):
+            try:
+                await self._limiter.acquire()
+                headers = await self.auth_headers("POST", path)
+                resp = await self._http.post(path, headers=headers, json=body)
+                _raise_for_response(resp)
+                return resp.json()
+            except KalshiRateLimitError as exc:
+                if attempt == 0:
+                    wait = max(exc.retry_after, _RATE_LIMIT_BACKOFF)
+                    log.warning("Rate limited on POST %s — backing off %.0fs", path, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                raise
 
     async def _delete(self, path: str) -> Any:
-        await self._limiter.acquire()
-        headers = await self.auth_headers("DELETE", path)
-        resp = await self._http.delete(path, headers=headers)
-        _raise_for_response(resp)
-        return resp.json()
+        for attempt in range(2):
+            try:
+                await self._limiter.acquire()
+                headers = await self.auth_headers("DELETE", path)
+                resp = await self._http.delete(path, headers=headers)
+                _raise_for_response(resp)
+                return resp.json()
+            except KalshiRateLimitError as exc:
+                if attempt == 0:
+                    wait = max(exc.retry_after, _RATE_LIMIT_BACKOFF)
+                    log.warning("Rate limited on DELETE %s — backing off %.0fs", path, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                raise
 
     # ------------------------------------------------------------------
     # Markets
