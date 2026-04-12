@@ -370,10 +370,39 @@ class Strategy:
             # Subsequent attempts: cancel previous resting order, improve price
             if attempt > 0:
                 if active_order_id:
+                    _cancelled = False
                     try:
-                        await self._kalshi.cancel_order(active_order_id)
+                        _cancelled = await self._kalshi.cancel_order(active_order_id)
                     except Exception as exc:
                         log.warning("[ORDER] cancel prev order failed: %s", exc)
+                        _cancelled = True  # assume cancelled; poll below will re-verify
+
+                    if not _cancelled:
+                        # cancel_order returns False when the order was already filled
+                        # (Kalshi 400/404 response). Fetch the actual fill to avoid
+                        # placing a duplicate order and creating an orphaned position.
+                        log.info(
+                            "[ORDER] Cancel returned False for %s — order already filled, "
+                            "fetching fill details", active_order_id[:8],
+                        )
+                        try:
+                            _fill = await self._kalshi.get_order(active_order_id)
+                            _qty  = _fill.get("quantity_filled", 0)
+                            if _qty > 0:
+                                filled_contracts = _qty
+                                final_fill_price = (
+                                    _fill.get("yes_price" if direction == "yes" else "no_price")
+                                    or current_price
+                                )
+                                log.info(
+                                    "[ORDER] Filled during cancel window \u00d7%d @ %d\u00a2 for %s",
+                                    filled_contracts, final_fill_price, ticker,
+                                )
+                                active_order_id = None
+                                break
+                        except Exception as exc:
+                            log.warning("[ORDER] get_order after cancel-fail: %s", exc)
+
                     active_order_id = None
                 current_price   += _FILL_IMPROVEMENT_CENTS
                 price_improvements += 1
