@@ -590,33 +590,10 @@ class TradingBot:
 
         yes_ask = market.get("yes_ask") or 0
         no_ask  = market.get("no_ask")  or 0
-        # If order book is empty, try a direct market fetch for last_price.
-        # Without any real price we cannot evaluate edge — skip the market.
-        if not yes_ask and not no_ask:
-            try:
-                mkt = await self.kalshi.get_market(ticker)
-                lp  = mkt.get("last_price") or 0
-                ya  = mkt.get("yes_ask")    or 0
-                na  = mkt.get("no_ask")     or 0
-                yb  = mkt.get("yes_bid")    or 0
-                nb  = mkt.get("no_bid")     or 0
-                if ya == 0 and nb > 0: ya = 100 - nb
-                if na == 0 and yb > 0: na = 100 - yb
-                if ya == 0 and lp > 0: ya = lp
-                if na == 0 and ya > 0: na = 100 - ya
-                if ya:
-                    market["yes_ask"] = ya
-                    market["no_ask"]  = na
-                    yes_ask, no_ask   = ya, na
-                    log.info("Market %s: got price from direct fetch: YES=%d¢ NO=%d¢", ticker, ya, na)
-            except Exception as exc:
-                log.debug("Direct market fetch failed for %s: %s", ticker, exc)
-            if not yes_ask and not no_ask:
-                log.info(
-                    "Market %s: no price data — skipping (order book empty, no last_price)",
-                    ticker,
-                )
-                return
+        if yes_ask or no_ask:
+            log.debug("Market %s: prices YES=%d¢ NO=%d¢", ticker, yes_ask, no_ask)
+        else:
+            log.info("Market %s: order book empty — ensemble will evaluate from strike distance", ticker)
 
         btc_data   = BtcData(
             price          = btc_price,

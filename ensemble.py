@@ -408,7 +408,7 @@ class EnsembleEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_context(btc_data: BtcData, market: Market) -> str | None:
+    def _build_context(btc_data: BtcData, market: Market) -> str:
         sym      = btc_data.symbol
         price    = btc_data.price
         strike   = market.strike_price
@@ -542,17 +542,22 @@ class EnsembleEngine:
         if market.yes_price and market.no_price:
             kalshi_prices = f"YES={market.yes_price}¢  NO={market.no_price}¢"
             yes_implied   = market.yes_price
+            implied_line  = f"Market implied P(YES): {yes_implied}%  ← use this to calculate your edge"
+            task_edge     = f"Calculate your edge vs market implied {yes_implied}%."
         elif market.yes_price:
             kalshi_prices = f"YES={market.yes_price}¢  NO={100 - market.yes_price}¢ (derived)"
             yes_implied   = market.yes_price
+            implied_line  = f"Market implied P(YES): {yes_implied}%  ← use this to calculate your edge"
+            task_edge     = f"Calculate your edge vs market implied {yes_implied}%."
         elif market.no_price:
             kalshi_prices = f"YES={100 - market.no_price}¢ (derived)  NO={market.no_price}¢"
             yes_implied   = 100 - market.no_price
+            implied_line  = f"Market implied P(YES): {yes_implied}%  ← use this to calculate your edge"
+            task_edge     = f"Calculate your edge vs market implied {yes_implied}%."
         else:
-            # No real price — runner should have blocked this market before reaching ensemble.
-            # Return None so the caller skips this market rather than trading on no data.
-            log.warning("_build_context called with no market price for %s — aborting", market.ticker)
-            return None
+            kalshi_prices = "No market price available — order book empty"
+            implied_line  = "Market implied P(YES): unavailable — base probability on strike distance and momentum only"
+            task_edge     = "No market price available. Base your probability solely on strike distance, momentum, and price action."
 
         avg_vol_str = f"{avg_vol:.0f}" if avg_vol > 0 else "n/a"
 
@@ -562,7 +567,7 @@ Strike (YES threshold): ${strike:,.4f}
 Distance:     {strike_note}
 Time left:    {time_left_str} until expiry
 Kalshi market: {kalshi_prices}
-Market implied P(YES): {yes_implied}%  ← use this to calculate your edge
+{implied_line}
 
 === PRICE ACTION ===
 Current candle (open → now): {chg_cur}
@@ -584,7 +589,7 @@ Avg candle volume: {avg_vol_str}  (per-candle deviation shown in history below)
 Will {sym} close ABOVE ${strike:,.4f} at {market.close_time.strftime('%H:%M UTC')}?
 Entry window context: you see markets 0.5-8 min into the 15-min window, so time
 remaining is always 7-14.5 min. Calibrate all time-decay penalties accordingly.
-Apply the quantitative framework. Calculate your edge vs market implied {yes_implied}%.
+Apply the quantitative framework. {task_edge}
 Always output YES or NO — the EV gate will handle filtering weak signals.
 {_JSON_SCHEMA_HINT}"""
 
@@ -877,8 +882,6 @@ Always output YES or NO — the EV gate will handle filtering weak signals.
             )
 
         context = self._build_context(btc_data, market)
-        if context is None:
-            raise RuntimeError(f"No real market price for {market.ticker} — ensemble aborted")
 
         symbol = btc_data.symbol
         log.info(
