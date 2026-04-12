@@ -336,6 +336,25 @@ class KalshiClient:
                                  m["ticker"], yes_ask, no_ask)
                 except Exception as exc:
                     log.debug("Individual market fetch failed for %s: %s", m.get("ticker"), exc)
+            # Final fallback: recent executed trades — always real non-zero prices if market traded
+            if yes_ask == 0 and no_ask == 0:
+                try:
+                    trades_data = await self._get(
+                        f"/markets/{m['ticker']}/trades", {"limit": 5}
+                    )
+                    trades = trades_data.get("trades", [])
+                    if trades:
+                        last_trade  = trades[0]  # most recent first
+                        trade_yes_p = last_trade.get("yes_price") or 0
+                        if trade_yes_p > 0:
+                            yes_ask = trade_yes_p
+                            no_ask  = 100 - trade_yes_p
+                            log.info(
+                                "Prices from recent trade: %s YES=%d\u00a2 NO=%d\u00a2",
+                                m["ticker"], yes_ask, no_ask,
+                            )
+                except Exception as exc:
+                    log.debug("Trades fetch failed for %s: %s", m.get("ticker"), exc)
             volume = m.get("volume") or m.get("volume_24h") or 0
             result.append({
                 "ticker":        m.get("ticker", ""),
