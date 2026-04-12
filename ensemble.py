@@ -674,7 +674,8 @@ Always output YES or NO — the EV gate will handle filtering weak signals.
         "gemini-2.5-flash-preview-04-17",    # versioned stable
         "gemini-2.5-pro",                    # pro fallback
         "gemini-2.0-flash-lite-001",         # lite stable versioned
-        "gemini-2.0-flash-latest",           # latest alias
+        "gemini-2.0-flash",                  # 2.0 stable (not -latest alias which 404s)
+        "gemini-1.5-flash",                  # last-resort stable
     ]
 
     # Models confirmed dead (404) this session — skip without API call

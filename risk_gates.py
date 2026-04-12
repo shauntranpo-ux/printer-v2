@@ -63,16 +63,19 @@ class RiskGates:
         Run all 4 gates in order. Short-circuits on the first failure.
         Returns GateResult with passed=True only when ALL gates pass.
         """
-        gates = [
-            ("drawdown",  self._gate_drawdown()),
-            ("ev",        self._gate_ev(market, ensemble_result)),
-            ("staleness", self._gate_staleness(asset)),
-            ("spread",    self._gate_spread(market, ensemble_result)),
+        # Gate specs: (name, coroutine-factory, args)
+        # Coroutines are created lazily so un-reached gates are never instantiated,
+        # avoiding "coroutine was never awaited" RuntimeWarnings.
+        gate_specs = [
+            ("drawdown",  self._gate_drawdown,  ()),
+            ("ev",        self._gate_ev,        (market, ensemble_result)),
+            ("staleness", self._gate_staleness, (asset,)),
+            ("spread",    self._gate_spread,    (market, ensemble_result)),
         ]
 
         details: dict = {}
-        for name, coro in gates:
-            passed, reason = await coro
+        for name, fn, args in gate_specs:
+            passed, reason = await fn(*args)
             details[name] = {"passed": passed, "reason": reason}
             if not passed:
                 return GateResult(
