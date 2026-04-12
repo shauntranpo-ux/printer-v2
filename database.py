@@ -433,7 +433,7 @@ class Database:
         tp_order_id: str | None = None,
         sl_order_id: str | None = None,
     ) -> None:
-        """Store the Kalshi order IDs for resting TP/SL limit orders."""
+        """Store the Kalshi order IDs for resting TP/SL orders."""
         async with self._conn() as db:
             await db.execute(
                 """

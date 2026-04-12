@@ -4,17 +4,19 @@ strategy.py — Kelly sizing, trade entry, and exit management
 Owns the full lifecycle of a trade: sizing, entry, stop-loss/decay/expiry
 exits. All database writes and Telegram alerts happen here so runner.py
 only needs to call enter_trade() and check_exits().
+
+All orders are market orders — no limit orders, no fill loops, no price
+improvement retries. A market buy sweeps at 99¢ (fills at best ask).
+A market sell accepts down to 1¢ (fills at best bid). If the market order
+doesn't fill immediately (status != executed), it is cancelled and the
+attempt is abandoned.
 """
 
 from __future__ import annotations
 
-import asyncio
-import csv
 import logging
 import math
-import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any
 
 from config import settings
@@ -25,82 +27,6 @@ log = logging.getLogger(__name__)
 
 _MIN_BET_DOLLARS = 0.50     # never risk less than $0.50
 _ROUNDING        = 0.50     # round to nearest $0.50
-
-# ---------------------------------------------------------------------------
-# Fill-rate model constants
-# ---------------------------------------------------------------------------
-
-# Lookup table: (spread_low_cents, spread_high_cents, fill_probability)
-# Empirical estimates — calibrate with fill_rate_log.csv over time.
-_FILL_PROB_TABLE: list[tuple[float, float, float]] = [
-    (0.0,  5.0,  1.00),   # 0–5¢ spread:  near-certain fill (tight market)
-    (5.0,  10.0, 0.90),   # 5–10¢ spread: 90% expected fill rate
-    (10.0, 15.0, 0.75),   # 10–15¢ spread: 75% expected fill rate
-    (15.0, 20.0, 0.60),   # 15–20¢ spread: 60% — post-gate safety net
-]
-_FILL_PROB_DEFAULT      = 0.50   # fallback if spread exceeds all table entries
-_FILL_IMPROVEMENT_CENTS = 1      # improve limit price by 1¢ per attempt
-_FILL_MAX_IMPROVEMENTS  = 2      # max price improvements (2¢ total worst case)
-_FILL_WAIT_SECONDS      = 10     # seconds to wait before checking fill status
-_FILL_TOTAL_BUDGET      = 30     # total seconds budget across all fill attempts
-_FILL_LOG_PATH          = Path("fill_rate_log.csv")
-_FILL_LOG_HEADER        = [
-    "timestamp", "asset", "side", "spread_at_entry",
-    "attempted_contracts", "filled_contracts", "fill_time_seconds",
-    "price_improvements_used", "final_fill_price",
-]
-
-
-def _estimate_fill_prob(spread_cents: float) -> float:
-    """
-    Estimate the probability of a limit order filling based on bid-ask spread.
-
-    Uses a lookup table of empirical estimates.  Calibrate the table entries
-    with real fill data from fill_rate_log.csv as it accumulates.
-    """
-    for lo, hi, prob in _FILL_PROB_TABLE:
-        if lo <= spread_cents < hi:
-            return prob
-    return _FILL_PROB_DEFAULT
-
-
-def _log_fill_rate(
-    asset:                   str,
-    side:                    str,
-    spread_at_entry:         float,
-    attempted_contracts:     int,
-    filled_contracts:        int,
-    fill_time_seconds:       float,
-    price_improvements_used: int,
-    final_fill_price:        int,
-) -> None:
-    """
-    Append a fill event to fill_rate_log.csv for future calibration of
-    fill probability estimates and spread-filter thresholds.
-
-    Columns: timestamp, asset, side, spread_at_entry, attempted_contracts,
-             filled_contracts, fill_time_seconds, price_improvements_used,
-             final_fill_price
-    """
-    write_header = not _FILL_LOG_PATH.exists() or _FILL_LOG_PATH.stat().st_size == 0
-    try:
-        with _FILL_LOG_PATH.open("a", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            if write_header:
-                writer.writerow(_FILL_LOG_HEADER)
-            writer.writerow([
-                datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                asset,
-                side,
-                round(spread_at_entry, 2),
-                attempted_contracts,
-                filled_contracts,
-                round(fill_time_seconds, 2),
-                price_improvements_used,
-                final_fill_price,
-            ])
-    except Exception as exc:
-        log.warning("fill_rate_log write failed: %s", exc)
 
 
 def _round_half(value: float) -> float:
@@ -195,20 +121,19 @@ class Strategy:
         ensemble_result: Any,
         gate_result:     Any,
         *,
-        btc_price:       float | None = None,   # asset price at entry (kept name for compat)
+        btc_price:       float | None = None,
         btc_momentum:    float | None = None,
-        asset_symbol:    str          = "BTC",  # which asset this market is for
+        asset_symbol:    str          = "BTC",
         size_multiplier: float = 1.0,
     ) -> TradeRow | None:
         """
         Full entry flow:
-          1. Calculate edge + bet size via Kelly
-          2. Estimate ask price for contract sizing (market order fills at best available)
-          3. Derive contract count (floor)
-          4. Place market order with up to 4 retries (1 s gap)
-          5. Log trade to database using actual fill price
-          6. Send Telegram entry alert
-          7. Return TradeRow (or None on any failure)
+          1. Validate direction, edge, price cap, contracts
+          2. Place market buy — fills at best available ask
+          3. If no immediate fill: cancel and return None
+          4. Log trade to DB
+          5. Send Telegram alert
+          6. Return TradeRow
         """
         direction = ensemble_result.direction   # "yes" | "no" | "flat"
         if direction not in ("yes", "no"):
@@ -232,24 +157,47 @@ class Strategy:
             return None
         self._entering_tickers.add(ticker)
 
-        # Step 1 — edge check + flat bet sizing
+        try:
+            return await self._place_and_log(
+                ticker          = ticker,
+                direction       = direction,
+                market          = market,
+                ensemble_result = ensemble_result,
+                btc_price       = btc_price,
+                btc_momentum    = btc_momentum,
+                asset_symbol    = asset_symbol,
+                size_multiplier = size_multiplier,
+            )
+        finally:
+            self._entering_tickers.discard(ticker)
+
+    async def _place_and_log(
+        self,
+        ticker,
+        direction,
+        market,
+        ensemble_result,
+        btc_price,
+        btc_momentum,
+        asset_symbol,
+        size_multiplier,
+    ) -> TradeRow | None:
+        """Place market buy, verify fill, log to DB. Called inside try/finally."""
         ask_cents = market.get("yes_ask" if direction == "yes" else "no_ask") or 0
         if ask_cents == 0:
-            log.info("%s: no real ask price — refusing to size a trade with zero price", ticker)
-            self._entering_tickers.discard(ticker)
+            log.info("%s: no real ask price — skipping", ticker)
             return None
         market_price = ask_cents / 100.0
 
-        # Price cap: refuse to buy a contract priced ≥ 77¢ — too expensive, minimal upside
+        # Price cap: refuse to buy ≥ 77¢ — too expensive, minimal upside
         if ask_cents >= 77:
             log.info(
                 "Skipping %s — %s ask is %d¢ (≥77¢ price cap)",
                 ticker, direction.upper(), ask_cents,
             )
-            self._entering_tickers.discard(ticker)
             return None
 
-        # P(win): YES trades use P(YES), NO trades use 1-P(YES)
+        # P(win) and edge
         p_win = (ensemble_result.consensus_prob
                  if direction == "yes"
                  else 1.0 - ensemble_result.consensus_prob)
@@ -257,319 +205,77 @@ class Strategy:
 
         if edge <= 0.0:
             log.info(
-                "No edge on %s (p_win=%.3f price=%.2f edge=%.3f) — skipping entry",
+                "No edge on %s (p_win=%.3f price=%.2f edge=%.3f) — skipping",
                 ticker, p_win, market_price, edge,
             )
-            self._entering_tickers.discard(ticker)
             return None
 
-        # Flat bet: MAX_BET_SIZE scaled by time/streak multiplier.
-        # Kelly is too aggressive/conservative at small bankrolls with narrow AI edges —
-        # it consistently rounds to $0 and blocks valid TRADE signals.
-        bet_size = math.floor(settings.MAX_BET_SIZE * size_multiplier / _ROUNDING) * _ROUNDING
-        bet_size = max(bet_size, _MIN_BET_DOLLARS)
-
-        # Step 2/3 — contracts (floor division; each contract costs ask_cents¢)
-        contracts = int(bet_size / market_price)    # both in $
+        # Flat bet sized by MAX_BET_SIZE × multiplier
+        bet_size  = math.floor(settings.MAX_BET_SIZE * size_multiplier / _ROUNDING) * _ROUNDING
+        bet_size  = max(bet_size, _MIN_BET_DOLLARS)
+        contracts = int(bet_size / market_price)
         if contracts < 1:
             log.info("Contract count rounds to 0 — skipping entry")
-            self._entering_tickers.discard(ticker)
             return None
 
-        # Step 4 — fill-rate-aware limit order with price improvement.
-        # try/finally ensures _entering_tickers is always cleaned up even if an
-        # unexpected exception propagates out of the fill loop or DB write below.
-        try:
-            return await self._do_fill_and_log(
-                ticker=ticker,
-                direction=direction,
-                ask_cents=ask_cents,
-                market_price=market_price,
-                contracts=contracts,
-                bet_size=bet_size,
-                p_win=p_win,
-                edge=edge,
-                market=market,
-                ensemble_result=ensemble_result,
-                btc_price=btc_price,
-                btc_momentum=btc_momentum,
-                asset_symbol=asset_symbol,
-                size_multiplier=size_multiplier,
-            )
-        finally:
-            self._entering_tickers.discard(ticker)
-
-    async def _do_fill_and_log(
-        self,
-        ticker,
-        direction,
-        ask_cents,
-        market_price,
-        contracts,
-        bet_size,
-        p_win,
-        edge,
-        market,
-        ensemble_result,
-        btc_price,
-        btc_momentum,
-        asset_symbol,
-        size_multiplier,
-    ):
-        """Inner fill + DB log logic for enter_trade (called inside try/finally)."""
-        # (continued from enter_trade — _entering_tickers guard already set by caller)
-        #
-        # Algorithm:
-        #   1. Estimate fill probability from bid-ask spread width.
-        #   2. Place limit order at ask price.
-        #   3. Wait FILL_WAIT_SECONDS, poll fill status via get_order().
-        #   4. If filled:          proceed.
-        #   5. If partial ≥ MIN_FILL_CONTRACTS: keep partial, cancel remainder.
-        #   6. If partial < MIN_FILL_CONTRACTS: note as micro-fill, let expire.
-        #   7. If unfilled:        improve price by FILL_IMPROVEMENT_CENTS,
-        #                          cancel old order, resubmit (max FILL_MAX_IMPROVEMENTS).
-        #   8. After all improvements, still unfilled: cancel, return None.
-        #   Total time budget: FILL_TOTAL_BUDGET seconds.
-        #   All fill events are appended to fill_rate_log.csv for calibration.
-
-        # Spread at order time (best-effort; 0 if bid unavailable)
-        _bid_entry      = market.get("yes_bid" if direction == "yes" else "no_bid") or 0
-        spread_at_entry = float(ask_cents - _bid_entry) if _bid_entry > 0 else 0.0
-        fill_prob       = _estimate_fill_prob(spread_at_entry)
-
+        # ── Market buy ────────────────────────────────────────────────────────
         log.info(
-            "[ORDER ATTEMPT] ticker=%s dir=%s contracts=%d limit=%d\u00a2 size=$%.2f"
-            " | spread=%.0f\u00a2 fill_prob=%.0f%%",
+            "[ORDER] ticker=%s dir=%s ×%d market buy  ask=%d¢  bet=$%.2f",
             ticker, direction.upper(), contracts, ask_cents, bet_size,
-            spread_at_entry, fill_prob * 100,
         )
-
-        t_start:           float     = time.monotonic()
-        current_price:     int       = ask_cents
-        price_improvements: int      = 0
-        filled_contracts:  int       = 0
-        final_fill_price:  int       = ask_cents
-        active_order_id:   str | None = None
-
-        for attempt in range(_FILL_MAX_IMPROVEMENTS + 1):
-
-            # Enforce total time budget before each attempt
-            elapsed = time.monotonic() - t_start
-            if elapsed >= _FILL_TOTAL_BUDGET:
-                log.info(
-                    "[ORDER] Time budget exhausted (%.0fs / %ds) — cancelling %s",
-                    elapsed, _FILL_TOTAL_BUDGET, ticker,
-                )
-                if active_order_id:
-                    try:
-                        await self._kalshi.cancel_order(active_order_id)
-                    except Exception:
-                        pass
-                break
-
-            # Subsequent attempts: cancel previous resting order, improve price
-            if attempt > 0:
-                if active_order_id:
-                    _cancelled = False
-                    try:
-                        _cancelled = await self._kalshi.cancel_order(active_order_id)
-                    except Exception as exc:
-                        log.warning("[ORDER] cancel prev order failed: %s", exc)
-                        _cancelled = True  # assume cancelled; poll below will re-verify
-
-                    if not _cancelled:
-                        # cancel_order returns False when the order was already filled
-                        # (Kalshi 400/404 response). Fetch the actual fill to avoid
-                        # placing a duplicate order and creating an orphaned position.
-                        log.info(
-                            "[ORDER] Cancel returned False for %s — order already filled, "
-                            "fetching fill details", active_order_id[:8],
-                        )
-                        try:
-                            _fill = await self._kalshi.get_order(active_order_id)
-                            _qty  = _fill.get("quantity_filled", 0)
-                            if _qty > 0:
-                                filled_contracts = _qty
-                                final_fill_price = (
-                                    _fill.get("yes_price" if direction == "yes" else "no_price")
-                                    or current_price
-                                )
-                                log.info(
-                                    "[ORDER] Filled during cancel window \u00d7%d @ %d\u00a2 for %s",
-                                    filled_contracts, final_fill_price, ticker,
-                                )
-                                active_order_id = None
-                                break
-                        except Exception as exc:
-                            log.warning("[ORDER] get_order after cancel-fail: %s", exc)
-
-                    active_order_id = None
-                current_price   += _FILL_IMPROVEMENT_CENTS
-                price_improvements += 1
-                log.info(
-                    "[ORDER] Price improvement %d/%d \u2192 %d\u00a2 for %s",
-                    price_improvements, _FILL_MAX_IMPROVEMENTS, current_price, ticker,
-                )
-
-            # Place limit order
-            try:
-                _order = await self._kalshi.place_order(
-                    ticker=ticker,
-                    side=direction,
-                    count=contracts,
-                    price=current_price,
-                    order_type="limit",
-                )
-            except Exception as exc:
-                exc_str = str(exc).lower()
-                if any(kw in exc_str for kw in (
-                    "insufficient", "balance", "funds", "not enough",
-                    "invalid order", "invalid_order", "bad request",
-                )):
-                    log.error(
-                        "[ORDER] FAILED (permanent) for %s: %s — not retrying",
-                        ticker, exc,
-                    )
-                    break   # exits loop with filled_contracts == 0
-                log.error("[ORDER] FAILED attempt %d for %s: %s", attempt + 1, ticker, exc)
-                continue    # retry same price on transient API error
-
-            active_order_id = _order.get("order_id") or ""
-            init_status     = _order.get("status", "unknown")
-
-            # Immediate full fill (Kalshi uses "executed" for fully filled)
-            if init_status in ("filled", "executed"):
-                filled_contracts = contracts
-                final_fill_price = _order.get("filled_price") or current_price
-                log.info(
-                    "[ORDER] Immediate fill \u00d7%d @ %d\u00a2 for %s",
-                    filled_contracts, final_fill_price, ticker,
-                )
-                active_order_id = None
-                break
-
-            # Order is resting — wait, then poll fill state
-            time_left   = _FILL_TOTAL_BUDGET - (time.monotonic() - t_start)
-            actual_wait = min(float(_FILL_WAIT_SECONDS), max(0.0, time_left - 1.0))
-            if actual_wait > 0:
-                log.debug("[ORDER] waiting %.0fs for fill on %s", actual_wait, ticker)
-                await asyncio.sleep(actual_wait)
-
-            poll: dict = {}
-            if active_order_id:
-                try:
-                    poll = await self._kalshi.get_order(active_order_id)
-                except Exception as exc:
-                    log.warning("[ORDER] get_order failed (%s): %s", active_order_id, exc)
-
-            poll_status  = poll.get("status", init_status)
-            qty_filled   = poll.get("quantity_filled", 0)
-            poll_price   = (
-                poll.get("yes_price" if direction == "yes" else "no_price")
-                or current_price
+        try:
+            _order = await self._kalshi.place_order(
+                ticker = ticker,
+                side   = direction,
+                count  = contracts,
+                action = "buy",
             )
+        except Exception as exc:
+            log.error("[ORDER] Market buy failed for %s: %s", ticker, exc)
+            await self._telegram.send_error(
+                f"Market buy failed for {ticker} ({direction.upper()} ×{contracts}): {exc}",
+                "order_failed",
+            )
+            return None
 
-            if poll_status in ("filled", "executed") or qty_filled >= contracts:
-                # Full fill confirmed by poll
-                filled_contracts = contracts
-                final_fill_price = poll_price
-                log.info(
-                    "[ORDER] Full fill \u00d7%d @ %d\u00a2 for %s (%.0fs)",
-                    filled_contracts, final_fill_price, ticker,
-                    time.monotonic() - t_start,
-                )
-                active_order_id = None
-                break
-
-            if qty_filled > 0:
-                # Partial fill — cancel unfilled remainder
-                filled_contracts = qty_filled
-                final_fill_price = poll_price
-                if active_order_id:
-                    try:
-                        await self._kalshi.cancel_order(active_order_id)
-                    except Exception:
-                        pass
-                    active_order_id = None
-
-                if filled_contracts >= settings.MIN_FILL_CONTRACTS:
-                    log.info(
-                        "[ORDER] Partial fill \u00d7%d/%d (\u2265 MIN_FILL=%d) — "
-                        "proceeding, remainder cancelled for %s",
-                        filled_contracts, contracts,
-                        settings.MIN_FILL_CONTRACTS, ticker,
-                    )
-                else:
-                    log.info(
-                        "[ORDER] Micro-fill \u00d7%d/%d (< MIN_FILL=%d) — "
-                        "letting ride to expiry without active management for %s",
-                        filled_contracts, contracts,
-                        settings.MIN_FILL_CONTRACTS, ticker,
-                    )
-                break
-
-            # Still completely unfilled
-            if attempt < _FILL_MAX_IMPROVEMENTS:
-                log.info(
-                    "[ORDER] Unfilled after %.0fs (attempt %d/%d) — improving price for %s",
-                    time.monotonic() - t_start,
-                    attempt + 1, _FILL_MAX_IMPROVEMENTS + 1,
-                    ticker,
-                )
-            else:
-                # All improvements exhausted and still unfilled — cancel and stop
-                if active_order_id:
-                    try:
-                        await self._kalshi.cancel_order(active_order_id)
-                    except Exception:
-                        pass
-                    active_order_id = None
-                log.info(
-                    "[ORDER] No fill after %d improvement(s) — cancelling %s",
-                    _FILL_MAX_IMPROVEMENTS, ticker,
-                )
-
-        # ── Fill summary ─────────────────────────────────────────────────────
-        fill_time_seconds = time.monotonic() - t_start
+        order_status = _order.get("status", "unknown")
+        filled_price = _order.get("filled_price") or ask_cents
+        order_id     = _order.get("order_id", "")
 
         log.info(
-            "[ORDER RESULT] ticker=%s dir=%s attempted=%d filled=%d "
-            "improvements=%d fill_time=%.1fs price=%d\u00a2",
-            ticker, direction.upper(), contracts, filled_contracts,
-            price_improvements, fill_time_seconds, final_fill_price,
+            "[ORDER] ticker=%s dir=%s ×%d status=%s fill=%d¢",
+            ticker, direction.upper(), contracts, order_status, filled_price,
         )
 
-        _log_fill_rate(
-            asset                   = asset_symbol,
-            side                    = direction.upper(),
-            spread_at_entry         = spread_at_entry,
-            attempted_contracts     = contracts,
-            filled_contracts        = filled_contracts,
-            fill_time_seconds       = fill_time_seconds,
-            price_improvements_used = price_improvements,
-            final_fill_price        = final_fill_price,
-        )
-
-        if filled_contracts == 0:
+        if order_status not in ("filled", "executed"):
+            # Market order didn't fill immediately — cancel any resting order and bail
+            if order_id:
+                try:
+                    await self._kalshi.cancel_order(order_id)
+                    log.info("[ORDER] Cancelled unfilled market order %s", order_id[:8])
+                except Exception:
+                    pass
+            log.warning(
+                "[ORDER] No fill for %s (status=%s) — order cancelled",
+                ticker, order_status,
+            )
             await self._telegram.send_error(
-                f"No fill for {ticker} ({direction.upper()} \u00d7{contracts}) "
-                f"after {price_improvements} price improvement(s) — order cancelled.",
+                f"Market buy for {ticker} returned {order_status!r} — no fill.",
                 "no_fill",
             )
             return None
 
-        # Update to actual filled quantity and price for steps 5+
-        contracts    = filled_contracts
-        filled_cents = final_fill_price
+        filled_cents = filled_price
         actual_cost  = contracts * (filled_cents / 100.0)
 
-        # Step 5 — log to database
+        # ── Log to database ───────────────────────────────────────────────────
         spread        = ensemble_result.spread if ensemble_result.models else None
         ts            = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         claude_prob   = ensemble_result.claude.probability   if ensemble_result.claude   else None
         gpt_prob      = ensemble_result.gpt.probability      if ensemble_result.gpt      else None
         gemini_prob   = ensemble_result.gemini.probability   if ensemble_result.gemini   else None
         deepseek_prob = ensemble_result.deepseek.probability if ensemble_result.deepseek else None
+
         trade_id = await self._db.log_trade(
             market_ticker       = ticker,
             direction           = direction.upper(),
@@ -615,11 +321,10 @@ class Strategy:
             deepseek_prob       = deepseek_prob,
         )
 
-        # Step 6 — Telegram alert
         await self._telegram.send_trade_entry(trade)
 
         log.info(
-            "Trade entered: id=%d [%s] %s %s ×%d @ %d¢ (limit) | "
+            "Trade entered: id=%d [%s] %s %s ×%d @ %d¢ (market) | "
             "p_win=%.3f edge=%.3f conf=%.3f cost=$%.2f",
             trade_id, asset_symbol, direction.upper(), ticker, contracts,
             filled_cents, p_win, edge, ensemble_result.confidence, actual_cost,
@@ -766,7 +471,7 @@ class Strategy:
     async def _close_trade(
         self,
         trade:       TradeRow,
-        exit_price:  int,       # cents — current best bid, used as P&L fallback
+        exit_price:  int,       # cents — current best bid
         exit_reason: str,       # "stop_loss" | "decay" | "take_profit" |
                                 # "trailing_stop" | "expired" | "manual"
     ) -> TradeRow:
@@ -814,80 +519,61 @@ class Strategy:
             )
             return trade
 
-        # ── Limit sell ──────────────────────────────────────────────────────
+        # ── Market sell ─────────────────────────────────────────────────────
         if exit_reason != "expired":
             if exit_price <= 0:
                 # No buyers in the book — placing any sell order is pointless.
                 # Record the loss at 0¢ and let the position expire naturally.
                 log.info(
-                    "Trade %d: bid is 0 for %s — no buyers, recording at 0¢ and letting expire",
+                    "Trade %d: bid is 0 for %s — no buyers, recording at 0¢",
                     trade.id, trade.market_ticker,
                 )
             else:
-                # Limit sell at the current best bid — fills immediately if buyers exist,
-                # rests otherwise. We cancel resting orders and record at estimated price.
-                _MAX_ATTEMPTS = 5
-                for attempt in range(_MAX_ATTEMPTS):
-                    if attempt > 0:
-                        await asyncio.sleep(1.0)
-                        log.info(
-                            "Limit sell retry %d/%d — trade %d (%s)",
-                            attempt, _MAX_ATTEMPTS - 1, trade.id, trade.market_ticker,
-                        )
-
-                    try:
-                        sell_result = await self._kalshi.place_order(
-                            ticker=trade.market_ticker,
-                            side=trade.direction.lower(),
-                            count=trade.contracts,
-                            action="sell",
-                            price=exit_price,
-                            order_type="limit",
-                        )
-                    except Exception as exc:
-                        log.warning(
-                            "Trade %d: limit sell attempt %d/%d failed (%s)",
-                            trade.id, attempt + 1, _MAX_ATTEMPTS, exc,
-                        )
-                        if attempt == _MAX_ATTEMPTS - 1:
-                            await self._telegram.send_error(
-                                f"Limit sell failed for trade {trade.id} "
-                                f"({trade.market_ticker}): {exc}\n"
-                                f"Position may still be open on Kalshi — check manually.",
-                                "sell_order_failed",
-                            )
-                        continue
-
+                try:
+                    sell_result = await self._kalshi.place_order(
+                        ticker = trade.market_ticker,
+                        side   = trade.direction.lower(),
+                        count  = trade.contracts,
+                        action = "sell",
+                    )
                     sell_status = sell_result.get("status", "unknown")
-                    if sell_status in ("filled", "partially_filled", "executed"):
+
+                    if sell_status in ("filled", "executed"):
                         fp = sell_result.get("filled_price")
                         if fp:
                             final_exit_price = fp
                         log.info(
-                            "Trade %d: limit sell filled — attempt %d/%d  fill=%d¢",
-                            trade.id, attempt + 1, _MAX_ATTEMPTS, final_exit_price,
+                            "Trade %d: market sell filled @ %d¢  reason=%s",
+                            trade.id, final_exit_price, exit_reason,
                         )
-                        break
-
-                    # Order placed but resting (no counterparty) — cancel and stop
-                    order_id = sell_result.get("order_id", "")
-                    if order_id:
-                        try:
-                            await self._kalshi.cancel_order(order_id)
-                        except Exception as cancel_exc:
-                            log.warning("Failed to cancel sell order %s: %s", order_id, cancel_exc)
+                    else:
+                        # Market sell didn't fill — cancel and record at bid estimate
+                        order_id = sell_result.get("order_id", "")
+                        if order_id:
+                            try:
+                                await self._kalshi.cancel_order(order_id)
+                            except Exception:
+                                pass
+                        log.warning(
+                            "Trade %d: market sell for %s returned status=%s — "
+                            "no fill, recording at bid estimate %d¢",
+                            trade.id, trade.market_ticker, sell_status, exit_price,
+                        )
+                        await self._telegram.send_error(
+                            f"Market sell for trade {trade.id} ({trade.market_ticker}) "
+                            f"returned {sell_status!r} — no fill. "
+                            f"Recording at bid estimate {exit_price}¢.",
+                            "sell_no_fill",
+                        )
+                except Exception as exc:
                     log.warning(
-                        "Trade %d: limit sell for %s resting unfilled (status: %s) "
-                        "— no counter-party, recording at estimated price",
-                        trade.id, trade.market_ticker, sell_status,
+                        "Trade %d: market sell failed (%s) — recording at bid estimate %d¢",
+                        trade.id, exc, exit_price,
                     )
                     await self._telegram.send_error(
-                        f"Limit sell for trade {trade.id} ({trade.market_ticker}) "
-                        f"resting unfilled (status: {sell_status}) — no counter-party. "
-                        f"Position may still be open on Kalshi. Check manually.",
+                        f"Market sell failed for trade {trade.id} ({trade.market_ticker}): {exc}",
                         "sell_order_failed",
                     )
-                    break  # record at estimated price and close in DB regardless
 
         # ── Persist result ──────────────────────────────────────────────────
         pnl       = (final_exit_price - trade.entry_price) * trade.contracts / 100.0

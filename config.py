@@ -47,13 +47,6 @@ class Settings(BaseSettings):
                     "trigger rate) — used in effective EV: raw_ev − (spread/100) × p_exit",
     )
 
-    # Fill rate model
-    MIN_FILL_CONTRACTS: int = Field(
-        default=3,
-        description="Minimum contracts that must fill — partial fills below this threshold "
-                    "are logged and left to expire without active SL/TP management",
-    )
-
     # ------------------------------------------------------------------
     # Kalshi
     # ------------------------------------------------------------------
@@ -177,13 +170,6 @@ class Settings(BaseSettings):
     def exit_prob_in_range(cls, v: float) -> float:
         if not 0.0 <= v <= 1.0:
             raise ValueError(f"EARLY_EXIT_PROBABILITY must be in [0.0, 1.0], got {v}")
-        return v
-
-    @field_validator("MIN_FILL_CONTRACTS")
-    @classmethod
-    def min_fill_positive(cls, v: int) -> int:
-        if v < 1:
-            raise ValueError(f"MIN_FILL_CONTRACTS must be ≥ 1, got {v}")
         return v
 
     @field_validator("MAX_OPEN_POSITIONS")

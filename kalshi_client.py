@@ -482,19 +482,17 @@ class KalshiClient:
 
     async def place_order(
         self,
-        ticker:     str,
-        side:       str,               # "yes" | "no"
-        count:      int,               # number of contracts
-        action:     str = "buy",       # "buy" | "sell"
-        price:      int | None = None, # cents (1–99) — required for limit, omit for market
-        order_type: str = "limit",     # "limit" | "market"
+        ticker: str,
+        side:   str,         # "yes" | "no"
+        count:  int,         # number of contracts
+        action: str = "buy", # "buy" | "sell"
     ) -> dict:
         """
-        Place a limit or market order.
+        Place a market order.
 
-        Market orders: omit price, pass order_type="market". Fills immediately
-        at best available price; returns status="resting" if no counter-party.
-        Limit  orders: provide price in cents (1–99).
+        Buys sweep aggressively (pay up to 99¢); sells accept any price (down
+        to 1¢). Returns status="resting" if no counter-party at the time of
+        submission — call cancel_order() to clean up.
 
         Returns:
           {"order_id": str, "status": str, "filled_price": int | None}
@@ -502,32 +500,24 @@ class KalshiClient:
         side_lc   = side.lower()
         action_lc = action.lower()
 
+        # Kalshi requires both yes_price and no_price even for market orders.
+        # Buy:  sweep aggressively — pay up to 99¢ on our side
+        # Sell: accept any price — down to 1¢ on our side
+        if action_lc == "buy":
+            yes_p = 99 if side_lc == "yes" else 1
+        else:
+            yes_p = 1 if side_lc == "yes" else 99
+
         body: dict[str, Any] = {
             "ticker":          ticker,
             "client_order_id": str(uuid.uuid4()),   # required by Kalshi v2
             "action":          action_lc,
             "side":            side_lc,
-            "type":            order_type,
+            "type":            "market",
             "count":           count,
+            "yes_price":       yes_p,
+            "no_price":        100 - yes_p,
         }
-
-        if order_type == "limit":
-            if price is None:
-                raise ValueError("price is required for limit orders")
-            yes_price = price if side_lc == "yes" else (100 - price)
-            no_price  = price if side_lc == "no"  else (100 - price)
-            body["yes_price"] = yes_price
-            body["no_price"]  = no_price
-        elif order_type == "market":
-            # Kalshi requires both yes_price and no_price even for market orders.
-            # Buy:  sweep aggressively — pay up to 99¢ on our side
-            # Sell: accept any price — down to 1¢ on our side
-            if action_lc == "buy":
-                yes_p = 99 if side_lc == "yes" else 1
-            else:
-                yes_p = 1 if side_lc == "yes" else 99
-            body["yes_price"] = yes_p
-            body["no_price"]  = 100 - yes_p
 
         try:
             data = await self._post("/portfolio/orders", body)
@@ -537,13 +527,12 @@ class KalshiClient:
             _raise_for_response(exc.response)
             raise
 
-        order     = data.get("order", data)
-        status    = order.get("status", "?")
-        price_str = f" @ {price}¢" if price is not None else " (market)"
+        order  = data.get("order", data)
+        status = order.get("status", "?")
         log.info(
-            "Order placed: %s  %s %s %s x%d%s  status=%s",
+            "Order placed: %s  %s %s %s x%d (market)  status=%s",
             order.get("order_id", "?"), action_lc.upper(), side_lc.upper(),
-            ticker, count, price_str, status,
+            ticker, count, status,
         )
 
         qty_filled = order.get("quantity_filled", 0)
@@ -565,7 +554,7 @@ class KalshiClient:
             fills = order.get("fills", [])
             if fills:
                 fp = _fill_price_from(fills[0])
-            # Fallback: use order-level yes_price if fills absent (limit orders)
+            # Fallback: use order-level yes_price if fills array is absent
             if fp is None:
                 fp = _fill_price_from(order)
 
@@ -634,7 +623,7 @@ class KalshiClient:
             elif fill_no_p and not fill_yes_p:
                 fill_yes_p = 100 - fill_no_p
 
-        # Fall back to order-level price (limit price for resting orders)
+        # Fall back to order-level price if fills array is absent
         yes_p = fill_yes_p if fill_yes_p is not None else (order.get("yes_price") or 0)
         no_p  = fill_no_p  if fill_no_p  is not None else (order.get("no_price")  or 0)
         # Derive missing side price if only one is present
