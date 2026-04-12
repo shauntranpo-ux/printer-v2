@@ -590,6 +590,27 @@ class TradingBot:
             except Exception as exc:
                 log.debug("Order book fetch failed for %s: %s", ticker, exc)
 
+        # Final fallback: most recent executed trade — real price, always non-zero if traded
+        if yes_ask == 0 and no_ask == 0:
+            try:
+                trades_data = await self.kalshi._get(
+                    f"/markets/{ticker}/trades", {"limit": 5}
+                )
+                trades = trades_data.get("trades", [])
+                if trades:
+                    last_trade  = trades[0]
+                    trade_yes_p = last_trade.get("yes_price") or 0
+                    if trade_yes_p > 0:
+                        yes_ask = trade_yes_p
+                        no_ask  = 100 - trade_yes_p
+                        market  = {**market, "yes_ask": yes_ask, "no_ask": no_ask}
+                        log.info(
+                            "Market %s: trade price \u2192 YES=%d\u00a2 NO=%d\u00a2",
+                            ticker, yes_ask, no_ask,
+                        )
+            except Exception as exc:
+                log.debug("Trades fetch failed for %s: %s", ticker, exc)
+
         log.info(
             "Market %s: YES=%d\u00a2/%d\u00a2 NO=%d\u00a2/%d\u00a2 (ask/bid)",
             ticker, yes_ask, yes_bid, no_ask, no_bid,
@@ -597,7 +618,7 @@ class TradingBot:
 
         # Skip markets with no real prices — cannot calculate EV or place orders.
         if yes_ask == 0 and no_ask == 0:
-            log.info("Market %s: no ask prices from API, order book, or individual fetch — skipping (thin market)", ticker)
+            log.info("Market %s: no ask prices from API, order book, or trades — skipping (no traded price found)", ticker)
             return
 
         btc_data   = BtcData(
