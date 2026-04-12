@@ -557,8 +557,12 @@ class TradingBot:
 
         yes_ask = market.get("yes_ask") or 0
         no_ask  = market.get("no_ask")  or 0
-        if yes_ask or no_ask:
-            log.debug("Market %s: prices YES=%d¢ NO=%d¢", ticker, yes_ask, no_ask)
+        log.info("Market %s: prices YES=%d¢ NO=%d¢", ticker, yes_ask, no_ask)
+
+        # Skip markets with no prices at all — nothing to evaluate
+        if yes_ask == 0 and no_ask == 0:
+            log.info("Market %s: no ask prices from API — skipping (thin market)", ticker)
+            return
 
         btc_data   = BtcData(
             price          = btc_price,
@@ -624,24 +628,30 @@ class TradingBot:
         # Check 3: EV — expected value anchored to the live market ask price
         if result.direction == "yes":
             _ask_cents = market.get("yes_ask") or 0
-            _ev = (result.consensus_prob - _ask_cents / 100.0) if _ask_cents else 0.0
+            _ev = (result.consensus_prob - _ask_cents / 100.0) if _ask_cents else None
         elif result.direction == "no":
             _ask_cents = market.get("no_ask") or 0
-            _ev = ((1.0 - result.consensus_prob) - _ask_cents / 100.0) if _ask_cents else 0.0
+            _ev = ((1.0 - result.consensus_prob) - _ask_cents / 100.0) if _ask_cents else None
         else:
-            _ev = 0.0
-        ev_ok = result.action == "TRADE" and _ev >= settings.MIN_EV
+            _ask_cents = 0
+            _ev = None
+        ev_ok = result.action == "TRADE" and _ev is not None and _ev >= settings.MIN_EV
+        if _ev is None:
+            _ev_detail = "no ask price"
+        else:
+            _ev_detail = f"{_ev*100:.1f}\u00a2 / need \u2265{settings.MIN_EV*100:.0f}\u00a2"
         checks.append({
             "id": "ev",
             "label": "EV",
             "passed": ev_ok,
-            "detail": f"{_ev*100:.1f}\u00a2 / need \u2265{settings.MIN_EV*100:.0f}\u00a2",
+            "detail": _ev_detail,
         })
 
         # If WAIT, fill remaining checks as not-evaluated and store
         _pending = [
             ("drawdown",  "Daily loss"),
             ("data_age",  "Data fresh"),
+            ("spread",    "Spread"),
         ]
         if result.action == "WAIT":
             for cid, clabel in _pending:
@@ -654,10 +664,11 @@ class TradingBot:
         # --- Risk gates ---
         gate_result = await self.risk.check_all(market, result, settings.MAX_BET_SIZE, asset=asset)
 
-        # Checks 4-5: from gate results (ev gate already shown as Check 3 above)
+        # Checks 4-6: from gate results (ev gate already shown as Check 3 above)
         for gate_key, chk_id, chk_label in [
             ("drawdown",  "drawdown",  "Daily loss"),
             ("staleness", "data_age",  "Data fresh"),
+            ("spread",    "spread",    "Spread"),
         ]:
             gd = gate_result.gate_details.get(gate_key)
             if gd is not None:
