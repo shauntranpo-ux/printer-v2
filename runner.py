@@ -582,10 +582,16 @@ class TradingBot:
         # Market passed all timing checks — count it as evaluated
         self._cycle_markets_evaluated += 1
 
+        # --- Bot enabled gate ---
+        if not await self.db.get_bot_enabled():
+            log.debug("Bot is OFF — skipping ensemble for %s", ticker)
+            self._cycle_bot_off_hit = True
+            return
+
         yes_ask = market.get("yes_ask") or 0
         no_ask  = market.get("no_ask")  or 0
         # If order book is empty, try a direct market fetch for last_price.
-        # Without any real price, Kalshi will 400 on a market order (no counterparty).
+        # Without any real price we cannot evaluate edge — skip the market.
         if not yes_ask and not no_ask:
             try:
                 mkt = await self.kalshi.get_market(ticker)
@@ -607,16 +613,10 @@ class TradingBot:
                 log.debug("Direct market fetch failed for %s: %s", ticker, exc)
             if not yes_ask and not no_ask:
                 log.info(
-                    "Market %s: no price data available — skipping (can't fill market order with empty book)",
+                    "Market %s: no price data — skipping (order book empty, no last_price)",
                     ticker,
                 )
                 return
-
-        # --- Bot enabled gate (before ensemble to avoid burning API credits when OFF) ---
-        if not await self.db.get_bot_enabled():
-            log.debug("Bot is OFF — skipping ensemble for %s", ticker)
-            self._cycle_bot_off_hit = True
-            return
 
         btc_data   = BtcData(
             price          = btc_price,
