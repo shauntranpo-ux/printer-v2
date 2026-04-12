@@ -563,15 +563,12 @@ class TradingBot:
             ticker, yes_ask, yes_bid, no_ask, no_bid,
         )
 
-        # Skip markets with no real prices at all — nothing to evaluate.
-        # Also skip markets where both bid sides are 0: even if a synthetic ask
-        # was injected from last_price in kalshi_client, there are no buyers so
-        # any stop-loss exit would fail and the spread gate would block entry anyway.
+        # Skip markets with no price data at all — nothing to evaluate.
+        # Bid data is intentionally NOT checked here: Kalshi's /markets list endpoint
+        # frequently returns yes_bid=0/no_bid=0 even for actively traded markets.
+        # The spread gate fetches the live order book to get real bid prices.
         if yes_ask == 0 and no_ask == 0:
             log.info("Market %s: no ask prices from API — skipping (thin market)", ticker)
-            return
-        if yes_bid == 0 and no_bid == 0:
-            log.info("Market %s: both bid sides are 0 — no exit liquidity, skipping ensemble", ticker)
             return
 
         btc_data   = BtcData(
