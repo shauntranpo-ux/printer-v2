@@ -266,11 +266,11 @@ class TradingBot:
                     time_into_window = now_ts - boundary
                     if time_into_window >= _MAX_TIME_IN or self._cycle_trades_placed:
                         break   # past entry window, or a trade was placed
-                    time_remaining = _MAX_TIME_IN - time_into_window  # noqa: F841 (kept for log)
+                    time_remaining = _MAX_TIME_IN - time_into_window
                     sleep_for = _RETRY_INTERVAL
                     log.info(
-                        "Still in entry window (%.0fs/%ds) — re-evaluating in %.0fs",
-                        time_into_window, _MAX_TIME_IN, sleep_for,
+                        "Still in entry window (%.0fs in, %.0fs left) — re-evaluating in %.0fs",
+                        time_into_window, time_remaining, sleep_for,
                     )
                     await asyncio.sleep(sleep_for)
                     await self.run_cycle()
@@ -304,7 +304,8 @@ class TradingBot:
         self._cycle_trades_placed = 0    # actual orders placed this cycle
         self._cycle_markets_evaluated = 0  # markets that passed timing checks this cycle
         self._cycle_bot_off_hit = False  # reset bot-off gate flag
-        self._wait_list.clear()          # clear stale wait entries from previous 15m window
+        _prev_wait_list = set(self._wait_list.keys())  # snapshot before reset
+        self._wait_list.clear()          # fresh wait-list for this cycle
         Path("heartbeat.txt").write_text(cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"))
         print(f"=== CYCLE START === {cycle_start.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         log.info("--- Cycle %s ---", cycle_start.strftime("%Y-%m-%d %H:%M:%S UTC"))
@@ -422,17 +423,14 @@ class TradingBot:
                     asset, asset_size_mult, size_mult, _ASSET_SIZE_OVERRIDES[asset],
                 )
 
-            # Re-evaluate waited markets for this asset first
+            # Re-evaluate waited markets for this asset first.
+            # _prev_wait_list is a snapshot taken before the clear at the top of
+            # run_cycle() so waited tickers from the previous call are visible here.
             market_by_ticker = {m["ticker"]: m for m in markets}
-            waited_tickers   = set(self._wait_list.keys())
-
-            for ticker in waited_tickers - market_by_ticker.keys():
-                log.debug("Waited market %s expired — clearing", ticker)
-                self._wait_list.pop(ticker, None)
+            waited_tickers   = _prev_wait_list & set(market_by_ticker.keys())
 
             tasks = []
-            for ticker in list(waited_tickers & market_by_ticker.keys()):
-                self._wait_list.pop(ticker, None)
+            for ticker in list(waited_tickers):
                 if ticker in open_tickers:
                     continue
                 log.info("Re-evaluating waited market %s", ticker)
@@ -610,8 +608,12 @@ class TradingBot:
         # Log every ensemble result regardless of action
         await self.db.log_ensemble(
             ticker,
+            claude_prob    = result.claude.probability   if result.claude   else None,
+            gpt_prob       = result.gpt.probability      if result.gpt      else None,
+            gemini_prob    = result.gemini.probability   if result.gemini   else None,
+            deepseek_prob  = result.deepseek.probability if result.deepseek else None,
             consensus_prob = result.raw_prob,
-            model_spread   = result.spread if result.models else None,
+            model_spread   = result.spread,
             confidence     = result.confidence,
             action         = result.action,
             skip_reason    = result.skip_reason,
@@ -702,7 +704,7 @@ class TradingBot:
                 f"Gate [{gate_result.failed_gate}] blocked on {ticker}: "
                 f"{gate_result.reason}",
             )
-            if gate_result.failed_gate in ("edge", "liquidity", "drawdown"):
+            if gate_result.failed_gate == "drawdown":
                 await self.telegram.send_error(
                     gate_result.reason,
                     f"Gate [{gate_result.failed_gate}]",
