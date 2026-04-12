@@ -172,7 +172,7 @@ class CoinbaseFeed:
     """
     Multi-asset price feed via Coinbase Advanced Trade WebSocket.
 
-    All supported assets (BTC, ETH, SOL, XRP, DOGE, HYPE) are subscribed
+    All supported assets (BTC, ETH, SOL, XRP) are subscribed
     in a single connection.
 
     Backward-compatible: un-keyed methods (get_current_price, get_momentum,
