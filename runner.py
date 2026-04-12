@@ -90,6 +90,8 @@ class TradingBot:
         self._cycle_markets_found: int = 0
         # Markets that passed timing checks and were actually evaluated
         self._cycle_markets_evaluated: int = 0
+        # Whether the bot-off gate fired for at least one market this cycle
+        self._cycle_bot_off_hit: bool = False
 
     # ------------------------------------------------------------------
     # Startup sequence
@@ -300,6 +302,7 @@ class TradingBot:
         self._cycle_signals = []         # fresh slate for this cycle's dashboard signals
         self._cycle_trades_placed = 0    # actual orders placed this cycle
         self._cycle_markets_evaluated = 0  # markets that passed timing checks this cycle
+        self._cycle_bot_off_hit = False  # reset bot-off gate flag
         self._wait_list.clear()          # clear stale wait entries from previous 15m window
         Path("heartbeat.txt").write_text(cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"))
         print(f"=== CYCLE START === {cycle_start.strftime('%Y-%m-%d %H:%M:%S UTC')}")
@@ -320,9 +323,9 @@ class TradingBot:
                 existing = await self.db.get_market_watch() or {}
                 await self.db.set_market_watch({
                     **existing,
-                    "cycle_ts": cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "btc_price": self.feed.get_price_for("BTC") or existing.get("btc_price"),
-                    "status": "max_positions",
+                    "cycle_ts":     cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "btc_price":    self.feed.get_price_for("BTC") or existing.get("btc_price"),
+                    "cycle_status": "max_positions",
                 })
                 log.info("[DASHBOARD] market_watch refreshed (max_positions)")
             except Exception as exc:
@@ -458,9 +461,18 @@ class TradingBot:
                      [s["ticker"] for s in self._cycle_signals])
         try:
             last_sig = self._cycle_signals[-1] if self._cycle_signals else None
+            if self._cycle_signals:
+                cycle_status = "ok"
+            elif self._cycle_bot_off_hit:
+                cycle_status = "bot_off"    # markets were tradeable but bot is not started
+            elif all_markets_found:
+                cycle_status = "scanning"   # markets found but all skipped (order book / timing)
+            else:
+                cycle_status = "no_markets"
             await self.db.set_market_watch({
-                "cycle_ts":   cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "btc_price":  btc_price,
+                "cycle_ts":     cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "btc_price":    btc_price,
+                "cycle_status": cycle_status,
                 "markets": [
                     {
                         "ticker":     m["ticker"],
@@ -617,6 +629,7 @@ class TradingBot:
         # --- Bot enabled gate (before ensemble to avoid burning API credits when OFF) ---
         if not await self.db.get_bot_enabled():
             log.debug("Bot is OFF — skipping ensemble for %s", ticker)
+            self._cycle_bot_off_hit = True
             return
 
         btc_data   = BtcData(

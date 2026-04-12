@@ -821,8 +821,8 @@ function renderWatchSection(w, positions) {
     const closeIso = m.close_time || '';
     return `<tr${titleTip}>
       <td>
-        <div style="color:var(--text);font-weight:600">${lbl.name}</div>
-        <div style="font-size:10px;color:var(--muted)">${lbl.sub}</div>
+        <div style="color:var(--text);font-weight:700;font-size:16px;letter-spacing:.2px">${lbl.name}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">${lbl.sub}</div>
         <div style="font-size:9px;color:var(--border)">${m.ticker}</div>
       </td>
       <td>${strike}</td>
@@ -981,12 +981,39 @@ function renderWatchSection(w, positions) {
 
   let signalPanels;
   if (allSignals.length === 0) {
-    // No signals yet — show gray waiting cards
-    signalPanels = `<div class="consensus-panel">
-      <div class="consensus-title">AI Bot Votes</div>
-      <div class="bot-vote-cards">${waitingCards()}</div>
-      <div class="consensus-banner cbanner-split" style="opacity:.6">&#8213; Waiting for first cycle evaluation...</div>
-    </div>`;
+    // No signals from ensemble — show per-market waiting panels so the user can see
+    // which markets the bot is watching and that it's active (not frozen).
+    const csStatus = w.cycle_status || '';
+    const hasMarkets = w.markets && w.markets.length > 0;
+    if (hasMarkets) {
+      // One waiting panel per scanned market so market names are always visible
+      signalPanels = w.markets.map(m => {
+        const lbl    = tickerLabel(m.ticker, m.asset);
+        const sLabel = lbl.name + (lbl.sub ? ' &middot; ' + lbl.sub : '');
+        let waitMsg;
+        if (csStatus === 'max_positions') {
+          waitMsg = '&#9632; Max positions open &mdash; waiting for a position to close before re-evaluating';
+        } else if (csStatus === 'bot_off') {
+          waitMsg = '&#9679; Bot is in WAITING mode &mdash; press START to enable trading';
+        } else {
+          waitMsg = '&#8213; Evaluating market conditions &mdash; waiting for next qualifying window';
+        }
+        return `<div class="consensus-panel">
+          <div class="consensus-title" style="display:flex;align-items:center;justify-content:space-between">
+            <span>AI Bot Votes &mdash; <span style="color:var(--blue)">${sLabel}</span></span>
+            <span class="ens-action action-WAIT" style="font-size:11px">WAITING</span>
+          </div>
+          <div class="bot-vote-cards">${waitingCards()}</div>
+          <div class="consensus-banner cbanner-split" style="opacity:.7">${waitMsg}</div>
+        </div>`;
+      }).join('');
+    } else {
+      signalPanels = `<div class="consensus-panel">
+        <div class="consensus-title">AI Bot Votes</div>
+        <div class="bot-vote-cards">${waitingCards()}</div>
+        <div class="consensus-banner cbanner-split" style="opacity:.6">&#8213; Waiting for first cycle evaluation...</div>
+      </div>`;
+    }
   } else {
     signalPanels = allSignals.map(sig => {
       // "Sleeping" check: use cycle_ts (when last cycle ran) not sig.ts (when signal was generated).
