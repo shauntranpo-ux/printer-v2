@@ -1021,21 +1021,16 @@ function renderWatchSection(w, positions) {
       </div>`;
     }
   } else {
-    signalPanels = allSignals.map(sig => {
-      // "Sleeping" check: use cycle_ts (when last cycle ran) not sig.ts (when signal was generated).
-      // cycle_ts is refreshed even when no new signals are generated (e.g. max positions open),
-      // so ageMins accurately reflects how long ago the bot last checked — not just last voted.
-      const cycleTs  = w.cycle_ts ? new Date(w.cycle_ts) : null;
-      const sigTs    = sig.ts ? new Date(sig.ts) : null;
-      const refTs    = cycleTs || sigTs;  // prefer cycle time; fall back to signal time
-      const ageMins  = refTs ? (Date.now() - refTs.getTime()) / 60000 : 0;
-      const sleeping = ageMins > 16;  // 16 min = full 15m cycle + 60s buffer + slack
+    const cycleTs  = w.cycle_ts ? new Date(w.cycle_ts) : null;
+    const ageMins  = cycleTs ? (Date.now() - cycleTs.getTime()) / 60000 : 0;
+    const sleeping = ageMins > 16;
 
+    // Signal panels for markets that ran the ensemble
+    const signalPanelHtml = allSignals.map(sig => {
       if (sleeping) {
         const sTicker = sig.ticker || '';
         const sAsset  = sTicker.replace(/^KX/,'').replace(/15M.*/,'');
         const sLbl    = tickerLabel(sTicker, sAsset);
-        const sLabel  = sLbl.name + (sLbl.sub ? ' &middot; ' + sLbl.sub : '');
         const minsToNext = Math.max(0, Math.round(16 - ageMins));
         return `<div class="consensus-panel" style="opacity:.7">
           <div class="consensus-title"><span style="font-size:10px;color:var(--muted);letter-spacing:1.2px;text-transform:uppercase">AI Bot Votes &mdash;</span> ${mktHeadHtml(sLbl)}</div>
@@ -1045,10 +1040,27 @@ function renderWatchSection(w, positions) {
           </div>
         </div>`;
       }
-
       const openTrade = openByTicker[sig.ticker];
       return openTrade ? renderFilledPanel(sig, openTrade) : renderSignalPanel(sig);
     }).join('');
+
+    // Waiting panels for markets that did NOT get an ensemble signal this cycle
+    const signalTickers = new Set(allSignals.map(sig => sig.ticker));
+    const waitingPanelHtml = (w.markets || [])
+      .filter(m => !signalTickers.has(m.ticker))
+      .map(m => {
+        const lbl = tickerLabel(m.ticker, m.asset);
+        return `<div class="consensus-panel">
+          <div class="consensus-title" style="display:flex;align-items:center;justify-content:space-between">
+            <span><span style="font-size:10px;color:var(--muted);letter-spacing:1.2px;text-transform:uppercase">AI Bot Votes &mdash;</span> ${mktHeadHtml(lbl)}</span>
+            <span class="ens-action action-WAIT" style="font-size:11px">WAITING</span>
+          </div>
+          <div class="bot-vote-cards">${waitingCards()}</div>
+          <div class="consensus-banner cbanner-split" style="opacity:.7">&#8213; Evaluating market conditions &mdash; waiting for next qualifying window</div>
+        </div>`;
+      }).join('');
+
+    signalPanels = signalPanelHtml + waitingPanelHtml;
   }
 
   wrap.innerHTML = `

@@ -584,15 +584,33 @@ class TradingBot:
 
         yes_ask = market.get("yes_ask") or 0
         no_ask  = market.get("no_ask")  or 0
-        # Empty order book is fine — we use market orders, not limit orders.
-        # ensemble._build_context already handles yes_price=0 ("ORDER BOOK LOADING")
-        # and defaults implied P(YES) to 50%. enter_trade() uses 50¢ fallback for
-        # sizing when ask_cents=0. No need to block evaluation here.
+        # If order book is empty, try a direct market fetch for last_price.
+        # Without any real price, Kalshi will 400 on a market order (no counterparty).
         if not yes_ask and not no_ask:
-            log.info(
-                "Market %s: order book empty — proceeding with 50¢ implied price",
-                ticker,
-            )
+            try:
+                mkt = await self.kalshi.get_market(ticker)
+                lp  = mkt.get("last_price") or 0
+                ya  = mkt.get("yes_ask")    or 0
+                na  = mkt.get("no_ask")     or 0
+                yb  = mkt.get("yes_bid")    or 0
+                nb  = mkt.get("no_bid")     or 0
+                if ya == 0 and nb > 0: ya = 100 - nb
+                if na == 0 and yb > 0: na = 100 - yb
+                if ya == 0 and lp > 0: ya = lp
+                if na == 0 and ya > 0: na = 100 - ya
+                if ya:
+                    market["yes_ask"] = ya
+                    market["no_ask"]  = na
+                    yes_ask, no_ask   = ya, na
+                    log.info("Market %s: got price from direct fetch: YES=%d¢ NO=%d¢", ticker, ya, na)
+            except Exception as exc:
+                log.debug("Direct market fetch failed for %s: %s", ticker, exc)
+            if not yes_ask and not no_ask:
+                log.info(
+                    "Market %s: no price data available — skipping (can't fill market order with empty book)",
+                    ticker,
+                )
+                return
 
         # --- Bot enabled gate (before ensemble to avoid burning API credits when OFF) ---
         if not await self.db.get_bot_enabled():
