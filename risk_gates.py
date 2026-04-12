@@ -141,11 +141,20 @@ class RiskGates:
             return False, reason
 
         if direction == "yes":
-            ask = (market.get("yes_ask") or 50) / 100.0
-            ev  = consensus_prob - ask
+            ask_cents = market.get("yes_ask") or 0
         else:
-            ask = (market.get("no_ask") or 50) / 100.0
-            ev  = (1.0 - consensus_prob) - ask
+            ask_cents = market.get("no_ask") or 0
+
+        if ask_cents == 0:
+            reason = f"No real ask price for {direction.upper()} — cannot calculate EV"
+            log.info("Gate [ev]: FAIL — %s", reason)
+            return False, reason
+
+        ask = ask_cents / 100.0
+        if direction == "yes":
+            ev = consensus_prob - ask
+        else:
+            ev = (1.0 - consensus_prob) - ask
 
         min_ev = settings.MIN_EV
         passed = ev >= min_ev

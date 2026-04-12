@@ -143,7 +143,6 @@ class Strategy:
         if ask_cents == 0:
             log.info("%s: no real ask price — refusing to size a trade with zero price", ticker)
             return None
-        order_book_empty = False
         market_price = ask_cents / 100.0
 
         # Price cap: refuse to buy a contract priced ≥ 77¢ — too expensive, minimal upside
@@ -208,7 +207,7 @@ class Strategy:
             except Exception as exc:
                 exc_str = str(exc).lower()
                 # Permanent errors — don't retry (retrying won't fix these)
-                if any(kw in exc_str for kw in ("insufficient", "balance", "funds", "not enough")):
+                if any(kw in exc_str for kw in ("insufficient", "balance", "funds", "not enough", "invalid order", "invalid_order", "bad request")):
                     log.error(
                         "[ORDER RESULT] FAILED (insufficient balance) for %s: %s — not retrying",
                         ticker, exc,
