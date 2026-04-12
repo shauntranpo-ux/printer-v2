@@ -539,7 +539,7 @@ class TradingBot:
         # predict coin-flip outcomes at knife-edge strikes.
         if asset == "BTC":
             strike = float(market.get("strike_price") or 0)
-            if strike > 0 and abs(btc_price - strike) / strike < 0.005:
+            if strike > 0 and abs(btc_price - strike) / strike < 0.002:
                 log.info(
                     "Market %s: BTC knife-edge (price=%.0f strike=%.0f dist=%.3f%%) — skipping",
                     ticker, btc_price, strike, abs(btc_price - strike) / strike * 100,
