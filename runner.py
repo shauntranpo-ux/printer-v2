@@ -259,7 +259,7 @@ class TradingBot:
                 # Retry interval is capped to whatever time remains so we never
                 # sleep past the cutoff.
                 _MAX_TIME_IN     = 660   # stop retrying at 11 min in (last 4 min reserved)
-                _RETRY_INTERVAL  = 30    # re-check every 30s within same window
+                _RETRY_INTERVAL  = 10    # re-check every 10s within same window
                 while True:
                     now_ts           = time.time()
                     boundary         = int(now_ts // _CYCLE_SECONDS) * _CYCLE_SECONDS
