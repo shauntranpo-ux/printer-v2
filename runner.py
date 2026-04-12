@@ -314,11 +314,33 @@ class TradingBot:
         # Step 2 — position limit
         if not await self.strategy.can_open_position():
             log.info("Max positions open — skipping entry scan")
+            # Refresh cycle_ts in market_watch so the dashboard knows we ran a cycle
+            # (without this, old signals age past ageMins threshold → "sleeping" banner)
+            try:
+                existing = await self.db.get_market_watch() or {}
+                await self.db.set_market_watch({
+                    **existing,
+                    "cycle_ts": cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "btc_price": self.feed.get_price_for("BTC") or existing.get("btc_price"),
+                    "status": "max_positions",
+                })
+                log.info("[DASHBOARD] market_watch refreshed (max_positions)")
+            except Exception as exc:
+                log.warning("market_watch refresh failed (max_positions): %s", exc)
             return
 
         # Step 3 — verify at least BTC feed is alive
         if self.feed.is_stale():
             log.warning("BTC price data stale — skipping cycle")
+            try:
+                existing = await self.db.get_market_watch() or {}
+                await self.db.set_market_watch({
+                    **existing,
+                    "cycle_ts": cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "status": "stale_feed",
+                })
+            except Exception:
+                pass
             return
 
         btc_price = self.feed.get_current_price()
@@ -428,6 +450,12 @@ class TradingBot:
         print(f"Total markets scanned: {len(all_markets_found)} across {len(supported_assets)} assets")
 
         # Persist market watch for dashboard — save all signals from this cycle
+        log.info("[DASHBOARD] Storing market_watch: %d signal(s), %d market(s)",
+                 len(self._cycle_signals), len(all_markets_found))
+        if self._cycle_signals:
+            log.info("[DASHBOARD] Signal keys: %s | tickers: %s",
+                     list(self._cycle_signals[0].keys()),
+                     [s["ticker"] for s in self._cycle_signals])
         try:
             last_sig = self._cycle_signals[-1] if self._cycle_signals else None
             await self.db.set_market_watch({
@@ -449,8 +477,9 @@ class TradingBot:
                 "last_signal": last_sig,
                 "signals":     self._cycle_signals,
             })
+            log.info("[DASHBOARD] market_watch stored OK")
         except Exception as exc:
-            log.debug("market_watch store failed: %s", exc)
+            log.warning("market_watch store failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Per-market evaluation

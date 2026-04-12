@@ -281,6 +281,17 @@ def api_market_watch():
     _ensure_db()
     try:
         data = _run(_market_watch())
+        if data:
+            import logging as _logging
+            _logging.getLogger("dashboard").info(
+                "[API] market_watch: cycle_ts=%s signals=%d markets=%d",
+                data.get("cycle_ts", "?"),
+                len(data.get("signals", [])),
+                len(data.get("markets", [])),
+            )
+        else:
+            import logging as _logging
+            _logging.getLogger("dashboard").info("[API] market_watch: no data in DB yet")
         return jsonify(data or {})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -978,17 +989,21 @@ function renderWatchSection(w, positions) {
     </div>`;
   } else {
     signalPanels = allSignals.map(sig => {
-      // If signal is older than 12 min the bot is sleeping between cycles — show waiting state
+      // "Sleeping" check: use cycle_ts (when last cycle ran) not sig.ts (when signal was generated).
+      // cycle_ts is refreshed even when no new signals are generated (e.g. max positions open),
+      // so ageMins accurately reflects how long ago the bot last checked — not just last voted.
+      const cycleTs  = w.cycle_ts ? new Date(w.cycle_ts) : null;
       const sigTs    = sig.ts ? new Date(sig.ts) : null;
-      const ageMins  = sigTs ? (Date.now() - sigTs.getTime()) / 60000 : 0;
-      const sleeping = ageMins > 12;
+      const refTs    = cycleTs || sigTs;  // prefer cycle time; fall back to signal time
+      const ageMins  = refTs ? (Date.now() - refTs.getTime()) / 60000 : 0;
+      const sleeping = ageMins > 16;  // 16 min = full 15m cycle + 60s buffer + slack
 
       if (sleeping) {
         const sTicker = sig.ticker || '';
         const sAsset  = sTicker.replace(/^KX/,'').replace(/15M.*/,'');
         const sLbl    = tickerLabel(sTicker, sAsset);
         const sLabel  = sLbl.name + (sLbl.sub ? ' &middot; ' + sLbl.sub : '');
-        const minsToNext = Math.max(0, Math.round(15 - ageMins));
+        const minsToNext = Math.max(0, Math.round(16 - ageMins));
         return `<div class="consensus-panel" style="opacity:.7">
           <div class="consensus-title">AI Bot Votes &mdash; <span style="color:var(--blue)">${sLabel}</span></div>
           <div class="bot-vote-cards">${waitingCards()}</div>

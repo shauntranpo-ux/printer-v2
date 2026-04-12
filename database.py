@@ -727,6 +727,10 @@ class Database:
 
     async def set_market_watch(self, data: dict) -> None:
         """Persist current cycle market scan data for the dashboard."""
+        log.info("[DB] set_market_watch: cycle_ts=%s signals=%d markets=%d",
+                 data.get("cycle_ts", "?"),
+                 len(data.get("signals", [])),
+                 len(data.get("markets", [])))
         async with self._conn() as db:
             await db.execute(
                 """
