@@ -35,6 +35,25 @@ class Settings(BaseSettings):
     TRAILING_STOP_LOCK_PCT: float = Field(default=0.30, description="Activate trailing stop once peak P&L reaches +30%")
     TRAILING_STOP_EXIT_PCT: float = Field(default=0.20, description="Exit trailing stop if P&L drops below +20% from peak")
 
+    # Gate 4 — spread filter
+    MAX_SPREAD_CENTS: float = Field(
+        default=15.0,
+        description="Gate 4: max bid-ask spread in cents (absolute) to allow entry — "
+                    "wider spreads mean an immediate loss if early exit is needed",
+    )
+    EARLY_EXIT_PROBABILITY: float = Field(
+        default=0.25,
+        description="Gate 4: estimated probability of early exit (historical stop-loss "
+                    "trigger rate) — used in effective EV: raw_ev − (spread/100) × p_exit",
+    )
+
+    # Fill rate model
+    MIN_FILL_CONTRACTS: int = Field(
+        default=3,
+        description="Minimum contracts that must fill — partial fills below this threshold "
+                    "are logged and left to expire without active SL/TP management",
+    )
+
     # ------------------------------------------------------------------
     # Kalshi
     # ------------------------------------------------------------------
@@ -144,6 +163,27 @@ class Settings(BaseSettings):
     def dollar_positive(cls, v: float) -> float:
         if v <= 0:
             raise ValueError(f"Dollar limits must be positive, got {v}")
+        return v
+
+    @field_validator("MAX_SPREAD_CENTS")
+    @classmethod
+    def spread_positive(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"MAX_SPREAD_CENTS must be > 0, got {v}")
+        return v
+
+    @field_validator("EARLY_EXIT_PROBABILITY")
+    @classmethod
+    def exit_prob_in_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"EARLY_EXIT_PROBABILITY must be in [0.0, 1.0], got {v}")
+        return v
+
+    @field_validator("MIN_FILL_CONTRACTS")
+    @classmethod
+    def min_fill_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"MIN_FILL_CONTRACTS must be ≥ 1, got {v}")
         return v
 
     @field_validator("MAX_OPEN_POSITIONS")

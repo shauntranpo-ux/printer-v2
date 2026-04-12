@@ -1,11 +1,13 @@
 """
-risk_gates.py — 3-gate pre-trade risk filter
+risk_gates.py — 4-gate pre-trade risk filter
 
-Active gates: drawdown, ev, staleness.
+Active gates (in order):
   drawdown  — daily loss used must be below DAILY_LOSS_LIMIT
   ev        — expected value (consensus_prob - ask) must clear MIN_EV
   staleness — asset price feed must be fresh
-All 3 gates must pass for a trade to execute.
+  spread    — bid-ask spread must be ≤ MAX_SPREAD_CENTS; also computes
+              effective EV adjusted for early-exit cost
+All 4 gates must pass for a trade to execute.
 """
 
 from __future__ import annotations
@@ -58,13 +60,14 @@ class RiskGates:
         asset:           str = "BTC",
     ) -> GateResult:
         """
-        Run all 3 gates in order. Short-circuits on the first failure.
+        Run all 4 gates in order. Short-circuits on the first failure.
         Returns GateResult with passed=True only when ALL gates pass.
         """
         gates = [
             ("drawdown",  self._gate_drawdown()),
             ("ev",        self._gate_ev(market, ensemble_result)),
             ("staleness", self._gate_staleness(asset)),
+            ("spread",    self._gate_spread(market, ensemble_result)),
         ]
 
         details: dict = {}
@@ -80,7 +83,7 @@ class RiskGates:
                     checked_at   = datetime.now(timezone.utc),
                 )
 
-        log.info("All 3 risk gates passed (drawdown / ev / staleness)")
+        log.info("All 4 risk gates passed (drawdown / ev / staleness / spread)")
         return GateResult(
             passed       = True,
             failed_gate  = None,
@@ -195,4 +198,101 @@ class RiskGates:
 
         reason = f"{asset} data age: {age_str} vs max {max_age}s"
         log.info("Gate [staleness]: PASS — %s", reason)
+        return True, reason
+
+    # ------------------------------------------------------------------
+    # Gate 4 — Bid-ask spread filter
+    # ------------------------------------------------------------------
+
+    async def _gate_spread(
+        self, market: dict, ensemble_result
+    ) -> tuple[bool, str]:
+        """
+        Gate 4 — Bid-ask spread filter.
+
+        Rejects the trade when the spread on the relevant side is wider than
+        MAX_SPREAD_CENTS.  Wide spreads mean the bot is immediately underwater
+        if it needs to exit early (stop-loss): the fill is at the ask, but any
+        sell must cross back through the spread to hit the bid.
+
+        Spread calculation:
+          YES trade: spread = yes_ask - yes_bid
+          NO  trade: spread = no_ask  - no_bid
+          If either bid or ask is zero (missing), spread = ∞ → gate fails.
+
+        Effective EV:
+          effective_ev = raw_ev − (spread_cents / 100) × EARLY_EXIT_PROBABILITY
+          EARLY_EXIT_PROBABILITY (default 0.25) is the estimated fraction of
+          trades that trigger a stop-loss exit before expiry.
+
+        Returns tuple[bool, str] — same interface as all other gates.
+        """
+        direction      = ensemble_result.direction   # "yes" | "no"
+        consensus_prob = ensemble_result.consensus_prob
+        asset          = market.get("asset", "")
+
+        if direction == "yes":
+            ask_cents = market.get("yes_ask") or 0
+            bid_cents = market.get("yes_bid") or 0
+            raw_ev    = consensus_prob - ask_cents / 100.0
+        else:
+            ask_cents = market.get("no_ask")  or 0
+            bid_cents = market.get("no_bid")  or 0
+            raw_ev    = (1.0 - consensus_prob) - ask_cents / 100.0
+
+        # Gate fails immediately if either side of the market is missing
+        if ask_cents == 0 or bid_cents == 0:
+            reason = (
+                f"Spread: bid or ask missing for {direction.upper()} "
+                f"(bid={bid_cents}\u00a2 ask={ask_cents}\u00a2) — "
+                "cannot measure liquidity"
+            )
+            log.info("Gate [spread]: FAIL — %s", reason)
+            return False, reason
+
+        # Crossed market (bid ≥ ask) indicates bad data — reject rather than
+        # compute a negative or zero spread that would incorrectly pass the gate.
+        if bid_cents >= ask_cents:
+            reason = (
+                f"Spread: crossed market for {direction.upper()} "
+                f"(bid={bid_cents}\u00a2 \u2265 ask={ask_cents}\u00a2) — "
+                "invalid market data"
+            )
+            log.info("Gate [spread]: FAIL — %s", reason)
+            return False, reason
+
+        spread_cents = float(ask_cents - bid_cents)
+        spread_pct   = (spread_cents / ask_cents) * 100.0
+
+        # Effective EV accounts for early-exit cost (selling back at bid)
+        p_exit       = settings.EARLY_EXIT_PROBABILITY
+        effective_ev = raw_ev - (spread_cents / 100.0) * p_exit
+
+        max_spread = settings.MAX_SPREAD_CENTS
+
+        log.debug(
+            "Gate [spread] %s %s: bid=%d\u00a2 ask=%d\u00a2 spread=%.0f\u00a2 "
+            "(%.0f%% of ask)  raw_ev=%.1f\u00a2 eff_ev=%.1f\u00a2  "
+            "p_exit=%.2f  max=%.0f\u00a2",
+            asset, direction.upper(),
+            bid_cents, ask_cents, spread_cents, spread_pct,
+            raw_ev * 100, effective_ev * 100,
+            p_exit, max_spread,
+        )
+
+        if spread_cents > max_spread:
+            reason = (
+                f"Spread too wide: {spread_cents:.0f}\u00a2 "
+                f"(max {max_spread:.0f}\u00a2, {spread_pct:.0f}% of ask) "
+                f"for {asset} {direction.upper()} — "
+                f"raw_ev={raw_ev*100:.1f}\u00a2 eff_ev={effective_ev*100:.1f}\u00a2"
+            )
+            log.info("Gate [spread]: FAIL — %s", reason)
+            return False, reason
+
+        reason = (
+            f"Spread: {spread_cents:.0f}\u00a2 ({spread_pct:.0f}% of ask) — "
+            f"raw_ev={raw_ev*100:.1f}\u00a2 eff_ev={effective_ev*100:.1f}\u00a2"
+        )
+        log.info("Gate [spread]: PASS — %s", reason)
         return True, reason

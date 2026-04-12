@@ -266,8 +266,8 @@ class TradingBot:
                     time_into_window = now_ts - boundary
                     if time_into_window >= _MAX_TIME_IN or self._cycle_trades_placed:
                         break   # past entry window, or a trade was placed
-                    time_remaining = _MAX_TIME_IN - time_into_window
-                    sleep_for = min(_RETRY_INTERVAL, max(15, time_remaining - 10))
+                    time_remaining = _MAX_TIME_IN - time_into_window  # noqa: F841 (kept for log)
+                    sleep_for = _RETRY_INTERVAL
                     log.info(
                         "Still in entry window (%.0fs/%ds) — re-evaluating in %.0fs",
                         time_into_window, _MAX_TIME_IN, sleep_for,
@@ -327,6 +327,9 @@ class TradingBot:
                     "cycle_ts":     cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "btc_price":    self.feed.get_price_for("BTC") or existing.get("btc_price"),
                     "cycle_status": "max_positions",
+                    # Clear stale AI signals — no new ensemble ran this cycle
+                    "signals":      [],
+                    "last_signal":  None,
                 })
                 log.info("[DASHBOARD] market_watch refreshed (max_positions)")
             except Exception as exc:
@@ -340,8 +343,11 @@ class TradingBot:
                 existing = await self.db.get_market_watch() or {}
                 await self.db.set_market_watch({
                     **existing,
-                    "cycle_ts": cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "status": "stale_feed",
+                    "cycle_ts":    cycle_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "status":      "stale_feed",
+                    # Clear stale AI signals — no new ensemble ran this cycle
+                    "signals":     [],
+                    "last_signal": None,
                 })
             except Exception:
                 pass
@@ -552,11 +558,22 @@ class TradingBot:
 
         yes_ask = market.get("yes_ask") or 0
         no_ask  = market.get("no_ask")  or 0
-        log.info("Market %s: prices YES=%d¢ NO=%d¢", ticker, yes_ask, no_ask)
+        yes_bid = market.get("yes_bid") or 0
+        no_bid  = market.get("no_bid")  or 0
+        log.info(
+            "Market %s: YES=%d¢/%d¢ NO=%d¢/%d¢ (ask/bid)",
+            ticker, yes_ask, yes_bid, no_ask, no_bid,
+        )
 
-        # Skip markets with no prices at all — nothing to evaluate
+        # Skip markets with no real prices at all — nothing to evaluate.
+        # Also skip markets where both bid sides are 0: even if a synthetic ask
+        # was injected from last_price in kalshi_client, there are no buyers so
+        # any stop-loss exit would fail and the spread gate would block entry anyway.
         if yes_ask == 0 and no_ask == 0:
             log.info("Market %s: no ask prices from API — skipping (thin market)", ticker)
+            return
+        if yes_bid == 0 and no_bid == 0:
+            log.info("Market %s: both bid sides are 0 — no exit liquidity, skipping ensemble", ticker)
             return
 
         btc_data   = BtcData(
