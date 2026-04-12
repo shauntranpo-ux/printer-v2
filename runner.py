@@ -558,17 +558,46 @@ class TradingBot:
         no_ask  = market.get("no_ask")  or 0
         yes_bid = market.get("yes_bid") or 0
         no_bid  = market.get("no_bid")  or 0
+
+        # Kalshi's /markets list endpoint frequently returns 0 for all price fields
+        # even for actively traded markets. Fetch the live order book as a fallback.
+        if yes_ask == 0 and no_ask == 0:
+            try:
+                ob = await self.kalshi.get_order_book(ticker, depth=3)
+                yes_bids = ob.get("yes_bids", [])
+                no_bids  = ob.get("no_bids",  [])
+                yes_asks = ob.get("yes_asks", [])
+                no_asks  = ob.get("no_asks",  [])
+                if yes_asks:
+                    yes_ask = yes_asks[0]["price"]
+                elif no_bids:
+                    yes_ask = 100 - no_bids[0]["price"]
+                if no_asks:
+                    no_ask = no_asks[0]["price"]
+                elif yes_bids:
+                    no_ask = 100 - yes_bids[0]["price"]
+                if yes_bids and not yes_bid:
+                    yes_bid = yes_bids[0]["price"]
+                if no_bids and not no_bid:
+                    no_bid = no_bids[0]["price"]
+                if yes_ask or no_ask:
+                    log.info(
+                        "Market %s: order book \u2192 YES=%d\u00a2/%d\u00a2 NO=%d\u00a2/%d\u00a2 (ask/bid)",
+                        ticker, yes_ask, yes_bid, no_ask, no_bid,
+                    )
+                    market = {**market, "yes_ask": yes_ask, "yes_bid": yes_bid,
+                              "no_ask": no_ask, "no_bid": no_bid}
+            except Exception as exc:
+                log.debug("Order book fetch failed for %s: %s", ticker, exc)
+
         log.info(
-            "Market %s: YES=%d¢/%d¢ NO=%d¢/%d¢ (ask/bid)",
+            "Market %s: YES=%d\u00a2/%d\u00a2 NO=%d\u00a2/%d\u00a2 (ask/bid)",
             ticker, yes_ask, yes_bid, no_ask, no_bid,
         )
 
         # Skip markets with no price data at all — nothing to evaluate.
-        # Bid data is intentionally NOT checked here: Kalshi's /markets list endpoint
-        # frequently returns yes_bid=0/no_bid=0 even for actively traded markets.
-        # The spread gate fetches the live order book to get real bid prices.
         if yes_ask == 0 and no_ask == 0:
-            log.info("Market %s: no ask prices from API — skipping (thin market)", ticker)
+            log.info("Market %s: no ask prices from API or order book — skipping (thin market)", ticker)
             return
 
         btc_data   = BtcData(
