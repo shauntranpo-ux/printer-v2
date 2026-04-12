@@ -616,10 +616,19 @@ class TradingBot:
             ticker, yes_ask, yes_bid, no_ask, no_bid,
         )
 
-        # Skip markets with no real prices — cannot calculate EV or place orders.
+        # No real prices found from any source — still run the ensemble so AIs
+        # appear on the dashboard ("learn and adapt").  Use neutral 50¢ for the
+        # Market object so ensemble context is sane, but do NOT update the market
+        # dict.  EV check uses market.get("yes_ask") which stays 0, shows
+        # "no ask price", and blocks any trade from executing.
         if yes_ask == 0 and no_ask == 0:
-            log.info("Market %s: no ask prices from API, order book, or trades — skipping (no traded price found)", ticker)
-            return
+            log.info(
+                "Market %s: no ask price found — running ensemble with neutral 50\u00a2 "
+                "(trading blocked, signal display only)",
+                ticker,
+            )
+            yes_ask = 50
+            no_ask  = 50
 
         btc_data   = BtcData(
             price          = btc_price,
