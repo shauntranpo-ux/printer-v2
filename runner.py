@@ -510,40 +510,7 @@ class TradingBot:
     ) -> None:
         ticker = market["ticker"]
 
-        # Orderbook for bid/ask imbalance (reused in liquidity gate)
-        try:
-            ob = await self.kalshi.get_order_book(ticker)
-        except KalshiMarketClosedError:
-            log.debug("Market %s already closed — skipping", ticker)
-            return
-        except Exception as exc:
-            log.warning("Orderbook fetch failed for %s: %s", ticker, exc)
-            return
-
-        bid_vol   = sum(l["size"] for l in ob.get("yes_bids", []))
-        ask_vol   = sum(l["size"] for l in ob.get("yes_asks", []))
-        imbalance = bid_vol / (ask_vol + 1e-9)
-
-        # Refresh market ask prices from the live order book.
-        # Kalshi only exposes bids; asks are derived from the opposite side's best bid.
-        # yes_ask = 100 - best NO bid, no_ask = 100 - best YES bid (already done in client).
-        yes_asks = ob.get("yes_asks", [])
-        no_asks  = ob.get("no_asks",  [])
-        yes_bids = ob.get("yes_bids", [])
-        no_bids  = ob.get("no_bids",  [])
-        if yes_asks:
-            market["yes_ask"] = yes_asks[0]["price"]
-        elif no_bids:
-            market["yes_ask"] = 100 - no_bids[0]["price"]
-        if no_asks:
-            market["no_ask"] = no_asks[0]["price"]
-        elif yes_bids:
-            market["no_ask"] = 100 - yes_bids[0]["price"]
-        # Derive the other side if still missing
-        if market.get("yes_ask", 0) and not market.get("no_ask", 0):
-            market["no_ask"] = 100 - market["yes_ask"]
-        if market.get("no_ask", 0) and not market.get("yes_ask", 0):
-            market["yes_ask"] = 100 - market["no_ask"]
+        imbalance = 0.0
 
         try:
             close_dt = datetime.fromisoformat(
@@ -553,18 +520,18 @@ class TradingBot:
             log.warning("Invalid close_time for %s — skipping", ticker)
             return
 
-        # Time window guard: only enter between 30s and 600s into the 15m window.
-        # Below 30s: order book may not be published yet.
+        # Time window guard: only enter between 120s and 600s into the 15m window.
+        # Below 120s: market still opening, price discovery incomplete.
         # Above 600s: backtest shows late entries have lower win rates.
-        # Below 180s remaining: too close to expiry, time-decay risk.
+        # Below 240s remaining: too close to expiry, time-decay risk.
         now_utc      = datetime.now(timezone.utc)
         market_open  = close_dt - timedelta(minutes=15)
         time_in      = (now_utc - market_open).total_seconds()
         time_left    = (close_dt - now_utc).total_seconds()
 
-        if time_in < 30:
+        if time_in < 120:
             log.info(
-                "Market %s too new (%.0fs in, need 30s) — skipping", ticker, time_in
+                "Market %s too new (%.0fs in, need 120s) — skipping", ticker, time_in
             )
             return
         if time_in > 600:
@@ -572,9 +539,9 @@ class TradingBot:
                 "Market %s too far into session (%.0fs in, max 600s) — skipping", ticker, time_in
             )
             return
-        if time_left < 180:
+        if time_left < 240:
             log.info(
-                "Market %s too close to expiry (%.0fs left, need 180s) — skipping",
+                "Market %s too close to expiry (%.0fs left, need 240s) — skipping",
                 ticker, time_left,
             )
             return
@@ -592,8 +559,6 @@ class TradingBot:
         no_ask  = market.get("no_ask")  or 0
         if yes_ask or no_ask:
             log.debug("Market %s: prices YES=%d¢ NO=%d¢", ticker, yes_ask, no_ask)
-        else:
-            log.info("Market %s: order book empty — ensemble will evaluate from strike distance", ticker)
 
         btc_data   = BtcData(
             price          = btc_price,

@@ -276,7 +276,7 @@ def _adversarial_prompt(symbol: str) -> str:
         f"  • Is momentum likely to fade or reverse before expiry?\n"
         f"  • Is the strike too far given average candle velocity?\n"
         f"  • Are candles showing exhaustion (shrinking bodies, rising wicks)?\n"
-        f"  • Does order book imbalance contradict the price trend?\n\n"
+        f"\n"
 
         f"OUTPUT:\n"
         f"  After applying all penalties, output the direction that is actually more likely.\n"
@@ -297,7 +297,7 @@ class BtcData:
     price:          float           # current asset price in USD
     momentum:       float           # -1.0 to +1.0 from CoinbaseFeed.get_momentum_for()
     candles:        list[Candle]    # last 10 completed 15m candles
-    imbalance:      float           # bid_vol / ask_vol from order book
+    imbalance:      float           # always 0.0 — order book not used
     symbol:         str = "BTC"     # asset symbol — used in AI prompts
     current_candle: dict | None = None  # in-progress candle (live, incomplete)
 
@@ -488,20 +488,6 @@ class EnsembleEngine:
             trend = "UNKNOWN"
             candle_bias = "insufficient data"
 
-        # ── Order book signal ─────────────────────────────────────────────
-        # imbalance = YES-contract bid volume / NO-contract bid volume
-        # High = more YES buyers = bullish sentiment on this market
-        # Low  = more NO buyers  = bearish sentiment on this market
-        # NOTE: at extreme prices (YES=90¢) NO-buyers dominate (buying cheap NO);
-        # this is normal and does NOT mean the underlying is selling off.
-        imb = btc_data.imbalance
-        ob_signal = (
-            f"{imb:.2f}x — heavy YES-contract demand (bullish sentiment)" if imb > 1.5 else
-            f"{imb:.2f}x — mild YES-contract demand"                       if imb > 1.1 else
-            f"{imb:.2f}x — heavy NO-contract demand (bearish sentiment)"   if imb < 0.67 else
-            f"{imb:.2f}x — mild NO-contract demand"                        if imb < 0.9 else
-            f"{imb:.2f}x — balanced contract demand"
-        )
 
         # ── Completed candles table (all available, oldest → newest) ────────
         if candles:
@@ -555,7 +541,7 @@ class EnsembleEngine:
             implied_line  = f"Market implied P(YES): {yes_implied}%  ← use this to calculate your edge"
             task_edge     = f"Calculate your edge vs market implied {yes_implied}%."
         else:
-            kalshi_prices = "No market price available — order book empty"
+            kalshi_prices = "No market price available"
             implied_line  = "Market implied P(YES): unavailable — base probability on strike distance and momentum only"
             task_edge     = "No market price available. Base your probability solely on strike distance, momentum, and price action."
 
@@ -577,7 +563,6 @@ Last 2 hours (vs now):        {chg_2h}
 Trend (last 4 candles): {trend}
 Candle bias:   {candle_bias}
 RSI (Wilder-14): {rsi_str}
-Contract order book: {ob_signal}
 Momentum score: {btc_data.momentum:+.3f} (range -1 to +1)
 Avg candle volume: {avg_vol_str}  (per-candle deviation shown in history below)
 
