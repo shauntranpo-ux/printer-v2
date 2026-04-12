@@ -128,7 +128,7 @@ def _claude_prompt(symbol: str) -> str:
         "  c. Required > 2× average → pull probability 15 points toward 50.\n"
         "  d. Required > 1× average → pull probability 8 points toward 50.\n\n"
 
-        "Step R2 — TIME PENALTY (entry window is 0.5-8 min in, so 7-14.5 min remain):\n"
+        "Step R2 — TIME PENALTY (entry window is 0.5-10 min in, so 5-14.5 min remain):\n"
         "  • Time remaining < 8 min  → pull 10 points toward 50\n"
         "  • Time remaining < 10 min → pull 5 points toward 50\n"
         "  • Strike gap > 0.5%       → pull 10 points toward 50\n"
@@ -166,7 +166,7 @@ def _gpt_prompt(symbol: str) -> str:
         f"    c. Required > 2× avg/min → pull probability 15 points toward 50.\n"
         f"    d. Required > 1× avg/min → pull probability 8 points toward 50.\n"
         f"    Note: if price is ABOVE strike, holding flat wins — penalize only downside risk.\n\n"
-        f"  R2 — Time penalty (entry window is 0.5-8 min in, so 7-14.5 min remain):\n"
+        f"  R2 — Time penalty (entry window is 0.5-10 min in, so 5-14.5 min remain):\n"
         f"    • Time remaining < 8 min  → pull 10 points toward 50\n"
         f"    • Time remaining < 10 min → pull 5 points toward 50\n"
         f"    • Strike gap > 0.5%       → pull 10 points toward 50\n"
@@ -258,7 +258,7 @@ def _adversarial_prompt(symbol: str) -> str:
         f"  • Note: if price is ABOVE strike, required move is zero (holding flat wins);\n"
         f"    instead penalize only for significant downside momentum\n\n"
 
-        f"Time decay (entry window is 0.5-8 min in, so 7-14.5 min remain at evaluation):\n"
+        f"Time decay (entry window is 0.5-10 min in, so 5-14.5 min remain at evaluation):\n"
         f"  • Time remaining < 8 min  → pull 10 pts toward 50 (late entry, limited recovery time)\n"
         f"  • Time remaining < 10 min → pull 5 pts toward 50\n\n"
 
