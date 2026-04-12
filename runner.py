@@ -398,27 +398,31 @@ class TradingBot:
                 log.debug("Waited market %s expired — clearing", ticker)
                 self._wait_list.pop(ticker, None)
 
+            tasks = []
             for ticker in list(waited_tickers & market_by_ticker.keys()):
                 self._wait_list.pop(ticker, None)
                 if ticker in open_tickers:
                     continue
                 log.info("Re-evaluating waited market %s", ticker)
-                await self._evaluate_market(
+                tasks.append(self._evaluate_market(
                     market_by_ticker[ticker], asset_price, asset_momentum,
                     asset_ohlcv, open_tickers, asset_size_mult,
                     asset=asset, current_candle=asset_cur_candle,
-                )
+                ))
 
-            # Evaluate remaining new markets for this asset
+            # Evaluate remaining new markets for this asset in parallel
             for market in markets:
                 ticker = market["ticker"]
                 if ticker in open_tickers or ticker in self._wait_list:
                     continue
-                await self._evaluate_market(
+                tasks.append(self._evaluate_market(
                     market, asset_price, asset_momentum, asset_ohlcv,
                     open_tickers, asset_size_mult,
                     asset=asset, current_candle=asset_cur_candle,
-                )
+                ))
+
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
         self._cycle_markets_found = len(all_markets_found)
         print(f"Total markets scanned: {len(all_markets_found)} across {len(supported_assets)} assets")
@@ -534,18 +538,6 @@ class TradingBot:
             )
             return
 
-        # BTC knife-edge filter: skip markets where BTC is within 0.5% of strike.
-        # Backtest shows <0.5% distance has 43.3% WR — negative EV, models can't
-        # predict coin-flip outcomes at knife-edge strikes.
-        if asset == "BTC":
-            strike = float(market.get("strike_price") or 0)
-            if strike > 0 and abs(btc_price - strike) / strike < 0.002:
-                log.info(
-                    "Market %s: BTC knife-edge (price=%.0f strike=%.0f dist=%.3f%%) — skipping",
-                    ticker, btc_price, strike, abs(btc_price - strike) / strike * 100,
-                )
-                return
-
         # Market passed all timing checks — count it as evaluated
         self._cycle_markets_evaluated += 1
 
@@ -556,6 +548,12 @@ class TradingBot:
         # meaningless — they all return 50%/NO TRADE, burn API credits, and keep the
         # dashboard stuck on WAITING. Retry once after 10s before giving up.
         if not yes_ask and not no_ask:
+            if time_in + 15 > 570:
+                log.info(
+                    "Market %s: order book empty — no time for retry (%.0fs in) — skipping",
+                    ticker, time_in,
+                )
+                return
             log.info("Market %s: order book empty — retrying once in 10s", ticker)
             await asyncio.sleep(10)
             try:
@@ -586,6 +584,11 @@ class TradingBot:
                     ticker,
                 )
                 return
+
+        # --- Bot enabled gate (before ensemble to avoid burning API credits when OFF) ---
+        if not await self.db.get_bot_enabled():
+            log.debug("Bot is OFF — skipping ensemble for %s", ticker)
+            return
 
         btc_data   = BtcData(
             price          = btc_price,
@@ -711,14 +714,6 @@ class TradingBot:
                     gate_result.reason,
                     f"Gate [{gate_result.failed_gate}]",
                 )
-            return
-
-        # --- Execute trade (only when bot is enabled — off mode skips this) ---
-        if not await self.db.get_bot_enabled():
-            log.info(
-                "Bot in OFF mode — signal valid for %s but not trading",
-                ticker,
-            )
             return
 
         trade = await self.strategy.enter_trade(

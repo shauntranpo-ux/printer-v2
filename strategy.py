@@ -209,6 +209,10 @@ class Strategy:
                     attempt, _MAX_ATTEMPTS - 1, ticker,
                 )
 
+            log.info(
+                "[ORDER ATTEMPT] ticker=%s dir=%s contracts=%d ask=%d¢ size=$%.2f (attempt %d/%d)",
+                ticker, direction.upper(), contracts, ask_cents, bet_size, attempt + 1, _MAX_ATTEMPTS,
+            )
             try:
                 order_result = await self._kalshi.place_order(
                     ticker=ticker,
@@ -221,13 +225,13 @@ class Strategy:
                 # Permanent errors — don't retry (retrying won't fix these)
                 if any(kw in exc_str for kw in ("insufficient", "balance", "funds", "not enough")):
                     log.error(
-                        "Market order failed (insufficient balance) for %s: %s — not retrying",
+                        "[ORDER RESULT] FAILED (insufficient balance) for %s: %s — not retrying",
                         ticker, exc,
                     )
                     return None
                 # Transient API / network failure — retry
                 log.error(
-                    "Market order attempt %d/%d failed for %s: %s",
+                    "[ORDER RESULT] FAILED attempt %d/%d for %s: %s",
                     attempt + 1, _MAX_ATTEMPTS, ticker, exc,
                 )
                 if attempt == _MAX_ATTEMPTS - 1:
@@ -240,8 +244,10 @@ class Strategy:
             final_status = order_result.get("status", "unknown")
             if final_status in ("filled", "partially_filled", "executed"):
                 log.info(
-                    "Market order filled — %s  attempt %d/%d  status=%s",
-                    ticker, attempt + 1, _MAX_ATTEMPTS, final_status,
+                    "[ORDER RESULT] FILLED — ticker=%s status=%s fill=%d¢ attempt %d/%d",
+                    ticker, final_status,
+                    order_result.get("filled_price") or ask_cents,
+                    attempt + 1, _MAX_ATTEMPTS,
                 )
                 break
 
@@ -254,8 +260,7 @@ class Strategy:
                 except Exception as cancel_exc:
                     log.warning("Failed to cancel order %s: %s", order_id, cancel_exc)
             log.warning(
-                "Market order for %s placed but unfilled (status: %s) — "
-                "no counter-party, not retrying",
+                "[ORDER RESULT] UNFILLED — ticker=%s status=%s — no counter-party, not retrying",
                 ticker, final_status,
             )
             await self._telegram.send_error(
